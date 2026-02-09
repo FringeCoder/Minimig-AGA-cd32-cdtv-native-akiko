@@ -169,6 +169,8 @@ assign HDMI_FREEZE = 0;
 assign HDMI_BLACKOUT = 0;
 assign HDMI_BOB_DEINT = 0;
 
+reg mister_floppy_detected;
+
 `include "build_id.v" 
 localparam CONF_STR = {
 	"Minimig;UART115200:230400,MIDI;",
