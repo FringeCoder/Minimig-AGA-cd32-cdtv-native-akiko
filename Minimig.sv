@@ -226,7 +226,7 @@ hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 	.HPS_BUS({HPS_BUS[48:42],ce_pix,HPS_BUS[40:0]}),
 
 	.status(status),
-	.status_menumask({mt32_cfg,mt32_available}),
+	.status_menumask({mister_floppy_detected, mt32_cfg,mt32_available}),
 	.info_req(mt32_info_req),
 	.info(mt32_info_disp),
 
@@ -666,9 +666,14 @@ wire  [5:0] ide_c_req;
 wire [15:0] ide_c_readdata;
 wire        ide_c_led;
 wire        ide_ena;
+wire        user_port_mode;
 
 wire [15:0] toccata_aud_left;
 wire [15:0] toccata_aud_right;
+
+wire [6:0] IndirectUserOutmt32;
+wire [6:0] IndirectUserOutFlop;
+assign USER_OUT = user_port_mode ? IndirectUserOutFlop : IndirectUserOutmt32;
 
 minimig minimig
 (
@@ -785,7 +790,12 @@ minimig minimig
 	.ide_write    (ide_wr           ),
 	.ide_writedata(ide_dout         ),
 	.ide_read     (ide_rd           ),
-	.ide_readdata (ide_c_readdata   )
+	.ide_readdata (ide_c_readdata   ),
+		
+	.USER_IN      (USER_IN          ),
+	.USER_OUT     (IndirectUserOutFlop),
+	.user_port_mode (user_port_mode),
+	.mister_floppy_detected(mister_floppy_detected)
 );
 
 // power led control
@@ -1057,7 +1067,8 @@ end
 
 ////////////////////////////  MT32pi  ////////////////////////////////// 
 
-wire        mt32_reset    = status[32] | reset;
+reg   userport_change_reset;
+wire        mt32_reset    = status[32] | reset | userport_change_reset;
 wire        mt32_disable  = status[33];
 wire        mt32_mode_req = status[34];
 wire  [1:0] mt32_rom_req  = status[36:35];
@@ -1078,6 +1089,9 @@ wire mt32_mute = mt32_available &  mt32_disable;
 mt32pi mt32pi
 (
 	.*,
+	.USER_IN(USER_IN),
+	.USER_OUT(IndirectUserOutmt32),
+
 	.CE_PIXEL(ce_pix_mt32),
 	.reset(mt32_reset),
 	.midi_tx(midi_tx | mt32_mute)
@@ -1088,8 +1102,14 @@ wire  [4:0] mt32_cfg = (mt32_mode == 'hA2) ? {mt32_sf[2:0],  2'b10} :
 
 reg mt32_info_req;
 reg [3:0] mt32_info_disp;
+reg last_userport_mode;
 always @(posedge clk_sys) begin
 	reg old_mode;
+	
+	userport_change_reset <= 0;
+	
+	last_userport_mode <= user_port_mode;
+	if (last_userport_mode != user_port_mode) userport_change_reset <= 1;
 
 	old_mode <= mt32_newmode;
 	mt32_info_req <= (old_mode ^ mt32_newmode) && (mt32_info == 1);
