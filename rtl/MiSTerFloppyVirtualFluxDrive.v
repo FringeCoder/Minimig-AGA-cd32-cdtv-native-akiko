@@ -1,6 +1,6 @@
 //////////////////////////////////////////////////////////////////////////////
 // MiSTer Floppy Virtual Floppy Drive                                       //
-// Copyright (C) RobSmithDev 2022-2025                                      //
+// Copyright (C) RobSmithDev 2022-2026                                      //
 // https://mister.robsmithdev.co.uk                                         //
 //////////////////////////////////////////////////////////////////////////////
 
@@ -14,11 +14,9 @@ Data format is WORDS, each BYTE in the word is:
 	0=INDEX
 	1=Simple delay of 1/7mhz
 	2=Disable actual flux transition on next byte
-	             (DISABLED and NOT IN USE) 3=Enable weak-bit generator for duration specified in next byte
+	             (DISABLED and NOT IN USE) 
+   CURRENTLY COMMENTED OUT as NOT NEEDED: 3=Enable weak-bit generator for duration specified in next byte
 	>2 Time until flux transition at 7mhz clock (ie: 7=1us). 
-	
-
-
 */
 
 module MiSTerFloppyVirtualFluxDrive (

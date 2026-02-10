@@ -1,12 +1,12 @@
 //////////////////////////////////////////////////////////////////////////////
 // MiSTer Floppy                                                            //
-// Copyright (C) RobSmithDev 2022-2025                                      //
+// Copyright (C) RobSmithDev 2022-2026                                      //
 // https://mister.robsmithdev.co.uk                                         //
 //////////////////////////////////////////////////////////////////////////////
 //
-// This module provides direct access to the pins on the DrawBridge board
+// This module provides direct access to the pins on the MiSTer Floppy board
 // via the user port.  This should not be used directly,
-// instead, use DrawbridgeIBM_Interface, DrawbridgeSHUGART_Interface
+// instead, use MiSTerFloppyIBM, MiSTerFloppySHUGART
 //
 // **Straight pin configuration**
 // Pin | USB Name | Signal

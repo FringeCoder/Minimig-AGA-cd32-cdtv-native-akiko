@@ -267,7 +267,7 @@ module minimig
 	input   [6:0] USER_IN,
 	output  [6:0] USER_OUT,
 	output  user_port_mode,
-	output  mister_floppy_detected
+	output   [1:0] mister_floppy_status
 );
 
 
@@ -530,11 +530,11 @@ paula PAULA1
 	.floppy_speed_allowed(floppy_config[0]),
 	.floppy_speed(floppy_speed),
 	
-	.enable_mister_floppy(user_port_mode),
-	
+	.enable_mister_floppy(user_port_mode),	
+	.mister_floppy_status(mister_floppy_status),
+
 	.USER_IN(USER_IN),
 	.USER_OUT(USER_OUT),
-	.mister_floppy_detected(mister_floppy_detected)
 );
 
 wire [2:0] cachecfg_pre;

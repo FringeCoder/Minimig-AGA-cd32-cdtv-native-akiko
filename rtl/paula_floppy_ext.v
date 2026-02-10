@@ -1,6 +1,6 @@
 //////////////////////////////////////////////////////////////////////////////
 // MiSTer Floppy                                                            //
-// Copyright (C) RobSmithDev 2022-2023                                      //
+// Copyright (C) RobSmithDev 2022-2026                                      //
 // The majority of this file was originally created by Lukage               //
 // Updated to provide enough information for DSKBYR register to be correct  //
 // https://mister.robsmithdev.co.uk                                         //

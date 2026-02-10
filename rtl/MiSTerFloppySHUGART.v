@@ -1,10 +1,10 @@
 //////////////////////////////////////////////////////////////////////////////
 // MiSTer Floppy                                                            //
-// Copyright (C) RobSmithDev 2022-2025                                      //
+// Copyright (C) RobSmithDev 2022-2026                                      //
 // https://mister.robsmithdev.co.uk                                         //
 //////////////////////////////////////////////////////////////////////////////
 //
-// This module provides an SHUGART compatiable interface to the DrawBridge board
+// This module provides an SHUGART compatiable interface to the the MiSTer Floppy board
 // This module will automatically convert internally the signals
 // depending on what type of drive is actually connected.
 //
@@ -42,7 +42,8 @@ module MiSTerFloppySHUGART(
 	
 	input i_reset,
 	
-	output o_detected
+	output o_detected,
+	output o_PinIBMDrive
 );
 
 parameter CLK_Freq = 50_000_000;	//	50 MHz
@@ -50,7 +51,6 @@ parameter AmigaMode = 0;		// Set to 1 if using on Minimig etc
 
 wire o_nPin34;
 wire o_nPin2;
-wire o_PinIBMDrive;
 wire o_nMTR123;
 
 wire i_nPin12;

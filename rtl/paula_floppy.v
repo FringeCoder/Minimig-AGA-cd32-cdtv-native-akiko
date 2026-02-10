@@ -123,7 +123,7 @@ module paula_floppy
 	input   [6:0] USER_IN,
 	output  [6:0] USER_OUT,
 	
-	output  mister_floppy_detected
+	output	[1:0]  mister_floppy_status  // bit 0=Detected, Bit1= running in IBM Drive mode (compared to Shuggart)
 );
 
 
@@ -356,7 +356,8 @@ MiSTerFloppySHUGART #(28687500, 1) db(
 	.i_nDir(direc),
 	.i_nStep(_step),	
 	.i_reset(reset | ~enable_mister_floppy),
-	.o_detected(mister_floppy_detected)
+	.o_detected(mister_floppy_status[0]),
+	.o_PinIBMDrive(mister_floppy_status[1])
 );
 
 

@@ -119,7 +119,7 @@ module paula
 	output        floppy_frd,
 	input   [6:0] USER_IN,
 	output  [6:0] USER_OUT,
-	output mister_floppy_detected
+	output [1:0] mister_floppy_status
 );
 //--------------------------------------------------------------------------------------
 
@@ -291,7 +291,7 @@ paula_floppy pf1
 	
 	.USER_IN(USER_IN),
 	.USER_OUT(USER_OUT),
-	.mister_floppy_detected(mister_floppy_detected)
+	.mister_floppy_status(mister_floppy_status)
 );
 
 //instantiate audio controller
