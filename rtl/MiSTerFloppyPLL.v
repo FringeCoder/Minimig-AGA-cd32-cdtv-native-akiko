@@ -4,7 +4,8 @@
 // https://mister.robsmithdev.co.uk                                         //
 //////////////////////////////////////////////////////////////////////////////
 // The majority of this file was originally created by Lukage               //
-// Updated to provide enough information for DSKBYR register to be correct  //
+// Updated to provide enough information for DSKBYR register to be correct  // 
+// And to resolve the over-aggressive clock search                          //
 //////////////////////////////////////////////////////////////////////////////
 
 // TODO: GCR
@@ -176,12 +177,22 @@ begin
 					add_rem <= 3'd0;
 				end
 
-				if (phase_rem)
+				/*if (phase_rem)
 					adder <= adder + 11'd34 + add_rem;
 				else if (phase_add)
 					adder <= adder + 11'd258 + add_rem;
 				else
+					adder <= adder + up_down_ctr + add_rem; */
+				// The original values here were too agressive and caused the weak-bit code in Dungeon Master to fail
+				// I suspect they came from the Amiga Replacement Project which came from Patent #4,780,844.
+				// As this is an 11-bit adder this makes sense.
+				if (phase_rem)
+					adder <= adder + 11'd90 + add_rem;
+				else if (phase_add)
+					adder <= adder + 11'd202 + add_rem;
+				else
 					adder <= adder + up_down_ctr + add_rem;
+					
 
 				// 146 (average) is approx 2.05uS.  133 is approx 1.87us and 159 is approx 2.24us
 				// This allows the disk speed to vary between 267 and 320 RPM for PAL (300 is the spec)
