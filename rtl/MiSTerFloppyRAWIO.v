@@ -176,10 +176,10 @@ assign _selectChanging = actualActiveDrive != idealActiveDrive;
 localparam        IO_SDA					= 0;
 localparam 			IO_WRITEDATA			= 1;
 localparam			IO_SCL					= 3;
-localparam        IO_PIN5				   = 2;
-localparam			IO_PIN8              = 5;
+localparam        IO_PIN5				    = 2;
+localparam			IO_PIN8                 = 5;
 localparam			IO_PIN6					= 6;
-localparam			IO_PIN9				   = 4;
+localparam			IO_PIN9				    = 4;
 
 // Cable type detect
 reg isSwappedCable = 0;
@@ -190,7 +190,7 @@ assign wWriteGate = _selectChanging ? 1'b1 : i_nWriteGate;
 
 // Output or enable reading on those pins based on cable swap
 assign USER_OUT[IO_PIN6] 			= isSwappedCable ? 1'b1 : wWriteGate;
-assign USER_OUT[IO_PIN8] 			= (progCounter == SW_CABLESENSE) ? 1'b0 : (isSwappedCable ? 1'b1 : i_nHeadSelect);
+assign USER_OUT[IO_PIN8] 			= (currentWriteMode == SW_CABLESENSE) ? 1'b0 : (isSwappedCable ? 1'b1 : i_nHeadSelect);
 assign USER_OUT[IO_PIN5] 			= isSwappedCable ? wWriteGate : 1'b1;
 assign USER_OUT[IO_PIN9] 			= isSwappedCable ? i_nHeadSelect : 1'b1;
 // Handle input pins
@@ -442,11 +442,11 @@ always@(posedge i_core_cpu_clk)begin
 									currentWriteMode <= SW_CABLESENSE;	   //	Afterwards, note we're in cable sense mode
 									queueRead		 				<= 0;
 									queueWrite		 				<= 0;
-									i2cDataWrite8Bit2				<= 8'hFF;   // Reset this
+									i2cDataWrite8Bit2				<= 8'hFF;   
 							   end
 							SW_CABLESENSE: begin
 									// If we get here, then cable sense has finished 
-									isSwappedCable <= !i2cDataRead[IOEXP_CABLEDETECT];									
+									isSwappedCable <= i2cDataRead[IOEXP_CABLEDETECT];									
 									currentWriteMode <= SW_RUNNING;
 									detected <= 1; // working!
 								end
