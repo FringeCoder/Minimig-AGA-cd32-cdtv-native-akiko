@@ -38,7 +38,8 @@ module MiSTerFloppyIBM(
 	
 	output o_error,
 	output o_detected,
-	output o_PinIBMDrive
+	output o_PinIBMDrive,
+	output o_nSwappedCable
 );
 
 
@@ -73,7 +74,6 @@ parameter CLK_Freq = 50_000_000;	//	50 MHz
 		.o_nWriteProtected(o_nWriteProtected),
 		.o_nPin34(o_nPin34),
 		.o_nPin2(o_nPin2),
-
 		.i_nPin12(i_nPin12),
 		.i_nPin14(i_nPin14),
 		.i_nPin16(i_nPin16),		
@@ -88,7 +88,8 @@ parameter CLK_Freq = 50_000_000;	//	50 MHz
 		.o_error(o_error),
 
 		.o_PinIBMDrive(o_PinIBMDrive),
-		.o_detected(o_detected),		
+		.o_detected(o_detected),
+		.o_nSwappedCable(o_nSwappedCable) 
 		);
 		
 			

@@ -169,7 +169,7 @@ assign HDMI_FREEZE = 0;
 assign HDMI_BLACKOUT = 0;
 assign HDMI_BOB_DEINT = 0;
 
-reg [1:0] mister_floppy_status;
+reg [2:0] mister_floppy_status;
 
 `include "build_id.v" 
 localparam CONF_STR = {
@@ -228,7 +228,7 @@ hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 	.HPS_BUS({HPS_BUS[48:42],ce_pix,HPS_BUS[40:0]}),
 
 	.status(status),
-	.status_menumask({mister_floppy_status, mt32_cfg,mt32_available}),
+	.status_menumask({mister_floppy_status, mt32_cfg, mt32_available}),
 	.info_req(mt32_info_req),
 	.info(mt32_info_disp),
 

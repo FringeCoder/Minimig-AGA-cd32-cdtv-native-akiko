@@ -43,7 +43,8 @@ module MiSTerFloppySHUGART(
 	input i_reset,
 	
 	output o_detected,
-	output o_PinIBMDrive
+	output o_PinIBMDrive,
+	output o_nSwappedCable
 );
 
 parameter CLK_Freq = 50_000_000;	//	50 MHz
@@ -115,7 +116,8 @@ MiSTerFloppyRAWIO #(CLK_Freq) dbRaw(
 	.i_nMTR123(o_nMTR123),
 	.i_reset(i_reset),
 	.o_detected(o_detected),
-	.o_error(o_error)
+	.o_error(o_error),
+	.o_nSwappedCable(o_nSwappedCable)
 );
 	
 reg _mtr123;

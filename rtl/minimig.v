@@ -267,7 +267,7 @@ module minimig
 	input   [6:0] USER_IN,
 	output  [6:0] USER_OUT,
 	output  user_port_mode,
-	output   [1:0] mister_floppy_status
+	output   [2:0] mister_floppy_status
 );
 
 

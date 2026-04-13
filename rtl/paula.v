@@ -119,7 +119,7 @@ module paula
 	output        floppy_frd,
 	input   [6:0] USER_IN,
 	output  [6:0] USER_OUT,
-	output [1:0] mister_floppy_status
+	output [2:0] mister_floppy_status
 );
 //--------------------------------------------------------------------------------------
 

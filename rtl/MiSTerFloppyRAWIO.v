@@ -7,17 +7,19 @@
 // This module provides direct access to the pins on the MiSTer Floppy board
 // via the user port.  This should not be used directly,
 // instead, use MiSTerFloppyIBM, MiSTerFloppySHUGART
+// NOTE: On the MiSTer Floppy port, the pin names are all as if a crossover cable was connected
+//       meaning from the MiSTer, a crosseed cable looks like a straight one.
 //
-// **Straight pin configuration**
-// Pin | USB Name | Signal
-// ----+----------+--------------
-// 0   | D+       | I/O I2C_SDA
-// 1   | D-       | O   Write Data
-// 2   | TX-      | I   Index
-// 3   | GND_d    | O   I2C_SCL
-// 4   | RX+      | I   Read Data
-// 5   | RX-      | O   HEAD/SIDE
-// 6   | TX+      | O   Write Gate IO6
+// IO  | USB Name | Signal Name         | CROSSED  | STRAIGHT 
+// ----+----------+---------------------+----------+-----------
+// 0   | D+       | I/O I2C_SDA         |   3      |   3
+// 1   | D-       | O   Write Data      |   2      |   2
+// 3   | GND_d    | O   I2C_SCL         |   7      |   7  
+// 2   | TX-      | I   Index           |   8      |   5
+// 5   | RX-      | O   HEAD/SIDE       |   5      |   8
+// 4   | RX+      | I   Read Data       |   6      |   9
+// 6   | TX+      | O   Write Gate IO6  |   9      |   6
+
 
 /* The above cable pin choice was great when I was using a Type B style connector on the PCB end, but I switched it to a type A
    to match the MT32-Pi and discovered theres two types of cable. This means with some cables the following pairs can swap:
@@ -27,7 +29,7 @@
 	Cable detect is simple. I added a connection between the original HEAD/SIDE pin and one of the spare inputs on the port expander
 	During startup I pull the head line low and see if it does on the port expander. If it does its wired straight, if not, its wired swapped
 	Note: The Type-A PCB is designed to take swapped cables by default because I didnt realise this was an issue.
-
+	
 	
 The port expander can operate in Byte Mode or Sequential Mode
 With byte mode you can set an address and keep reading/writing without ending for very fast writing or polling.
@@ -90,7 +92,8 @@ module MiSTerFloppyRAWIO (
 	input i_reset,						// Reset the interface
 	
 	output o_detected,				// Set to '1' when MiSTer Floppy has been detected
-	output o_error 					// Set to '1' when for 200ms during I2C reset if an error occurs
+	output o_error, 					// Set to '1' when for 200ms during I2C reset if an error occurs
+	output o_nSwappedCable			// Which type of cable in use
 );
 
 parameter CLK_Freq = 50_000_000;	//	default 50 MHz
@@ -176,29 +179,33 @@ assign _selectChanging = actualActiveDrive != idealActiveDrive;
 localparam        IO_SDA					= 0;
 localparam 			IO_WRITEDATA			= 1;
 localparam			IO_SCL					= 3;
-localparam        IO_PIN5				    = 2;
-localparam			IO_PIN8                 = 5;
+localparam			IO_PIN8              = 5;
+localparam			IO_PIN9				   = 4;
+localparam        IO_PIN5				   = 2;
 localparam			IO_PIN6					= 6;
-localparam			IO_PIN9				    = 4;
 
 // Cable type detect
-reg isSwappedCable = 0;
+reg nSwappedCable = 0;    // 0 for Swapped, 1 for straight
+assign o_nSwappedCable = nSwappedCable;
 
 // OUTPUT Wires
 wire wWriteGate;
 assign wWriteGate = _selectChanging ? 1'b1 : i_nWriteGate;
 
 // Output or enable reading on those pins based on cable swap
-assign USER_OUT[IO_PIN6] 			= isSwappedCable ? 1'b1 : wWriteGate;
-assign USER_OUT[IO_PIN8] 			= (currentWriteMode == SW_CABLESENSE) ? 1'b0 : (isSwappedCable ? 1'b1 : i_nHeadSelect);
-assign USER_OUT[IO_PIN5] 			= isSwappedCable ? wWriteGate : 1'b1;
-assign USER_OUT[IO_PIN9] 			= isSwappedCable ? i_nHeadSelect : 1'b1;
+assign USER_OUT[IO_PIN6] 				= 															   nSwappedCable ? 1'b1 			: wWriteGate              ;
+assign USER_OUT[IO_PIN8] 				= (currentWriteMode == SW_CABLESENSE) ? 1'b0 : (nSwappedCable ? 1'b1 			: i_nHeadSelect            );
+assign USER_OUT[IO_PIN5] 				= 																nSwappedCable ? i_nHeadSelect : 1'b1;
+assign USER_OUT[IO_PIN9] 				= 																nSwappedCable ? wWriteGate 	: 1'b1;
+
+
 // Handle input pins
-assign o_nReadData 					= _selectChanging ? 1'b1 : (isSwappedCable ? USER_IN[IO_PIN6] : USER_IN[IO_PIN9]);
-assign o_nIndex 						= _selectChanging ? 1'b1 : (isSwappedCable ? USER_IN[IO_PIN8] : USER_IN[IO_PIN5]);
+assign o_nReadData 						= _selectChanging ? 1'b1 : (nSwappedCable ? USER_IN[IO_PIN6] : USER_IN[IO_PIN9]);
+assign o_nIndex 							= _selectChanging ? 1'b1 : (nSwappedCable ? USER_IN[IO_PIN8] : USER_IN[IO_PIN5]);
 
 // Setup other I/O
-assign USER_OUT[IO_WRITEDATA] 	= _selectChanging ? 1'b1 : i_nWriteData;
+assign USER_OUT[IO_WRITEDATA] 		= _selectChanging ? 1'b1 : i_nWriteData;
+
 
   
 assign o_PinIBMDrive		= _o_PinIBMDrive;
@@ -312,7 +319,7 @@ always@(posedge i_core_cpu_clk)begin
 		drive2Values 	<= 4'b1111;
 		drive3Values 	<= 4'b1111;
 		selectedDriveRead <= 0;		
-		isSwappedCable <= 0;
+		nSwappedCable  <= 0;
 		m_queueBusy 	<= 0;
 		lastWasReading <= 0;
 		detected 		<= 0;
@@ -358,7 +365,7 @@ always@(posedge i_core_cpu_clk)begin
 							progCounter 					<= S_WRITE_SETUP;
 							currentWriteMode 				<= SW_IOCON;
 							lastActivityLED 				<= 1;
-							isSwappedCable					<= 0;
+							nSwappedCable					<= 0;
 														
 							lastWasReading					<= 0;							
 					 end	
@@ -446,7 +453,7 @@ always@(posedge i_core_cpu_clk)begin
 							   end
 							SW_CABLESENSE: begin
 									// If we get here, then cable sense has finished 
-									isSwappedCable <= i2cDataRead[IOEXP_CABLEDETECT];									
+									nSwappedCable  <= i2cDataRead[IOEXP_CABLEDETECT];									
 									currentWriteMode <= SW_RUNNING;
 									detected <= 1; // working!
 								end
