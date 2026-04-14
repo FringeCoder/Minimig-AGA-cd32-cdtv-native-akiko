@@ -122,8 +122,14 @@ reg [15:0] word_read;
 
 assign bitdetected = dsk_bit;
 
+// 28mhz version of edge finder, just incase, shouldn't be needed
+reg [3:0] read28mhz;
+
+
 always @(posedge clk)
 begin		
+	 read28mhz <= {read28mhz[2:0], _dskrd};
+	 
 	 if (clk7_en) begin
 		word_ready <= 0;
 
@@ -136,7 +142,7 @@ begin
 			
 			// Pause while interface is busy (doesnt seem to be required, but it "sits better" with me)
 			if (~pause) begin
-				_dskrd_reg <= ~_dskrd;
+				_dskrd_reg <= ~(&read28mhz);
 				_dskrd_dly <= _dskrd_reg;
 
 				roll_over_dly <= roll_over;     // adder[10] & adder[9] & adder[8];
@@ -305,7 +311,7 @@ always @(posedge clk) begin
 			if (write_bit == 1'b1) begin
 				if (write_dly == 3'd0) begin
 					_dkwd <= 1'b0;
-					write_tail <= 3'd4;             // delay 4 clk
+					write_tail <= 4'd4;             // delay 5 clk
 				end else begin
 					write_dly <= write_dly - 3'd1;
 				end
