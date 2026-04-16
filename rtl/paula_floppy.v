@@ -286,6 +286,9 @@ reg resetDiskByteReady = 1'b0;		// Set to 1 to reset the diskByteReady status
 wire syncWordNOW;						   // Set to 1 if the DISKSYNC is actually valid literally right now!
 wire bitdetected;							//
 wire _dskrd;								// Flux data OUT from real floppy drive
+wire interfaceBusy;
+wire _dkwd;
+wire _dkwe;
 
 MiSTerFloppyPLL PaulaFloppyPLL (
 	.clk(clk),
@@ -323,9 +326,6 @@ MiSTerFloppyPLL PaulaFloppyPLL (
 );
 
 
-wire interfaceBusy;
-wire _dkwd;
-wire _dkwe;
 
 
 // NTSC Amigas had 28.63636 clock whereas PAL Amigas had 28.37516Mhz clocks

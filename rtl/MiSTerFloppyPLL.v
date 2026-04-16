@@ -48,9 +48,10 @@ module MiSTerFloppyPLL (
 
 
 reg _dkwd;
+wire _dkweDelay;
 assign _writeData = _dkwd;
 reg _dkwe;
-assign _writeGate = _dkwe;
+assign _writeGate = _dkwe & _dkweDelay;
 
 
 reg         _dskrd_reg = 1'b1;
@@ -89,7 +90,6 @@ wire			ctr_rem;
 
 reg [15:0]	write_shift = 16'd0;
 reg [3:0]	write_ctr = 4'd0;
-reg [2:0]	write_ctr2 = 3'd0;
 reg [3:0]   write_ptr = 4'd0;
 reg			prev_bit;
 
@@ -133,11 +133,15 @@ begin
 	 if (clk7_en) begin
 		word_ready <= 0;
 
-		if (reset) up_down_ctr <= 8'd146;
+		if (reset) begin
+			up_down_ctr <= 8'd146;
+			_dkwe <= 1'b1;
+		end;
+
 				
 		if (resetDiskByteReady | reset) _diskByteReady <= 0;
 		
-		if (selected) begin
+		if (selected) begin   // Selected means NOT writing, and selected
 			_dkwe <= 1'b1;     // Ensure writing is turned off
 			
 			// Pause while interface is busy (doesnt seem to be required, but it "sits better" with me)
@@ -189,6 +193,7 @@ begin
 					adder <= adder + 11'd258 + add_rem;
 				else
 					adder <= adder + up_down_ctr + add_rem; */
+					
 				// The original values here were too agressive and caused the weak-bit code in Dungeon Master to fail
 				// I suspect they came from the Amiga Replacement Project which came from Patent #4,780,844.
 				// As this is an 11-bit adder this makes sense.
@@ -264,8 +269,8 @@ begin
 		end else if (trackwr) begin
 			// Prevent write start until the drive interface is ready
 			if ((~pause) && (~fifo_empty)) begin
-				_dkwe <= 1'b0;
-			end
+				_dkwe <= 1'b0;				
+			end			
 		end else if ((_dkwe == 1'b0) && (trackwr == 1'b0) && (ext_floppy_rd_del)) begin
 			_dkwe <= 1'b1;   // Turn OFF Writing
 		end 
@@ -273,79 +278,96 @@ begin
 end
 
 
+/* This EXACTLY matches what paula does when it outputs the floppy data, I measured it!
+   Paula does something a little weird. When Write Gate goes low, theres ~5.6us before it starts sending any data. I suspect an internal 3-bit fifo	
+	This causes the data to actually lag by three bits, meaning the final three bits get written out AFTER write gate is de-aserted meaning they're always lost.
+*/	
+
+reg lastWriting;
+reg [6:0] extraBits;
+assign _dkweDelay = (extraBits < 7) && (_dkwe && lastWriting);
+
 always @(posedge clk) begin
 	if (clk7_en) begin   // 14 clocks is 2uS
 	
-		// if _dkwe is set then DMA has been enabled so is expecting to be writing
-		if (~_dkwe) begin						  
-			if (write_stb) begin                  // write_ctr == 4'd0
-						
+		lastWriting <= _dkwe;
+		
+		if (reset) begin
+			extraBits <= 0;			
+		end else			
+		if  (_dkwe && ~lastWriting) begin
+			// When _dkwe is deasserted, Paula still has an entire word that needs writing, although to match actual hardware, 
+			// the last three don't get written, and _dkwe is de-aserted half way between the remaining 3rd and 4th pulse
+			extraBits <= 6'd33;
+		end else
+		if (_dkwe && extraBits && (write_ctr == 4'd0 || write_ctr == 4'd5)) extraBits<= extraBits-6'd1;   
+
+		if (~_dkwe || extraBits || (_dkwe && ~lastWriting)) begin			
+
+			if (write_ctr == 4'd0) begin
 				if (write_ptr == 4'd0) begin
 					dma_rd <= 1'b1;
 					write_shift <= ext_floppy_tx;    // Copy 16-bits of MFM
 				end else begin
 					write_shift <= write_shift << 1; // Shift 1 bit left to get to the next bit
 				end				
-				write_ptr <= write_ptr + 4'd1;      // Inc counter - this is to track each of the 16 bits in the supplied word
-											
-				prev_bit <= write_shift[15];        // store what was in the msb
-
+				write_ptr <= write_ptr + 4'd1;      // Inc counter - this is to track each of the 16 
+				prev_bit <= write_shift[15];
+			
 				if (write_shift[15] == 1'b1) begin   
 					if (prev_bit == 1'b1) begin       
 						case (precomp[1:0])
-							2'b00: write_dly = 3'd0;	//0 ns
-							2'b01: write_dly = 3'd1;	//140 ns
-							2'b10: write_dly = 3'd2;	//280 ns
-							2'b11: write_dly = 3'd4;	//560 ns
+							2'b00: write_dly <= 3'd0;	//0 ns
+							2'b01: write_dly <= 3'd1;	//140 ns
+							2'b10: write_dly <= 3'd2;	//280 ns
+							2'b11: write_dly <= 3'd4;	//560 ns
 						endcase
 					end else begin
-						write_dly = 3'd0;
+						write_dly <= 3'd0;
 					end
 					write_bit <= 1'b1;
 				end
-			end else begin
+			end else
+			begin
 				dma_rd <= 1'b0;
-			end			
+			end
 			
-			// Handle data pulse to disk - 
-			if (write_bit == 1'b1) begin
-				if (write_dly == 3'd0) begin
-					_dkwd <= 1'b0;
-					write_tail <= 4'd4;             // delay 5 clk
-				end else begin
+			if (write_bit) begin			
+				if (write_dly) begin
 					write_dly <= write_dly - 3'd1;
+				end else
+				begin
+					_dkwd <= 0;
+					write_tail <= 3'd1;   
+					write_bit <= 0;
 				end
-				if (write_tail == 3'd0) begin
-					_dkwd <= 1'b1;
-					write_bit <= 1'b0;
-				end else begin
-					write_tail <= write_tail - 3'd1;
-				end
+			end else
+			if (write_tail) begin
+				write_tail <= write_tail - 3'd1;				 
+			end else 
+			begin
+				_dkwd <= 1;
 			end
 						
 			if (write_ctr == 4'd0) begin
-				if (write_ctr2 == 3'd4) begin
-					write_ctr <= 4'd14;
-					write_ctr2 <= 3'd0;
-				end else begin
-					write_ctr <= 4'd13;
-					write_ctr2 <= write_ctr2 + 3'd1;
-				end
+				write_ctr <= 4'd13;
 			end else begin
 				write_ctr <= write_ctr - 4'd1;
 			end
 			
 		end else begin
-			write_ctr <= 4'd0;
-			write_ctr2 <= 3'd0;
-			write_ptr <= 4'd0;
+		   write_shift[15:13] <= 3'b0;
+			write_ctr <= 4'd10;    
+			write_ptr <= 4'd15;     
+			write_dly <= 3'd0;
+			prev_bit <= 0;
+			write_tail <= 3'd0;
 			dma_rd <= 1'b0;
-			_dkwd <= 1'b1;
+			_dkwd <= 1'b1;			
 		end
 	end
 end
 
-assign write_stb = (write_ctr == 4'd0);
 
 assign ext_floppy_rx = word_read;		 
 assign ext_floppy_wr = word_ready;
