@@ -71,7 +71,21 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	output     [23:0] dma_baddr, // byte address
 	output      [7:0] dma_wbyte,
 	input       [7:0] dma_rbyte, // valid in the cycle dma_ack pulses
-	input             dma_ack
+	input             dma_ack,
+
+	// ---------------------------------------------------------------------
+	// HPS bridge port (M3: framed-command stream to Main_MiSTer, response
+	// stream back). All bridge inputs are single-cycle pulses synchronous
+	// to clk; all bridge outputs are combinational status. Inactive (zero)
+	// when NATIVE_CD32 = 0.
+	// ---------------------------------------------------------------------
+	output            hps_cmd_pending, // a complete framed command is in the buffer
+	output      [7:0] hps_cmd_byte,    // command_buffer[hps_cmd_rd_ptr]
+	input             hps_cmd_pop,     // pulse: advance hps_cmd_rd_ptr by 1
+	input             hps_cmd_done,    // pulse: clear command buffer; bridge has the command
+	input             hps_result_push, // pulse: store hps_result_byte at hps_result_wr_ptr++
+	input       [7:0] hps_result_byte,
+	input             hps_result_done  // pulse: commit hps_result_wr_ptr -> receive_length
 );
 
 // -----------------------------------------------------------------------
@@ -134,6 +148,8 @@ wire        cd_dma_req;
 wire        cd_dma_we;
 wire [23:0] cd_dma_baddr;
 wire  [7:0] cd_dma_wbyte;
+wire        cd_hps_cmd_pending;
+wire  [7:0] cd_hps_cmd_byte;
 
 generate
 if (NATIVE_CD32) begin : g_cd
@@ -169,6 +185,42 @@ if (NATIVE_CD32) begin : g_cd
 	reg        tx_busy;                     // engine waiting for dma_ack (TX read)
 	reg        rx_busy;                     // engine waiting for dma_ack (RX write)
 
+	// M3 HPS bridge state.
+	// hps_cmd_rd_ptr indexes into cdrom_command_buffer for the bridge's
+	// command-stream read; hps_result_wr_ptr accumulates response bytes
+	// from the bridge before commit. Both reset to 0 on transaction
+	// boundaries (hps_cmd_done / hps_result_done).
+	reg  [5:0] hps_cmd_rd_ptr;
+	reg  [5:0] hps_result_wr_ptr;
+
+	// Expected total command length (incl trailing checksum byte) for the
+	// command currently being framed. Mirrors WinUAE akiko.cpp:1136
+	// command_lengths[]. Negative entries (opcodes 0x0b-0x0f) are unknown
+	// commands — frame on buffer-full so Main can reject with CH_ERR_BADCMD.
+	function [5:0] expected_total_len;
+		input [3:0] op;
+		case (op)
+			4'h0: expected_total_len = 6'd2;   // 1 + chk
+			4'h1: expected_total_len = 6'd3;   // 2 + chk (STOP)
+			4'h2: expected_total_len = 6'd2;   // 1 + chk (PAUSE)
+			4'h3: expected_total_len = 6'd2;   // 1 + chk (UNPAUSE)
+			4'h4: expected_total_len = 6'd13;  // 12 + chk (PLAY/READ)
+			4'h5: expected_total_len = 6'd3;   // 2 + chk (LED)
+			4'h6: expected_total_len = 6'd2;   // 1 + chk (SUBQ)
+			4'h7: expected_total_len = 6'd2;   // 1 + chk (INFO/STATUS)
+			4'h8: expected_total_len = 6'd5;   // 4 + chk
+			4'h9: expected_total_len = 6'd2;   // 1 + chk
+			4'ha: expected_total_len = 6'd3;   // 2 + chk
+			default: expected_total_len = 6'd32; // unknown — frame on buffer full
+		endcase
+	endfunction
+
+	wire [3:0] cmd_op       = cdrom_command_buffer[0][3:0];
+	wire [5:0] cmd_total    = expected_total_len(cmd_op);
+	wire       cmd_pending  = (cdrom_command_length != 6'd0)
+	                       && ((cdrom_command_length >= cmd_total)
+	                          || (cdrom_command_length == 6'd32));
+
 	// WinUAE addressmisc layout (akiko.cpp:1937-1942)
 	wire [23:0] cdrx_address = cdrom_addressmisc[23:0];                 // base | 0x000
 	wire [23:0] cdtx_address = cdrom_addressmisc[23:0] | 24'h000200;    // base | 0x200
@@ -178,7 +230,8 @@ if (NATIVE_CD32) begin : g_cd
 	                  && (cdcomtxinx != cdcomtxcmp)
 	                  && (tx_dma_delay == 2'd0)
 	                  && (cdrom_receive_length == 6'd0)
-	                  && (cdrom_command_length != 6'd32);
+	                  && (cdrom_command_length != 6'd32)
+	                  && !cmd_pending;       // hold while bridge has work to do
 
 	wire rx_can_start =  cdrom_flags[CDFLAG_RXD_BIT]
 	                  && (cdrom_receive_length != 6'd0)
@@ -210,6 +263,8 @@ if (NATIVE_CD32) begin : g_cd
 			rx_dma_delay         <= 2'h0;
 			tx_busy              <= 1'b0;
 			rx_busy              <= 1'b0;
+			hps_cmd_rd_ptr       <= 6'h0;
+			hps_result_wr_ptr    <= 6'h0;
 		end else begin
 			// 3-tick post-write delay decay (akiko.cpp:1949,1954)
 			if (tx_dma_delay != 2'd0) tx_dma_delay <= tx_dma_delay - 2'd1;
@@ -385,6 +440,35 @@ if (NATIVE_CD32) begin : g_cd
 			end else if (rx_can_start) begin
 				rx_busy <= 1'b1;
 			end
+
+			// -----------------------------------------------------------------
+			// HPS bridge: command-stream out (Main reads framed command bytes).
+			// hps_cmd_byte is combinational at hps_cmd_rd_ptr; pop advances the
+			// pointer; done releases the framer for the next packet.
+			// `cmd_pending` gates TX so the buffer can't grow under us between
+			// pop and done.
+			// -----------------------------------------------------------------
+			if (hps_cmd_pop && (hps_cmd_rd_ptr != 6'd32))
+				hps_cmd_rd_ptr <= hps_cmd_rd_ptr + 6'd1;
+			if (hps_cmd_done) begin
+				cdrom_command_length <= 6'd0;
+				hps_cmd_rd_ptr       <= 6'd0;
+			end
+
+			// -----------------------------------------------------------------
+			// HPS bridge: result-stream in (Main writes response bytes, then
+			// pulses done to commit). `done` only takes effect when the RX
+			// engine is idle (receive_length == 0); the previous DMA cleared
+			// receive_offset to 0 already, so commit is a clean kick.
+			// -----------------------------------------------------------------
+			if (hps_result_push && (hps_result_wr_ptr != 6'd32)) begin
+				cdrom_result_buffer[hps_result_wr_ptr[4:0]] <= hps_result_byte;
+				hps_result_wr_ptr <= hps_result_wr_ptr + 6'd1;
+			end
+			if (hps_result_done && (cdrom_receive_length == 6'd0)) begin
+				cdrom_receive_length <= hps_result_wr_ptr;
+				hps_result_wr_ptr    <= 6'd0;
+			end
 		end // else !reset
 	end
 
@@ -436,13 +520,19 @@ if (NATIVE_CD32) begin : g_cd
 	                              : (cdtx_address + {16'h0, cdcomtxinx});
 	assign cd_dma_wbyte = cdrom_result_buffer[cdrom_receive_offset];
 
+	// HPS bridge outputs (status + current command-stream byte).
+	assign cd_hps_cmd_pending = cmd_pending;
+	assign cd_hps_cmd_byte    = cdrom_command_buffer[hps_cmd_rd_ptr[4:0]];
+
 end else begin : g_stub
-	assign cd_dout      = 16'h0;
-	assign cd_irq       = 1'b0;
-	assign cd_dma_req   = 1'b0;
-	assign cd_dma_we    = 1'b0;
-	assign cd_dma_baddr = 24'h0;
-	assign cd_dma_wbyte = 8'h0;
+	assign cd_dout            = 16'h0;
+	assign cd_irq             = 1'b0;
+	assign cd_dma_req         = 1'b0;
+	assign cd_dma_we          = 1'b0;
+	assign cd_dma_baddr       = 24'h0;
+	assign cd_dma_wbyte       = 8'h0;
+	assign cd_hps_cmd_pending = 1'b0;
+	assign cd_hps_cmd_byte    = 8'h0;
 end
 endgenerate
 
@@ -467,5 +557,8 @@ assign dma_req   = cd_dma_req;
 assign dma_we    = cd_dma_we;
 assign dma_baddr = cd_dma_baddr;
 assign dma_wbyte = cd_dma_wbyte;
+
+assign hps_cmd_pending = cd_hps_cmd_pending;
+assign hps_cmd_byte    = cd_hps_cmd_byte;
 
 endmodule
