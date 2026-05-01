@@ -58,7 +58,20 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	input       [5:1] addr,
 	input      [15:0] din,
 	output reg [15:0] dout,
-	output            akiko_irq
+	output            akiko_irq,
+
+	// ---------------------------------------------------------------------
+	// Chip-RAM master port (M2: TX/RX command DMA).
+	// Byte-granular, single-byte-per-transaction. Held high until dma_ack.
+	// Inactive (all zero) when NATIVE_CD32 = 0.
+	// M3+ wires this through fastchip into a chip-RAM master/arbiter.
+	// ---------------------------------------------------------------------
+	output            dma_req,
+	output            dma_we,    // 1 = akiko writing chip RAM (RX), 0 = reading (TX)
+	output     [23:0] dma_baddr, // byte address
+	output      [7:0] dma_wbyte,
+	input       [7:0] dma_rbyte, // valid in the cycle dma_ack pulses
+	input             dma_ack
 );
 
 // -----------------------------------------------------------------------
@@ -77,6 +90,8 @@ localparam [31:0] CDINT_TXDMADONE = 32'h08000000; // bit 27
 localparam [31:0] CDINT_PBX       = 32'h04000000; // bit 26
 localparam [31:0] CDINT_OVERFLOW  = 32'h02000000; // bit 25
 
+localparam        CDFLAG_TXD_BIT    = 30; // CONFIG bit 30 (TX command DMA enable)
+localparam        CDFLAG_RXD_BIT    = 29; // CONFIG bit 29 (RX status DMA enable)
 localparam        CDFLAG_PBX_BIT    = 27; // CONFIG bit 27 (data DMA enable)
 localparam        CDFLAG_ENABLE_BIT = 26; // CONFIG bit 26 (CD interface enable)
 
@@ -115,6 +130,10 @@ end
 // -----------------------------------------------------------------------
 wire [15:0] cd_dout;
 wire        cd_irq;
+wire        cd_dma_req;
+wire        cd_dma_we;
+wire [23:0] cd_dma_baddr;
+wire  [7:0] cd_dma_wbyte;
 
 generate
 if (NATIVE_CD32) begin : g_cd
@@ -134,6 +153,38 @@ if (NATIVE_CD32) begin : g_cd
 	reg  [7:0] nvram_io;             // $30 — M1 stub
 	reg  [7:0] nvram_dir;            // $32 — M1 stub
 
+	// M2 TX/RX command DMA state.
+	// command_buffer / command_length accumulate bytes pulled by TX DMA;
+	// result_buffer / receive_length / receive_offset feed RX DMA.
+	// In M2 the bench injects results directly via hierarchical access
+	// to result_buffer + receive_length. M3 will set them from the
+	// HPS-bridge command-response path.
+	reg  [7:0] cdrom_command_buffer [32];
+	reg  [5:0] cdrom_command_length;        // 0..32
+	reg  [7:0] cdrom_result_buffer  [32];
+	reg  [5:0] cdrom_receive_length;        // 0..32 (0 = no result pending)
+	reg  [5:0] cdrom_receive_offset;        // bytes already DMA'd to chip RAM
+	reg  [1:0] tx_dma_delay;                // 3-tick post-write inhibit
+	reg  [1:0] rx_dma_delay;
+	reg        tx_busy;                     // engine waiting for dma_ack (TX read)
+	reg        rx_busy;                     // engine waiting for dma_ack (RX write)
+
+	// WinUAE addressmisc layout (akiko.cpp:1937-1942)
+	wire [23:0] cdrx_address = cdrom_addressmisc[23:0];                 // base | 0x000
+	wire [23:0] cdtx_address = cdrom_addressmisc[23:0] | 24'h000200;    // base | 0x200
+
+	wire tx_can_start =  cdrom_flags[CDFLAG_TXD_BIT]
+	                  && !cdrom_flags[CDFLAG_ENABLE_BIT]
+	                  && (cdcomtxinx != cdcomtxcmp)
+	                  && (tx_dma_delay == 2'd0)
+	                  && (cdrom_receive_length == 6'd0)
+	                  && (cdrom_command_length != 6'd32);
+
+	wire rx_can_start =  cdrom_flags[CDFLAG_RXD_BIT]
+	                  && (cdrom_receive_length != 6'd0)
+	                  && (cdcomrxinx != cdcomrxcmp)
+	                  && (rx_dma_delay == 2'd0);
+
 	wire write = wr & cs;
 
 	always @(posedge clk) begin
@@ -152,7 +203,19 @@ if (NATIVE_CD32) begin : g_cd
 			pio_byte            <= 8'h0;
 			nvram_io            <= 8'h0;
 			nvram_dir           <= 8'h0;
-		end else if (write) begin
+			cdrom_command_length <= 6'h0;
+			cdrom_receive_length <= 6'h0;
+			cdrom_receive_offset <= 6'h0;
+			tx_dma_delay         <= 2'h0;
+			rx_dma_delay         <= 2'h0;
+			tx_busy              <= 1'b0;
+			rx_busy              <= 1'b0;
+		end else begin
+			// 3-tick post-write delay decay (akiko.cpp:1949,1954)
+			if (tx_dma_delay != 2'd0) tx_dma_delay <= tx_dma_delay - 2'd1;
+			if (rx_dma_delay != 2'd0) rx_dma_delay <= rx_dma_delay - 2'd1;
+
+			if (write) begin
 			case (addr)
 				// $08-$09 = INTENA bytes 0-1 (only byte 0 survives mask)
 				5'b00100: begin : intena_hi
@@ -204,18 +267,22 @@ if (NATIVE_CD32) begin : g_cd
 				5'b01100: begin
 					if (uds) cdrom_intreq <= cdrom_intreq & ~CDINT_SUBCODE;
 				end
-				// $1D byte write = TX compare; clears TXDMADONE IRQ (akiko.cpp:1946-1950)
+				// $1D byte write = TX compare; clears TXDMADONE IRQ; reloads
+				// 3-tick TX inhibit (akiko.cpp:1946-1950)
 				5'b01110: begin
 					if (lds) begin
 						cdcomtxcmp   <= din[7:0];
 						cdrom_intreq <= cdrom_intreq & ~CDINT_TXDMADONE;
+						tx_dma_delay <= 2'd3;
 					end
 				end
-				// $1F byte write = RX compare; clears RXDMADONE IRQ (akiko.cpp:1951-1955)
+				// $1F byte write = RX compare; clears RXDMADONE IRQ; reloads
+				// 3-tick RX inhibit (akiko.cpp:1951-1955)
 				5'b01111: begin
 					if (lds) begin
 						cdcomrxcmp   <= din[7:0];
 						cdrom_intreq <= cdrom_intreq & ~CDINT_RXDMADONE;
+						rx_dma_delay <= 2'd3;
 					end
 				end
 				// $20-$21 PBX, set-only OR semantics; clears PBX IRQ (akiko.cpp:1956-1966)
@@ -270,7 +337,55 @@ if (NATIVE_CD32) begin : g_cd
 				end
 				default: ;
 			endcase
-		end
+			end // if (write)
+
+			// -----------------------------------------------------------------
+			// TX command DMA engine (akiko.cpp:1196-1235 / cdrom_run_command)
+			// Reads one byte from chip RAM at cdtx_address+cdcomtxinx into the
+			// command buffer per dma_ack. RX has priority; we only accept ack
+			// in the TX path when RX isn't busy.
+			// -----------------------------------------------------------------
+			if (tx_busy) begin
+				if (dma_ack && !rx_busy) begin
+					if (cdrom_command_length != 6'd32)
+						cdrom_command_buffer[cdrom_command_length] <= dma_rbyte;
+					cdrom_command_length <= cdrom_command_length + 6'd1;
+					cdcomtxinx           <= cdcomtxinx + 8'd1;
+					if ((cdcomtxinx + 8'd1) == cdcomtxcmp)
+						cdrom_intreq <= cdrom_intreq | CDINT_TXDMADONE;
+					tx_busy <= 1'b0;
+				end
+			end else if (!rx_busy && tx_can_start) begin
+				tx_busy <= 1'b1;
+			end
+
+			// -----------------------------------------------------------------
+			// RX status DMA engine (akiko.cpp:865-903 / cdrom_return_data)
+			// Writes result_buffer[receive_offset] to chip RAM at
+			// cdrx_address+cdcomrxinx per dma_ack. When the result is fully
+			// drained, clear DRIVERECV and set DRIVEXMIT (the "drive ready"
+			// signal CD32 Kickstart waits on). RX wins the arbiter.
+			// -----------------------------------------------------------------
+			if (rx_busy) begin
+				if (dma_ack) begin
+					cdcomrxinx           <= cdcomrxinx + 8'd1;
+					cdrom_receive_offset <= cdrom_receive_offset + 6'd1;
+					if ((cdrom_receive_offset + 6'd1) == cdrom_receive_length) begin
+						cdrom_receive_length <= 6'd0;
+						cdrom_receive_offset <= 6'd0;
+						// Combine: clear DRIVERECV, set DRIVEXMIT, plus
+						// optionally set RXDMADONE if compare also matched.
+						cdrom_intreq <= ((cdrom_intreq & ~CDINT_DRIVERECV) | CDINT_DRIVEXMIT)
+						              | (((cdcomrxinx + 8'd1) == cdcomrxcmp) ? CDINT_RXDMADONE : 32'h0);
+					end else if ((cdcomrxinx + 8'd1) == cdcomrxcmp) begin
+						cdrom_intreq <= cdrom_intreq | CDINT_RXDMADONE;
+					end
+					rx_busy <= 1'b0;
+				end
+			end else if (rx_can_start) begin
+				rx_busy <= 1'b1;
+			end
+		end // else !reset
 	end
 
 	// Read mux
@@ -314,9 +429,20 @@ if (NATIVE_CD32) begin : g_cd
 	assign cd_dout = cs ? cd_dout_r : 16'h0;
 	assign cd_irq  = |(cdrom_intreq[31:25] & cdrom_intena[31:25]);
 
+	// Master DMA port — RX wins arbitration; while idle the bus is held LOW.
+	assign cd_dma_req   = tx_busy | rx_busy;
+	assign cd_dma_we    = rx_busy;
+	assign cd_dma_baddr = rx_busy ? (cdrx_address + {16'h0, cdcomrxinx})
+	                              : (cdtx_address + {16'h0, cdcomtxinx});
+	assign cd_dma_wbyte = cdrom_result_buffer[cdrom_receive_offset];
+
 end else begin : g_stub
-	assign cd_dout = 16'h0;
-	assign cd_irq  = 1'b0;
+	assign cd_dout      = 16'h0;
+	assign cd_irq       = 1'b0;
+	assign cd_dma_req   = 1'b0;
+	assign cd_dma_we    = 1'b0;
+	assign cd_dma_baddr = 24'h0;
+	assign cd_dma_wbyte = 8'h0;
 end
 endgenerate
 
@@ -336,5 +462,10 @@ always @(*) begin
 end
 
 assign akiko_irq = cd_irq;
+
+assign dma_req   = cd_dma_req;
+assign dma_we    = cd_dma_we;
+assign dma_baddr = cd_dma_baddr;
+assign dma_wbyte = cd_dma_wbyte;
 
 endmodule
