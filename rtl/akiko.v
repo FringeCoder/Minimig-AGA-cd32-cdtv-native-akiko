@@ -85,7 +85,18 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	input             hps_cmd_done,    // pulse: clear command buffer; bridge has the command
 	input             hps_result_push, // pulse: store hps_result_byte at hps_result_wr_ptr++
 	input       [7:0] hps_result_byte,
-	input             hps_result_done  // pulse: commit hps_result_wr_ptr -> receive_length
+	input             hps_result_done, // pulse: commit hps_result_wr_ptr -> receive_length
+
+	// ---------------------------------------------------------------------
+	// HPS sector channel (M4: 2352-byte raw-sector pushes from Main, plus a
+	// 1-byte status read for the current cdrom_sector_counter). Inactive
+	// (zero) when NATIVE_CD32 = 0.
+	// ---------------------------------------------------------------------
+	output            hps_sec_req,     // status: I have a free PBX slot and an empty buffer
+	output      [7:0] hps_sec_status,  // 1-byte read mux (currently == cdrom_sector_counter)
+	input             hps_sec_push,    // pulse: store hps_sec_byte at sec_wr_ptr++
+	input       [7:0] hps_sec_byte,
+	input             hps_sec_done     // pulse: commit; if sec_wr_ptr == 12'd2352, sector_ready<=1
 );
 
 // -----------------------------------------------------------------------
@@ -150,6 +161,8 @@ wire [23:0] cd_dma_baddr;
 wire  [7:0] cd_dma_wbyte;
 wire        cd_hps_cmd_pending;
 wire  [7:0] cd_hps_cmd_byte;
+wire        cd_hps_sec_req;
+wire  [7:0] cd_hps_sec_status;
 
 generate
 if (NATIVE_CD32) begin : g_cd
@@ -184,6 +197,7 @@ if (NATIVE_CD32) begin : g_cd
 	reg  [1:0] rx_dma_delay;
 	reg        tx_busy;                     // engine waiting for dma_ack (TX read)
 	reg        rx_busy;                     // engine waiting for dma_ack (RX write)
+	reg        rx_inflight;                 // BFM has accepted our request (post-quiet-cycle)
 
 	// M3 HPS bridge state.
 	// hps_cmd_rd_ptr indexes into cdrom_command_buffer for the bridge's
@@ -192,6 +206,35 @@ if (NATIVE_CD32) begin : g_cd
 	// boundaries (hps_cmd_done / hps_result_done).
 	reg  [5:0] hps_cmd_rd_ptr;
 	reg  [5:0] hps_result_wr_ptr;
+
+	// M4 PBX sector DMA state.
+	//
+	// sector_buffer holds one raw 2352-byte sector pushed by Main via the
+	// HPS sector channel. sector_ready latches when a full sector arrives
+	// (sec_wr_ptr == 2352 at hps_sec_done). cdrom_sector_counter resets to
+	// 0 on CDFLAG_ENABLE 0->1 (akiko.cpp:1973-1976); increments after each
+	// successful slot write.
+	//
+	// PBX engine FSM:
+	//   PBX_IDLE  : await (CDFLAG_ENABLE & CDFLAG_PBX & cdrom_pbx & sector_ready);
+	//               latch seccnt = highest_set_bit(cdrom_pbx); -> PBX_DATA.
+	//   PBX_DATA  : drive write of byte_idx 0..2351 to slot+byte_idx.
+	//               byte source is computed below (zeros / counter / buffer).
+	//   PBX_ZERO  : drive write of zero to slot+0xc00 + zero_idx for 0..145.
+	//   PBX_FIN   : clear pbx[seccnt], set CDINT_PBX, increment counter,
+	//               drop sector_ready, -> PBX_IDLE.
+	reg  [7:0] sector_buffer [2352];
+	reg [11:0] sec_wr_ptr;
+	reg        sector_ready;
+	reg  [7:0] cdrom_sector_counter;
+	reg        pbx_busy;
+	reg  [1:0] pbx_state;
+	localparam PBX_IDLE = 2'd0;
+	localparam PBX_DATA = 2'd1;
+	localparam PBX_ZERO = 2'd2;
+	localparam PBX_FIN  = 2'd3;
+	reg  [3:0] pbx_seccnt;       // selected slot (0..15)
+	reg [11:0] pbx_byte_idx;     // 0..2351 in DATA, 0..145 in ZERO
 
 	// Expected total command length (incl trailing checksum byte) for the
 	// command currently being framed. Mirrors WinUAE akiko.cpp:1136
@@ -238,6 +281,45 @@ if (NATIVE_CD32) begin : g_cd
 	                  && (cdcomrxinx != cdcomrxcmp)
 	                  && (rx_dma_delay == 2'd0);
 
+	// M4 PBX engine derived signals.
+	// pbx_slot_base = addressdata + seccnt*4096; current pbx_addr depends on
+	// the engine phase (DATA at slot+byte_idx, ZERO at slot+0xc00+byte_idx).
+	// sector_byte_at_idx implements the WinUAE per-byte source rules:
+	//   bytes 0..2: zero
+	//   byte 3:     sector_counter & 31
+	//   bytes 4..2351: sector_buffer[idx]
+	wire [23:0] pbx_slot_base = cdrom_addressdata[23:0] + {8'h0, pbx_seccnt, 12'h0};
+	wire [23:0] pbx_addr      = pbx_slot_base
+	                          + ((pbx_state == PBX_DATA)
+	                              ? {12'h0, pbx_byte_idx}
+	                              : (24'h000c00 + {12'h0, pbx_byte_idx}));
+	wire [7:0]  sector_byte_at_idx = (pbx_byte_idx <  12'd3   ) ? 8'h00 :
+	                                 (pbx_byte_idx == 12'd3   ) ? (cdrom_sector_counter & 8'h1f) :
+	                                 (pbx_byte_idx <  12'd2352) ? sector_buffer[pbx_byte_idx] :
+	                                                              8'h00;
+	wire [7:0]  pbx_wbyte = (pbx_state == PBX_DATA) ? sector_byte_at_idx : 8'h00;
+
+	// Highest set bit in cdrom_pbx (4-bit slot index 0..15). WinUAE iterates
+	// 15 down to 0 (akiko.cpp:1314-1318); equivalent here is "loop 0..15
+	// and overwrite — last set bit wins".
+	function [3:0] highest_bit;
+		input [15:0] m;
+		integer i;
+		begin
+			highest_bit = 4'd0;
+			for (i = 0; i < 16; i = i + 1)
+				if (m[i]) highest_bit = i[3:0];
+		end
+	endfunction
+
+	// sec_req: high when PBX wants a sector but the staging buffer is empty.
+	// Drops as soon as Main commits a sector (sector_ready -> 1). Rises again
+	// after PBX_FIN clears sector_ready, if more pbx slots remain.
+	wire sec_req_w =  cdrom_flags[CDFLAG_ENABLE_BIT]
+	               && cdrom_flags[CDFLAG_PBX_BIT]
+	               && (cdrom_pbx != 16'h0)
+	               && !sector_ready;
+
 	wire write = wr & cs;
 
 	always @(posedge clk) begin
@@ -263,8 +345,16 @@ if (NATIVE_CD32) begin : g_cd
 			rx_dma_delay         <= 2'h0;
 			tx_busy              <= 1'b0;
 			rx_busy              <= 1'b0;
+			rx_inflight          <= 1'b0;
 			hps_cmd_rd_ptr       <= 6'h0;
 			hps_result_wr_ptr    <= 6'h0;
+			sec_wr_ptr           <= 12'h0;
+			sector_ready         <= 1'b0;
+			cdrom_sector_counter <= 8'h0;
+			pbx_busy             <= 1'b0;
+			pbx_state            <= PBX_IDLE;
+			pbx_seccnt           <= 4'h0;
+			pbx_byte_idx         <= 12'h0;
 		end else begin
 			// 3-tick post-write delay decay (akiko.cpp:1949,1954)
 			if (tx_dma_delay != 2'd0) tx_dma_delay <= tx_dma_delay - 2'd1;
@@ -360,8 +450,12 @@ if (NATIVE_CD32) begin : g_cd
 					if (lds) new_flags[23:16] = din[7:0];
 					new_flags = new_flags & CONFIG_MASK;
 					cdrom_flags <= new_flags;
-					if (new_flags[CDFLAG_ENABLE_BIT] && !cdrom_flags[CDFLAG_ENABLE_BIT])
-						cdrom_intreq <= cdrom_intreq & ~CDINT_OVERFLOW;
+					// CDFLAG_ENABLE 0->1: reset sector_counter and clear OVERFLOW
+					// (akiko.cpp:1973-1976).
+					if (new_flags[CDFLAG_ENABLE_BIT] && !cdrom_flags[CDFLAG_ENABLE_BIT]) begin
+						cdrom_intreq         <= cdrom_intreq & ~CDINT_OVERFLOW;
+						cdrom_sector_counter <= 8'h0;
+					end
 					if (!new_flags[CDFLAG_PBX_BIT]) cdrom_pbx <= 16'h0;
 				end
 				5'b10011: begin : cfg_low
@@ -397,11 +491,15 @@ if (NATIVE_CD32) begin : g_cd
 			// -----------------------------------------------------------------
 			// TX command DMA engine (akiko.cpp:1196-1235 / cdrom_run_command)
 			// Reads one byte from chip RAM at cdtx_address+cdcomtxinx into the
-			// command buffer per dma_ack. RX has priority; we only accept ack
-			// in the TX path when RX isn't busy.
+			// command buffer per dma_ack. Arbitration: RX > PBX > TX. We only
+			// accept ack in the TX path when both RX and PBX are idle so that
+			// dma_ack pulses for higher-priority engines don't false-advance
+			// TX. (CDFLAG_ENABLE also gates tx_can_start, so in steady state
+			// PBX never coexists with NEW TX, but an in-flight tx_busy could
+			// still be present when ENABLE rises mid-burst.)
 			// -----------------------------------------------------------------
 			if (tx_busy) begin
-				if (dma_ack && !rx_busy) begin
+				if (dma_ack && !rx_busy && !pbx_busy) begin
 					if (cdrom_command_length != 6'd32)
 						cdrom_command_buffer[cdrom_command_length] <= dma_rbyte;
 					cdrom_command_length <= cdrom_command_length + 6'd1;
@@ -410,7 +508,7 @@ if (NATIVE_CD32) begin : g_cd
 						cdrom_intreq <= cdrom_intreq | CDINT_TXDMADONE;
 					tx_busy <= 1'b0;
 				end
-			end else if (!rx_busy && tx_can_start) begin
+			end else if (!rx_busy && !pbx_busy && tx_can_start) begin
 				tx_busy <= 1'b1;
 			end
 
@@ -420,9 +518,18 @@ if (NATIVE_CD32) begin : g_cd
 			// cdrx_address+cdcomrxinx per dma_ack. When the result is fully
 			// drained, clear DRIVERECV and set DRIVEXMIT (the "drive ready"
 			// signal CD32 Kickstart waits on). RX wins the arbiter.
+			//
+			// rx_inflight handshake: when rx_busy goes 0->1 mid-PBX-burst, the
+			// BFM may already be completing a PBX cycle whose dma_ack arrives
+			// the very next cycle. Without arbitration, RX would consume that
+			// (unrelated) ack and skip its own write. Solution: only count
+			// dma_ack after we've seen at least one cycle of !dma_ack while
+			// rx_busy=1 (i.e. the BFM has gone quiet, our request is what it
+			// will pick up next). Adds 1 cycle of latency per RX byte; PBX
+			// safely re-runs the displaced byte (idempotent write of same data).
 			// -----------------------------------------------------------------
 			if (rx_busy) begin
-				if (dma_ack) begin
+				if (rx_inflight && dma_ack) begin
 					cdcomrxinx           <= cdcomrxinx + 8'd1;
 					cdrom_receive_offset <= cdrom_receive_offset + 6'd1;
 					if ((cdrom_receive_offset + 6'd1) == cdrom_receive_length) begin
@@ -435,10 +542,78 @@ if (NATIVE_CD32) begin : g_cd
 					end else if ((cdcomrxinx + 8'd1) == cdcomrxcmp) begin
 						cdrom_intreq <= cdrom_intreq | CDINT_RXDMADONE;
 					end
-					rx_busy <= 1'b0;
+					rx_busy     <= 1'b0;
+					rx_inflight <= 1'b0;
+				end else if (!rx_inflight && !dma_ack) begin
+					rx_inflight <= 1'b1;
 				end
 			end else if (rx_can_start) begin
-				rx_busy <= 1'b1;
+				rx_busy     <= 1'b1;
+				rx_inflight <= 1'b0;
+			end
+
+			// -----------------------------------------------------------------
+			// PBX sector DMA engine (akiko.cpp:1296-1376 / cdrom_run_read).
+			// One pass per slot: walk slot+0..2351 writing sector_buffer (with
+			// the per-byte rules in sector_byte_at_idx), then walk +0xc00..+0xc91
+			// writing zeros, then bump sector_counter and clear the slot bit.
+			// Bus mux gives PBX priority over TX but yields to RX.
+			// -----------------------------------------------------------------
+			case (pbx_state)
+				PBX_IDLE: begin
+					if (cdrom_flags[CDFLAG_ENABLE_BIT]
+					    && cdrom_flags[CDFLAG_PBX_BIT]
+					    && (cdrom_pbx != 16'h0)
+					    && sector_ready) begin
+						pbx_seccnt   <= highest_bit(cdrom_pbx);
+						pbx_byte_idx <= 12'h0;
+						pbx_busy     <= 1'b1;
+						pbx_state    <= PBX_DATA;
+					end
+				end
+				PBX_DATA: begin
+					if (dma_ack && !rx_busy) begin
+						if (pbx_byte_idx == 12'd2351) begin
+							pbx_byte_idx <= 12'h0;
+							pbx_state    <= PBX_ZERO;
+						end else begin
+							pbx_byte_idx <= pbx_byte_idx + 12'd1;
+						end
+					end
+				end
+				PBX_ZERO: begin
+					if (dma_ack && !rx_busy) begin
+						if (pbx_byte_idx == 12'd145) begin
+							pbx_byte_idx <= 12'h0;
+							pbx_state    <= PBX_FIN;
+						end else begin
+							pbx_byte_idx <= pbx_byte_idx + 12'd1;
+						end
+					end
+				end
+				PBX_FIN: begin
+					cdrom_pbx[pbx_seccnt] <= 1'b0;
+					cdrom_intreq          <= cdrom_intreq | CDINT_PBX;
+					cdrom_sector_counter  <= cdrom_sector_counter + 8'd1;
+					sector_ready          <= 1'b0;
+					pbx_busy              <= 1'b0;
+					pbx_state             <= PBX_IDLE;
+				end
+			endcase
+
+			// -----------------------------------------------------------------
+			// HPS bridge: sector-data in (Main pushes 2352 raw bytes per
+			// sector). Bridge guarantees push and done don't overlap (done
+			// fires one cycle after deselect), so the simple pointer-vs-2352
+			// check below is race-free.
+			// -----------------------------------------------------------------
+			if (hps_sec_push && !sector_ready && sec_wr_ptr != 12'd2352) begin
+				sector_buffer[sec_wr_ptr] <= hps_sec_byte;
+				sec_wr_ptr <= sec_wr_ptr + 12'd1;
+			end
+			if (hps_sec_done) begin
+				if (sec_wr_ptr == 12'd2352) sector_ready <= 1'b1;
+				sec_wr_ptr <= 12'h0;
 			end
 
 			// -----------------------------------------------------------------
@@ -513,16 +688,23 @@ if (NATIVE_CD32) begin : g_cd
 	assign cd_dout = cs ? cd_dout_r : 16'h0;
 	assign cd_irq  = |(cdrom_intreq[31:25] & cdrom_intena[31:25]);
 
-	// Master DMA port — RX wins arbitration; while idle the bus is held LOW.
-	assign cd_dma_req   = tx_busy | rx_busy;
-	assign cd_dma_we    = rx_busy;
-	assign cd_dma_baddr = rx_busy ? (cdrx_address + {16'h0, cdcomrxinx})
-	                              : (cdtx_address + {16'h0, cdcomtxinx});
-	assign cd_dma_wbyte = cdrom_result_buffer[cdrom_receive_offset];
+	// Master DMA port — arbitration RX > PBX > TX. While idle the bus is
+	// held LOW. dma_we is don't-care during TX (read), 1 for RX/PBX writes.
+	assign cd_dma_req   = tx_busy | rx_busy | pbx_busy;
+	assign cd_dma_we    = rx_busy | pbx_busy;
+	assign cd_dma_baddr = rx_busy  ? (cdrx_address + {16'h0, cdcomrxinx}) :
+	                      pbx_busy ? pbx_addr :
+	                                 (cdtx_address + {16'h0, cdcomtxinx});
+	assign cd_dma_wbyte = rx_busy  ? cdrom_result_buffer[cdrom_receive_offset]
+	                               : pbx_wbyte;
 
 	// HPS bridge outputs (status + current command-stream byte).
 	assign cd_hps_cmd_pending = cmd_pending;
 	assign cd_hps_cmd_byte    = cdrom_command_buffer[hps_cmd_rd_ptr[4:0]];
+
+	// HPS sector-channel outputs.
+	assign cd_hps_sec_req     = sec_req_w;
+	assign cd_hps_sec_status  = cdrom_sector_counter;
 
 end else begin : g_stub
 	assign cd_dout            = 16'h0;
@@ -533,6 +715,8 @@ end else begin : g_stub
 	assign cd_dma_wbyte       = 8'h0;
 	assign cd_hps_cmd_pending = 1'b0;
 	assign cd_hps_cmd_byte    = 8'h0;
+	assign cd_hps_sec_req     = 1'b0;
+	assign cd_hps_sec_status  = 8'h0;
 end
 endgenerate
 
@@ -560,5 +744,8 @@ assign dma_wbyte = cd_dma_wbyte;
 
 assign hps_cmd_pending = cd_hps_cmd_pending;
 assign hps_cmd_byte    = cd_hps_cmd_byte;
+
+assign hps_sec_req     = cd_hps_sec_req;
+assign hps_sec_status  = cd_hps_sec_status;
 
 endmodule
