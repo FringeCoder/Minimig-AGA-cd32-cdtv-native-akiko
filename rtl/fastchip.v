@@ -94,10 +94,10 @@ module fastchip
 	output  [7:0] akiko_uio_trace_dout
 );
 
-// Native CD32 Akiko gate (M1 development).
-// Set to 1 to enable native CD register file + IRQ inside akiko.v.
-// Default 0: A1200/Gayle/ATAPI behavior unchanged; only ID + C2P respond.
-localparam NATIVE_CD32 = 0;
+// Native CD32 Akiko gate.
+// 1 = full M1-M4 native register file + IRQ + DMA engines + PBX sector path.
+// 0 = legacy stub (A1200/Gayle/ATAPI unchanged; only ID + C2P respond).
+localparam NATIVE_CD32 = 1;
 
 assign sel_ack = sel_akiko  | sel_ide   | sel_rtg   | sel_gayle;
 assign ready   = sel_akiko  | ide_ready | rtg_ready;

@@ -276,6 +276,17 @@ wire        akiko_cs_trace;
 wire        akiko_trace_rd;
 wire  [7:0] akiko_trace_din;
 
+// M5 diagnostic: dma_req/ack short-loop until a real chip-RAM master is
+// implemented. ack must be DELAYED 1 cycle after req — the RX engine has
+// an rx_inflight handshake (akiko.v:522-528) that requires at least one
+// cycle of !dma_ack while rx_busy=1 before counting an ack. Same-cycle
+// ack=req defeats it and gets RX stuck (which then blocks TX, since TX
+// completion is gated on !rx_busy). One-cycle latched ack satisfies the
+// handshake.
+wire        akiko_dma_req_w;
+reg         akiko_dma_ack_r;
+always @(posedge clk_sys) akiko_dma_ack_r <= akiko_dma_req_w;
+
 wire [35:0] EXT_BUS;
 hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata));
 
@@ -644,16 +655,19 @@ fastchip fastchip
 
 	.akiko_irq    (akiko_f_irq       ),
 
-	// M2: Akiko chip-RAM master is bench-only until M3. In hardware builds
-	// (NATIVE_CD32 still 0 inside fastchip), the engines never request, so
-	// these tie-offs leave the bus idle. M3 replaces this with a real
-	// chip-RAM master/arbiter.
-	.akiko_dma_req   (                  ),
+	// M5 diagnostic: ack every DMA request immediately with rbyte=0x00.
+	// This lets the TX engine progress (firmware queues a command, akiko
+	// DMAs N zero bytes, command_buffer fills, cmd_pending fires, bridge
+	// forwards to userspace). RX writes go to /dev/null so firmware will
+	// read stale chip RAM for responses — Cannon Fodder probably won't
+	// boot fully, but we'll see whether the FPGA→userspace command flow
+	// works at all. Real chip-RAM master is still TODO for M5+.
+	.akiko_dma_req   (akiko_dma_req_w   ),
 	.akiko_dma_we    (                  ),
 	.akiko_dma_baddr (                  ),
 	.akiko_dma_wbyte (                  ),
 	.akiko_dma_rbyte (8'h00             ),
-	.akiko_dma_ack   (1'b0              ),
+	.akiko_dma_ack   (akiko_dma_ack_r   ),
 
 	// M3: Akiko HPS bridge to hps_ext (akiko_uio_* on fastchip side, akiko_*
 	// on hps_ext side — names flip because the two modules describe the
