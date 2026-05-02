@@ -125,23 +125,42 @@ chipdma_arb u_dut (
 );
 
 // -----------------------------------------------------------------------
-// Behavioural SDRAM stub. Models sdram_ctrl's chipDMA semantics: latch
-// the request the moment chipDMA OR chipRW goes active-low, present the
-// read result LATENCY cycles later. Writes commit immediately. 64 KiB of
-// byte memory backs the model; the upper bits of chip_out_addr select an
-// 8-byte page modulo 8KiB so we can use small addresses.
+// Behavioural SDRAM stub. Models sdram_ctrl's chipDMA semantics: ONLY
+// at the c_7m rising edge does sdram_ctrl decide whether to run a chip
+// slot, and at that decision instant it sees the value of chip_out_dma
+// driven by combinational logic from the SAME edge but NOT the result
+// of registered transitions on that edge.
 // -----------------------------------------------------------------------
-// In hardware, sdram_ctrl latches reads at its state 9 (= 9 clk_114
-// cycles after slot start). With clk_sys = clk_114 / 4, that maps to
-// ~2.25 clk_sys cycles. The bench's pipeline adds one extra clock for
-// the chipRD_r register output, so LATENCY=1 here gives chipRD valid
-// at clk_sys cycle 2 of the slot (matches hardware closely; arbiter
-// samples at slot_cnt=3).
+// In hardware, sdram_ctrl runs at clk_114 (4× clk_sys). It detects
+// c_7m rising at one clk_114 edge, sets sdram_state<=0, then case()s
+// chipDMA at the next clk_114 edge (~8.7 ns after c_7m rose). 8.7 ns
+// is enough for combinational signals (e.g. agnus's combinational
+// dbr/dbwe) originating from clk_sys's c_7m_rise edge to propagate
+// to sdram_ctrl, but NOT enough for a registered output to change
+// (clk-to-Q on the clk_sys edge happens roughly at the same instant
+// as sdram_ctrl's sample). So a registered arbiter that flips
+// chip_out_dma <= 0 on the c_7m_rise edge is too late by ~8 ns.
+//
+// To reproduce that race in this clk_sys-only sim: sample chip_out_*
+// AT the c_7m_rise clk_sys edge inside an always @(posedge clk) block.
+// At that instant, NBA results from THIS edge are not yet visible —
+// matching what sdram_ctrl sees in hardware. Combinational outputs
+// from the same edge (e.g., the new arbiter's combinational arb_drive
+// on c_7m_rise) ARE visible — also matching hardware.
+//
+// Read latency:
+// In hardware, slot starts at clk_114 edge K+1 (sdram_state==0),
+// chipRD <= sdata_chip at sdram_state==9 (clk_114 edge K+10), visible
+// at edge K+11 ≈ clk_sys edge T+3. So chipRD is valid by the 3rd
+// clk_sys cycle after the c_7m rise. The pipeline below latches at
+// clk_sys edge T (the rise) and presents chipRD valid LATENCY+1
+// cycles later. LATENCY=1 ⇒ chipRD valid at clk_sys edge T+2.
+// The arbiter samples at slot_cnt==3 = clk_sys edge T+4, so margin is 2.
 localparam int LATENCY = 1;
 
 logic [7:0] mem [65536];
 
-// Pipeline regs to model fixed read latency. Sized to 3 (LATENCY=2 + 1).
+// Pipeline regs to model fixed read latency.
 logic [15:0] rd_pipe [3];
 logic        rd_valid_pipe [3];
 logic [15:0] chipRD_r;
@@ -158,14 +177,17 @@ initial begin
 	chipRD_r = 16'h0000;
 end
 
-// Address into the byte memory: word index in [15:1], byte selector in [0]
-// (functions inlined as wires below to avoid ModelSim ASE 10.5b issues
-// with function-call LHS indexes inside non-blocking assignments).
+// Address into the byte memory.
 wire [15:0] hi_idx = {chip_out_addr[15:1], 1'b0};
 wire [15:0] lo_idx = {chip_out_addr[15:1], 1'b1};
 
+// c_7m rising-edge detector inside the stub (independent of DUT's).
+logic c_7m_d_stub;
+always @(posedge clk) c_7m_d_stub <= c_7m;
+wire c_7m_rise_stub = c_7m & ~c_7m_d_stub;
+
 always @(posedge clk) begin
-	// Shift pipeline (unrolled -- ASE 10.5b is happier without the for loop).
+	// Shift pipeline.
 	rd_pipe[2]       <= rd_pipe[1];
 	rd_pipe[1]       <= rd_pipe[0];
 	rd_valid_pipe[2] <= rd_valid_pipe[1];
@@ -173,8 +195,12 @@ always @(posedge clk) begin
 	rd_pipe[0]       <= 16'h0000;
 	rd_valid_pipe[0] <= 1'b0;
 
-	// Latch new accesses.
-	if (~chip_out_dma | ~chip_out_rw) begin
+	// Latch new accesses ONLY at the c_7m rising edge -- mirrors
+	// sdram_ctrl deciding slot type only at sdram_state==0.
+	// At this clk_sys edge, NBA results from THIS edge are not yet
+	// visible, so a registered chip_out_dma transition on the same
+	// edge will be missed -- exactly the race we need to reproduce.
+	if (c_7m_rise_stub & (~chip_out_dma | ~chip_out_rw)) begin
 		if (chip_out_rw) begin
 			// READ
 			rd_pipe[0][15:8] <= chip_out_u ? 8'hxx : mem[hi_idx];
@@ -479,6 +505,62 @@ initial begin
 			automatic int t8_timeout = 400;
 			while (!akiko_dma_ack && t8_timeout > 0) begin
 				@(posedge clk); t8_timeout--;
+			end
+		end
+		akiko_dma_req <= 1'b0;
+	end
+
+	// ---- Test 9: c_7m boundary timing. Drive akiko_dma_req. Watch
+	//      chip_out_dma exactly at c_7m_rise edges. The first idle
+	//      c_7m_rise where minimig is idle MUST see chip_out_dma=0 --
+	//      meaning sdram_ctrl would actually arm the slot. If
+	//      chip_out_dma is still HIGH on the rise edge (registered
+	//      late), the slot is missed and akiko gets garbage. This is
+	//      the v8-on-hardware bug. ----
+	preload(16'h0800, 8'hBE);
+	begin : t9
+		automatic int rises_seen = 0;
+		automatic int rises_with_drive_low = 0;
+		automatic logic c_7m_prev = c_7m;
+		automatic int t9_timeout = 80;
+		// Make sure minimig is idle.
+		chip_in_dma <= 1'b1;
+		chip_in_rw  <= 1'b1;
+		akiko_dma_req   <= 1'b1;
+		akiko_dma_we    <= 1'b0;
+		akiko_dma_baddr <= 24'h000800;
+		// Sample at every clk edge. Expect the very first c_7m rise
+		// after akiko_dma_req goes high to drive chip_out_dma low.
+		while (rises_seen == 0 && t9_timeout > 0) begin
+			@(posedge clk);
+			if (c_7m & ~c_7m_prev) begin
+				rises_seen++;
+				// At this edge, chip_out_dma must already be LOW
+				// (combinational from arm-now decision), otherwise
+				// sdram_ctrl misses the slot.
+				if (chip_out_dma === 1'b0) rises_with_drive_low++;
+			end
+			c_7m_prev = c_7m;
+			t9_timeout--;
+		end
+		checks++;
+		if (rises_with_drive_low == 0) begin
+			$display("FAIL test9: chip_out_dma was HIGH at first idle c_7m_rise -- sdram_ctrl would miss slot (v8 hardware bug)");
+			errs++;
+		end else begin
+			$display("PASS test9: chip_out_dma LOW at c_7m_rise edge (slot would be claimed)");
+		end
+		// Drain.
+		begin
+			automatic int t9_drain = 200;
+			while (!akiko_dma_ack && t9_drain > 0) begin
+				@(posedge clk); t9_drain--;
+			end
+			if (t9_drain == 0) begin
+				$display("FAIL test9: ack timeout");
+				errs++;
+			end else begin
+				check8("test9: byte value", 8'hBE, akiko_dma_rbyte);
 			end
 		end
 		akiko_dma_req <= 1'b0;
