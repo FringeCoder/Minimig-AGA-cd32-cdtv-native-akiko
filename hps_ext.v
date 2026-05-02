@@ -61,10 +61,14 @@ module hps_ext
 	output reg [15:0] cdda_dout,
 
 	// Akiko bridge (CD32 native mode). Address class 0xF400 = io_din[15:9]==7'b1111_010.
-	// Two sub-channels share the class, distinguished by io_din[8] captured on
-	// byte_cnt==1: io_din[8]=0 -> cmd/result stream (M3); io_din[8]=1 -> sector
-	// data stream (M4). Both sub-channels share akiko_din/dout/wr/rd; the bridge
-	// uses akiko_cs_sec to fan out internally.
+	// Three sub-channels share the class, picked from io_din[8:7] captured on
+	// byte_cnt==1:
+	//   io_din[7]=0, io_din[8]=0 -> cmd/result stream (M3)
+	//   io_din[7]=0, io_din[8]=1 -> sector data stream (M4)
+	//   io_din[7]=1                -> bus trace ring (debug, drain-only)
+	// Trace is exclusive: when io_din[7] is set, akiko_cs/akiko_cs_sec stay LOW
+	// so the bridge isn't disturbed. Trace reads return akiko_trace_din and pulse
+	// akiko_trace_rd to advance the ring's byte counter.
 	input      [15:0] akiko_din,
 	output reg [15:0] akiko_dout,
 	output reg        akiko_wr,
@@ -72,7 +76,11 @@ module hps_ext
 	output reg        akiko_cs,
 	output reg        akiko_cs_sec,
 	input             akiko_req,
-	input             akiko_sec_req
+	input             akiko_sec_req,
+
+	input       [7:0] akiko_trace_din,
+	output reg        akiko_trace_rd,
+	output reg        akiko_cs_trace
 );
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
@@ -107,6 +115,7 @@ always@(posedge clk_sys) begin
 	{ide_rd, ide_wr} <= 0;
 	cdda_wr <= 0;
 	{akiko_rd, akiko_wr} <= 0;
+	akiko_trace_rd <= 0;
 	if((ide_rd | ide_wr) & ~&ide_addr[3:0]) ide_addr <= ide_addr + 1'd1;
 
 	if(~io_uio) begin
@@ -117,6 +126,7 @@ always@(posedge clk_sys) begin
 		cdda_cs <= 0;
 		akiko_cs <= 0;
 		akiko_cs_sec <= 0;
+		akiko_cs_trace <= 0;
 		if(cmd == 'h2D) sset <= 1;
 	end
 	else if(io_strobe) begin
@@ -131,8 +141,11 @@ always@(posedge clk_sys) begin
 			ide_addr     <= {io_din[8],io_din[3:0]};
 			ide_cs       <= (io_din[15:9] == 7'b1111000);
 			cdda_cs      <= (io_din[15:9] == 7'b1111001);
-			akiko_cs     <= (io_din[15:9] == 7'b1111010);
-			akiko_cs_sec <= (io_din[15:9] == 7'b1111010) && io_din[8];
+			// Trace sub-channel (io_din[7]=1) is exclusive: keep cs/cs_sec LOW so
+			// the M3/M4 bridge isn't fed during a debug drain.
+			akiko_cs       <= (io_din[15:9] == 7'b1111010) && !io_din[7];
+			akiko_cs_sec   <= (io_din[15:9] == 7'b1111010) && !io_din[7] && io_din[8];
+			akiko_cs_trace <= (io_din[15:9] == 7'b1111010) &&  io_din[7];
 		end
 
 		if(byte_cnt == 0) begin
@@ -219,6 +232,10 @@ always@(posedge clk_sys) begin
 					if(byte_cnt >= 3 && akiko_cs) begin
 						io_dout  <= akiko_din;
 						akiko_rd <= 1;
+					end
+					if(byte_cnt >= 3 && akiko_cs_trace) begin
+						io_dout        <= {8'h00, akiko_trace_din};
+						akiko_trace_rd <= 1;
 					end
 				end
 			endcase
