@@ -8,16 +8,20 @@
 // can claim it for akiko's single-byte master, run one access, sample
 // chipRD when the read returns, and pulse akiko_dma_ack with the byte.
 //
-// Slot synchronization: sdram_ctrl arbitrates at its own state 0 (RAS
-// phase). One sdram_ctrl cycle (states 0..15) takes 16 sysclk cycles --
-// the same period as the chipset's c_7m clock. So a c_7m rising edge
-// marks the start of a new slot, and at that instant minimig's chipset
-// has just driven its DMA request signals for the slot. We sample those
-// signals at the c_7m edge: if minimig is idle (chip_in_dma high AND
-// chip_in_rw high), we know the next 16 sysclk cycles are ours -- drive
-// akiko's address, hold for the full slot, sample chipRD at the end,
-// then pulse dma_ack. If minimig is busy, we skip this slot and wait
-// for the next c_7m edge.
+// Clocking: this module runs on clk_sys (the 28.6MHz Minimig system clock,
+// same domain as akiko). sdram_ctrl runs on clk_114 (4x faster) -- minimig's
+// existing chipset signals into sdram_ctrl already cross that boundary
+// without explicit synchronization, and we follow the same pattern. chipRD
+// from sdram_ctrl is sampled at clk_sys late in the slot when it has
+// definitely settled.
+//
+// Slot synchronization: c_7m (= clk_sys / 4) is the chipset slot clock.
+// At every c_7m rising edge, we sample whether minimig is idle (chip_in_dma
+// AND chip_in_rw both HIGH). If idle AND akiko_dma_req is asserted, we
+// claim the slot for akiko -- drive chip_out_* with akiko's request, hold
+// for the slot (~4 clk_sys cycles = 16 clk_114 cycles), sample chipRD at
+// the end, then pulse dma_ack. If minimig is busy, skip and wait for the
+// next c_7m edge.
 //
 // We never preempt the chipset: minimig's signals are passed through
 // during minimig-active slots, and the arbiter only drives during slots
@@ -65,11 +69,11 @@ reg c_7m_d;
 always @(posedge clk) c_7m_d <= c_7m;
 wire c_7m_rise = c_7m & ~c_7m_d;
 
-// --- Slot timer: counts sysclk cycles within the active akiko slot. ---
-// 16 sysclk cycles per chip slot (matches sdram_ctrl states 0..15).
-// Sample chipRD at the very end of the slot when the read pipeline has
-// reached state 9.
-reg [4:0] slot_cnt;
+// --- Slot timer: counts clk_sys cycles within the active akiko slot. ---
+// 4 clk_sys cycles per c_7m period (= 16 clk_114 cycles in sdram_ctrl).
+// Sample chipRD at the last cycle of the slot, by which time sdram_ctrl
+// has progressed well past its state 9 read latch.
+reg [2:0] slot_cnt;
 
 // --- Akiko-side latched request fields. ---
 reg [24:1] ak_addr;
@@ -137,18 +141,18 @@ always @(posedge clk) begin
 				ak_wr_data <= {akiko_dma_wbyte, akiko_dma_wbyte};
 				ak_we      <= akiko_dma_we;
 				ak_baddr0  <= akiko_dma_baddr[0];
-				slot_cnt   <= 5'd0;
+				slot_cnt   <= 3'd0;
 				state      <= S_DRIVE;
 			end
 		end
 
 		S_DRIVE: begin
-			slot_cnt <= slot_cnt + 5'd1;
-			// At slot_cnt 14 sample chipRD (sdram_ctrl latches read at
-			// state 9; with our drive starting at state 0 of the chip
-			// slot, chipRD is valid from state 9 onward through the rest
-			// of the slot). 14 is safely past state 9.
-			if (slot_cnt == 5'd14) begin
+			slot_cnt <= slot_cnt + 3'd1;
+			// At slot_cnt 3 (last clk_sys cycle of the slot), sample
+			// chipRD. By now sdram_ctrl has had 3 clk_sys cycles =
+			// 12 clk_114 cycles since slot start, well past its state-9
+			// read latch.
+			if (slot_cnt == 3'd3) begin
 				if (!ak_we) begin
 					ak_rbyte_r <= ak_baddr0 ? chip_in_rd[7:0]
 					                        : chip_in_rd[15:8];

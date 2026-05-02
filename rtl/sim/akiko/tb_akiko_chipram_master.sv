@@ -44,16 +44,17 @@ end
 logic clk = 0;
 initial forever #5 clk = ~clk;  // 100 MHz nominal
 
-// c_7m -- chipset slot clock, ~sysclk/16 in real hardware. Generated
-// here as sysclk/16 (toggle every 8 cycles) so the arbiter sees real
-// slot boundaries.
+// c_7m -- chipset slot clock. In real hardware c_7m = clk_sys / 4 and
+// the arbiter runs on clk_sys. To model the same ratio, the bench's
+// `clk` plays the role of clk_sys, so c_7m toggles every 2 cycles ->
+// c_7m period = 4 cycles, matching real ratios.
 logic c_7m = 0;
-logic [3:0] c_7m_div = 0;
+logic [1:0] c_7m_div = 0;
 always @(posedge clk) begin
-	c_7m_div <= c_7m_div + 4'd1;
-	if (c_7m_div == 4'd7) begin
+	c_7m_div <= c_7m_div + 2'd1;
+	if (c_7m_div == 2'd1) begin
 		c_7m <= ~c_7m;
-		c_7m_div <= 4'd0;
+		c_7m_div <= 2'd0;
 	end
 end
 
@@ -130,14 +131,19 @@ chipdma_arb u_dut (
 // byte memory backs the model; the upper bits of chip_out_addr select an
 // 8-byte page modulo 8KiB so we can use small addresses.
 // -----------------------------------------------------------------------
-localparam int LATENCY = 9;  // matches sdram_ctrl read state 9
+// In hardware, sdram_ctrl latches reads at its state 9 (= 9 clk_114
+// cycles after slot start). With clk_sys = clk_114 / 4, that maps to
+// ~2.25 clk_sys cycles. The bench's pipeline adds one extra clock for
+// the chipRD_r register output, so LATENCY=1 here gives chipRD valid
+// at clk_sys cycle 2 of the slot (matches hardware closely; arbiter
+// samples at slot_cnt=3).
+localparam int LATENCY = 1;
 
 logic [7:0] mem [65536];
 
-// Pipeline regs to model fixed read latency. Sized to 10 = LATENCY+1
-// (literal so ASE doesn't complain about parameter expressions).
-logic [15:0] rd_pipe [10];
-logic        rd_valid_pipe [10];
+// Pipeline regs to model fixed read latency. Sized to 3 (LATENCY=2 + 1).
+logic [15:0] rd_pipe [3];
+logic        rd_valid_pipe [3];
 logic [15:0] chipRD_r;
 
 assign chip_in_rd = chipRD_r;
@@ -145,7 +151,7 @@ assign chip_in_rd = chipRD_r;
 initial begin
 	int ii;
 	for (ii = 0; ii < 65536; ii++) mem[ii] = 8'h00;
-	for (ii = 0; ii < 10; ii++) begin
+	for (ii = 0; ii < 3; ii++) begin
 		rd_pipe[ii] = 16'h0000;
 		rd_valid_pipe[ii] = 1'b0;
 	end
@@ -160,22 +166,8 @@ wire [15:0] lo_idx = {chip_out_addr[15:1], 1'b1};
 
 always @(posedge clk) begin
 	// Shift pipeline (unrolled -- ASE 10.5b is happier without the for loop).
-	rd_pipe[9]       <= rd_pipe[8];
-	rd_pipe[8]       <= rd_pipe[7];
-	rd_pipe[7]       <= rd_pipe[6];
-	rd_pipe[6]       <= rd_pipe[5];
-	rd_pipe[5]       <= rd_pipe[4];
-	rd_pipe[4]       <= rd_pipe[3];
-	rd_pipe[3]       <= rd_pipe[2];
 	rd_pipe[2]       <= rd_pipe[1];
 	rd_pipe[1]       <= rd_pipe[0];
-	rd_valid_pipe[9] <= rd_valid_pipe[8];
-	rd_valid_pipe[8] <= rd_valid_pipe[7];
-	rd_valid_pipe[7] <= rd_valid_pipe[6];
-	rd_valid_pipe[6] <= rd_valid_pipe[5];
-	rd_valid_pipe[5] <= rd_valid_pipe[4];
-	rd_valid_pipe[4] <= rd_valid_pipe[3];
-	rd_valid_pipe[3] <= rd_valid_pipe[2];
 	rd_valid_pipe[2] <= rd_valid_pipe[1];
 	rd_valid_pipe[1] <= rd_valid_pipe[0];
 	rd_pipe[0]       <= 16'h0000;
