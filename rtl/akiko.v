@@ -544,17 +544,21 @@ if (NATIVE_CD32) begin : g_cd
 						cdrom_intreq <= ((cdrom_intreq & ~CDINT_DRIVERECV) | CDINT_DRIVEXMIT)
 						              | (((cdcomrxinx + 8'd1) == cdcomrxcmp) ? CDINT_RXDMADONE : 32'h0);
 					end else if ((cdcomrxinx + 8'd1) == cdcomrxcmp) begin
-						cdrom_intreq <= cdrom_intreq | CDINT_RXDMADONE;
-						// M5 patch: firmware's rxcmp is the canonical end-of-RX
-						// marker. If it's reached before our queued
-						// receive_length runs out (e.g. we pushed a 2-byte
-						// auto-init media-status but firmware only set rxcmp=1
-						// because it expects a different response shape during
-						// boot), treat any remaining bytes as discarded —
-						// clear receive_length/offset so tx_can_start unblocks
-						// (it's gated on receive_length==0).
-						cdrom_receive_length <= 6'd0;
-						cdrom_receive_offset <= 6'd0;
+						// Phase 12: rxcmp match mid-delivery sets RXDMADONE but
+						// MUST preserve receive_length/offset. WinUAE
+						// cdrom_return_data (akiko.cpp:883-895) only `break`s
+						// the per-call loop here; the queued response stays
+						// pending and the next BIOS bump of rxcmp resumes
+						// delivery from the current offset until either
+						// offset==length (full delivery, length cleared above)
+						// or another rxcmp match (another partial drain).
+						//
+						// The previous "M5 truncation hack" cleared length/offset
+						// on the first rxcmp match, destroying bytes 1..N-1 of
+						// any response BIOS hadn't pre-sized rxcmp for. That
+						// turned the post-INFO 3-byte media-status push into a
+						// single byte, leaving BIOS waiting for a frame it
+						// never received and never advancing to MULTI/TOC.
 					end
 					rx_busy     <= 1'b0;
 					rx_inflight <= 1'b0;
