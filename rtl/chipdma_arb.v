@@ -1,22 +1,38 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// chipdma_arb -- M5 chip-RAM master arbiter (skeleton).
+// chipdma_arb -- M5 chip-RAM master arbiter.
 //
 // Sits between minimig.v's chipset DMA signals (Agnus / blitter / copper)
-// and sdram_ctrl's chipDMA port. Default: forwards minimig's signals
-// through unchanged. When minimig is idle (chipDMA + chipRW both
-// de-asserted = both HIGH) and akiko_dma_req is asserted, takes over the
-// chipDMA inputs for one access window, samples chipRD when the read
-// returns, and pulses akiko_dma_ack with the read byte.
+// and sdram_ctrl's chipDMA port. Default forwards minimig's signals
+// through unchanged. When the chipset is not using a slot, the arbiter
+// can claim it for akiko's single-byte master, run one access, sample
+// chipRD when the read returns, and pulse akiko_dma_ack with the byte.
 //
-// Stage 2: this skeleton just wires minimig through and parks akiko's
-// outputs at idle / no ack. The matching testbench will fail most tests.
-// Stage 3 (next commit) implements the real arbiter.
+// Slot synchronization: sdram_ctrl arbitrates at its own state 0 (RAS
+// phase). One sdram_ctrl cycle (states 0..15) takes 16 sysclk cycles --
+// the same period as the chipset's c_7m clock. So a c_7m rising edge
+// marks the start of a new slot, and at that instant minimig's chipset
+// has just driven its DMA request signals for the slot. We sample those
+// signals at the c_7m edge: if minimig is idle (chip_in_dma high AND
+// chip_in_rw high), we know the next 16 sysclk cycles are ours -- drive
+// akiko's address, hold for the full slot, sample chipRD at the end,
+// then pulse dma_ack. If minimig is busy, we skip this slot and wait
+// for the next c_7m edge.
+//
+// We never preempt the chipset: minimig's signals are passed through
+// during minimig-active slots, and the arbiter only drives during slots
+// it confirmed minimig is not using.
+//
+// Akiko addressing: dma_baddr is a 24-bit BYTE address. Word index is
+// dma_baddr[24:1]; the byte selector is dma_baddr[0]. Amiga is
+// big-endian: dma_baddr[0]=0 picks the upper byte (chipU=0, chipL=1);
+// dma_baddr[0]=1 picks the lower byte (chipU=1, chipL=0).
 
 module chipdma_arb
 (
-	input             clk,
+	input             clk,        // sysclk (114MHz on hardware, 100MHz in bench)
 	input             reset,
+	input             c_7m,       // chipset slot clock, used as slot boundary
 
 	// From minimig (chipset DMA)
 	input      [24:1] chip_in_addr,
@@ -44,15 +60,116 @@ module chipdma_arb
 	input      [15:0] chip_in_rd
 );
 
-// ---- Stage 2 skeleton: pass-through only. ----
-assign chip_out_addr = chip_in_addr;
-assign chip_out_l    = chip_in_l;
-assign chip_out_u    = chip_in_u;
-assign chip_out_rw   = chip_in_rw;
-assign chip_out_dma  = chip_in_dma;
-assign chip_out_wr   = chip_in_wr;
+// --- c_7m rising-edge detector (slot boundary) ---
+reg c_7m_d;
+always @(posedge clk) c_7m_d <= c_7m;
+wire c_7m_rise = c_7m & ~c_7m_d;
 
-assign akiko_dma_rbyte = 8'h00;
-assign akiko_dma_ack   = 1'b0;
+// --- Slot timer: counts sysclk cycles within the active akiko slot. ---
+// 16 sysclk cycles per chip slot (matches sdram_ctrl states 0..15).
+// Sample chipRD at the very end of the slot when the read pipeline has
+// reached state 9.
+reg [4:0] slot_cnt;
+
+// --- Akiko-side latched request fields. ---
+reg [24:1] ak_addr;
+reg        ak_l;
+reg        ak_u;
+reg        ak_rw;       // 1 = read, 0 = write (matches sdram_ctrl chipRW)
+reg [15:0] ak_wr_data;
+reg        ak_we;       // remembers whether this slot is a write (no chipRD sample)
+reg        ak_baddr0;   // byte selector for read demux
+
+// --- State ---
+localparam [1:0]
+	S_IDLE     = 2'd0,
+	S_DRIVE    = 2'd1,
+	S_ACK      = 2'd2,
+	S_COOLDOWN = 2'd3;
+
+reg [1:0] state;
+
+// --- Output regs back to akiko ---
+reg [7:0] ak_rbyte_r;
+reg       ak_ack_r;
+
+assign akiko_dma_rbyte = ak_rbyte_r;
+assign akiko_dma_ack   = ak_ack_r;
+
+// --- Output mux to sdram_ctrl: pass minimig through unless we're driving. ---
+wire arb_drive = (state == S_DRIVE);
+assign chip_out_addr = arb_drive ? ak_addr    : chip_in_addr;
+assign chip_out_l    = arb_drive ? ak_l       : chip_in_l;
+assign chip_out_u    = arb_drive ? ak_u       : chip_in_u;
+assign chip_out_rw   = arb_drive ? ak_rw      : chip_in_rw;
+// chipDMA is active-low. For a read, hold it LOW; for a write,
+// chipRW going low is enough -- chipDMA can stay HIGH (sdram_ctrl arms
+// on `~chipDMA | ~chipRW`). We hold chipDMA LOW for both to keep the
+// slot consistent.
+assign chip_out_dma  = arb_drive ? 1'b0       : chip_in_dma;
+assign chip_out_wr   = arb_drive ? ak_wr_data : chip_in_wr;
+
+// "minimig idle this slot" -- sampled at c_7m rising edge.
+wire minimig_idle = chip_in_dma & chip_in_rw;
+
+always @(posedge clk) begin
+	if (reset) begin
+		state      <= S_IDLE;
+		slot_cnt   <= 5'd0;
+		ak_ack_r   <= 1'b0;
+		ak_rbyte_r <= 8'h00;
+	end else begin
+		ak_ack_r <= 1'b0;  // ack defaults low; pulse in S_ACK
+
+		case (state)
+		S_IDLE: begin
+			// Latch a new akiko request only at a c_7m rising edge AND
+			// when minimig is idle for this slot.
+			if (akiko_dma_req && c_7m_rise && minimig_idle) begin
+				// akiko provides a 24-bit BYTE address; chipAddr is
+				// 24-bit WORD address. Word index = baddr[23:1] (23 bits)
+				// padded with one zero MSB.
+				ak_addr    <= {1'b0, akiko_dma_baddr[23:1]};
+				// dma_baddr[0]=0 -> upper byte: chipU=0 (enabled), chipL=1.
+				ak_u       <= akiko_dma_baddr[0];   // 0 -> chipU=0
+				ak_l       <= ~akiko_dma_baddr[0];  // 0 -> chipL=0 when odd
+				ak_rw      <= ~akiko_dma_we;        // chipRW: 1=read, 0=write
+				ak_wr_data <= {akiko_dma_wbyte, akiko_dma_wbyte};
+				ak_we      <= akiko_dma_we;
+				ak_baddr0  <= akiko_dma_baddr[0];
+				slot_cnt   <= 5'd0;
+				state      <= S_DRIVE;
+			end
+		end
+
+		S_DRIVE: begin
+			slot_cnt <= slot_cnt + 5'd1;
+			// At slot_cnt 14 sample chipRD (sdram_ctrl latches read at
+			// state 9; with our drive starting at state 0 of the chip
+			// slot, chipRD is valid from state 9 onward through the rest
+			// of the slot). 14 is safely past state 9.
+			if (slot_cnt == 5'd14) begin
+				if (!ak_we) begin
+					ak_rbyte_r <= ak_baddr0 ? chip_in_rd[7:0]
+					                        : chip_in_rd[15:8];
+				end
+				state <= S_ACK;
+			end
+		end
+
+		S_ACK: begin
+			ak_ack_r <= 1'b1;
+			state    <= S_COOLDOWN;
+		end
+
+		S_COOLDOWN: begin
+			// Guarantee at least one cycle of !dma_ack between two
+			// successive akiko services so akiko.v's rx_inflight
+			// handshake (lines 522-528) sees the gap.
+			state <= S_IDLE;
+		end
+		endcase
+	end
+end
 
 endmodule

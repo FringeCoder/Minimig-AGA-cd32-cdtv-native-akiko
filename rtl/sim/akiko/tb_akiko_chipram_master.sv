@@ -44,6 +44,19 @@ end
 logic clk = 0;
 initial forever #5 clk = ~clk;  // 100 MHz nominal
 
+// c_7m -- chipset slot clock, ~sysclk/16 in real hardware. Generated
+// here as sysclk/16 (toggle every 8 cycles) so the arbiter sees real
+// slot boundaries.
+logic c_7m = 0;
+logic [3:0] c_7m_div = 0;
+always @(posedge clk) begin
+	c_7m_div <= c_7m_div + 4'd1;
+	if (c_7m_div == 4'd7) begin
+		c_7m <= ~c_7m;
+		c_7m_div <= 4'd0;
+	end
+end
+
 logic reset = 1;
 
 // -----------------------------------------------------------------------
@@ -85,6 +98,7 @@ wire  [15:0] chip_in_rd;
 chipdma_arb u_dut (
 	.clk             (clk             ),
 	.reset           (reset           ),
+	.c_7m            (c_7m            ),
 
 	.chip_in_addr    (chip_in_addr    ),
 	.chip_in_l       (chip_in_l       ),
@@ -377,6 +391,103 @@ initial begin
 		end else begin
 			check8("test6: akiko got byte after minimig traffic",
 			       8'hCC, akiko_dma_rbyte);
+		end
+		akiko_dma_req <= 1'b0;
+	end
+
+	// ---- Test 7: forwarding fidelity. Hold akiko_dma_req high. Drive a
+	//      minimig slot. While that slot is active, chip_out_addr/chip_out_dma
+	//      must equal chip_in_addr/chip_in_dma exactly (no arbiter
+	//      interference). ----
+	preload(16'h0600, 8'h77);
+	preload(16'h0601, 8'h88);
+	akiko_dma_req   <= 1'b1;
+	akiko_dma_we    <= 1'b0;
+	akiko_dma_baddr <= 24'h000600;
+	begin : t7
+		automatic int t7_mismatches = 0;
+		// Set up a minimig read slot in the next cycle.
+		@(posedge clk);
+		chip_in_addr <= 25'h0001234;
+		chip_in_u    <= 1'b0;        // upper enabled
+		chip_in_l    <= 1'b0;        // lower enabled
+		chip_in_rw   <= 1'b1;        // read
+		chip_in_dma  <= 1'b0;        // active
+		chip_in_wr   <= 16'h0000;
+		// Sample over the next 4 cycles -- must be forwarded through.
+		repeat (4) begin
+			@(posedge clk);
+			if (chip_out_dma !== chip_in_dma) t7_mismatches++;
+			if (chip_out_addr !== chip_in_addr) t7_mismatches++;
+			if (chip_out_rw !== chip_in_rw) t7_mismatches++;
+		end
+		// Idle minimig.
+		chip_in_dma <= 1'b1;
+		chip_in_rw  <= 1'b1;
+		chip_in_l   <= 1'b1;
+		chip_in_u   <= 1'b1;
+		if (t7_mismatches > 0) begin
+			$display("FAIL test7: %0d forwarding mismatches", t7_mismatches);
+			errs++;
+		end else begin
+			checks++;
+			$display("PASS test7: minimig forwarding fidelity (4 cycles)");
+		end
+		// Drain akiko's pending request.
+		begin
+			automatic int t7_timeout = 400;
+			while (!akiko_dma_ack && t7_timeout > 0) begin
+				@(posedge clk); t7_timeout--;
+			end
+			if (t7_timeout == 0) begin
+				$display("FAIL test7: akiko ack timeout after minimig traffic");
+				errs++;
+			end
+		end
+		akiko_dma_req <= 1'b0;
+	end
+
+	// ---- Test 8: race -- minimig and akiko request the same c_7m slot.
+	//      Minimig MUST win; akiko's request waits for the next idle slot. ----
+	preload(16'h0700, 8'h99);
+	akiko_dma_req   <= 1'b1;
+	akiko_dma_we    <= 1'b0;
+	akiko_dma_baddr <= 24'h000700;
+	begin : t8
+		automatic int t8_drove_minimig_addr = 0;
+		// Wait for the next c_7m rising edge to align.
+		@(negedge c_7m);
+		@(posedge c_7m);
+		// At this c_7m edge, drive minimig's request simultaneously with
+		// akiko_dma_req still high. Check on the next sysclk edges that
+		// chip_out_addr == minimig's address (not akiko's word addr).
+		chip_in_addr <= 25'h0009999;
+		chip_in_u    <= 1'b0;
+		chip_in_l    <= 1'b0;
+		chip_in_rw   <= 1'b0;        // write -- forces minimig active
+		chip_in_dma  <= 1'b1;
+		chip_in_wr   <= 16'hAAAA;
+		repeat (3) begin
+			@(posedge clk);
+			if (chip_out_addr === 25'h0009999) t8_drove_minimig_addr++;
+		end
+		// Idle minimig.
+		chip_in_rw <= 1'b1;
+		chip_in_dma <= 1'b1;
+		if (t8_drove_minimig_addr == 0) begin
+			$display("FAIL test8: arbiter preempted minimig (akiko address won race)");
+			errs++;
+		end else begin
+			checks++;
+			$display("PASS test8: minimig won race (%0d cycles confirmed)",
+			         t8_drove_minimig_addr);
+		end
+		// Drain akiko.
+		begin
+			automatic int t8_timeout = 400;
+			while (!akiko_dma_ack && t8_timeout > 0) begin
+				@(posedge clk); t8_timeout--;
+			end
 		end
 		akiko_dma_req <= 1'b0;
 	end
