@@ -1,9 +1,15 @@
-// Akiko bus trace — 32-deep ring buffer of CPU accesses to the Akiko window
-// at $B80000-$B8003F. Drained by Main_MiSTer via a new SPI sub-channel
+// Akiko bus trace — 128-deep ring buffer of CPU WRITE accesses to the Akiko
+// window at $B80000-$B800FF. Drained by Main_MiSTer via a new SPI sub-channel
 // (akiko_cs && io_din[7], i.e. UIO class 0xF400 with bit 7 set on byte 1).
 //
+// v27 change: capture writes only. Reads were drowning the ring at MHz rates
+// (BIOS polls INTREQ in a tight loop) and overwriting older write entries
+// before userspace could drain them at 60 Hz. Without read capture the ring
+// stays empty between BIOS bursts and reliably preserves every write since
+// boot, even if the userspace poller starts late.
+//
 // One trace entry = 32 bits, drained as 4 bytes LSB-first:
-//   byte 0: addr[6:0] | rd_or_wr (bit 7)
+//   byte 0: addr[6:0] | 1 (bit 7 always set — kept for compat, marks "write")
 //   byte 1: data[7:0]
 //   byte 2: data[15:8]
 //   byte 3: bit 0 = entry valid (0 = ring empty, ignore the rest)
@@ -29,10 +35,10 @@ module akiko_bus_trace
 	output reg  [7:0] uio_dout
 );
 
-// 32-entry ring (5-bit pointers).
-reg [31:0] ring [0:31];
-reg  [4:0] wr_ptr;
-reg  [4:0] rd_ptr;
+// 128-entry ring (7-bit pointers). Writes-only (see header).
+reg [31:0] ring [0:127];
+reg  [6:0] wr_ptr;
+reg  [6:0] rd_ptr;
 wire       empty = (wr_ptr == rd_ptr);
 
 // Stage the bus inputs one cycle. `dout_d` in particular breaks the long
@@ -60,15 +66,16 @@ always @(posedge clk) begin
 	din_d  <= din;
 	if (sel) dout_d <= dout;  // sample-and-hold during the actual read
 
-	// Capture one entry per sel_akiko cycle (any access within the window).
+	// Capture one entry per sel_akiko WRITE cycle (writes only — reads were
+	// flooding the ring; see header).
 	// Byte order on drain (LSB first):
-	//   byte 0 = {wr_bit, addr[6:0]}    (rdwr in bit 7, word addr in bits 6:0)
+	//   byte 0 = {1'b1, addr[6:0]}      (bit 7 always 1 = "write")
 	//   byte 1 = data[7:0]
 	//   byte 2 = data[15:8]
 	//   byte 3 = 0xFF (valid) / 0x00 (ring empty)
-	if (sel_d && (rd_d || wr_d)) begin
-		ring[wr_ptr] <= {8'hFF, wr_d ? din_d : dout_d, wr_d ? 1'b1 : 1'b0, addr_d};
-		wr_ptr <= wr_ptr + 1'b1;
+	if (sel_d && wr_d) begin
+		ring[wr_ptr] <= {8'hFF, din_d, 1'b1, addr_d};
+		wr_ptr       <= wr_ptr + 1'b1;
 	end
 
 	if (reset) begin
