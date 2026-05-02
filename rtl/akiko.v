@@ -541,6 +541,16 @@ if (NATIVE_CD32) begin : g_cd
 						              | (((cdcomrxinx + 8'd1) == cdcomrxcmp) ? CDINT_RXDMADONE : 32'h0);
 					end else if ((cdcomrxinx + 8'd1) == cdcomrxcmp) begin
 						cdrom_intreq <= cdrom_intreq | CDINT_RXDMADONE;
+						// M5 patch: firmware's rxcmp is the canonical end-of-RX
+						// marker. If it's reached before our queued
+						// receive_length runs out (e.g. we pushed a 2-byte
+						// auto-init media-status but firmware only set rxcmp=1
+						// because it expects a different response shape during
+						// boot), treat any remaining bytes as discarded —
+						// clear receive_length/offset so tx_can_start unblocks
+						// (it's gated on receive_length==0).
+						cdrom_receive_length <= 6'd0;
+						cdrom_receive_offset <= 6'd0;
 					end
 					rx_busy     <= 1'b0;
 					rx_inflight <= 1'b0;
@@ -643,6 +653,15 @@ if (NATIVE_CD32) begin : g_cd
 			if (hps_result_done && (cdrom_receive_length == 6'd0)) begin
 				cdrom_receive_length <= hps_result_wr_ptr;
 				hps_result_wr_ptr    <= 6'd0;
+				// Wake firmware: real Akiko continuously asserts SUBCODE at 75Hz
+				// when media is present, signaling "chip alive, drive spinning".
+				// Until we have a real subcode generator, raise SUBCODE on every
+				// queued result so the periodic media-status push from userspace
+				// doubles as the alive heartbeat. Firmware clears this via byte
+				// write to $0C/$18 (handled at line 413 above).
+				// M5 patch v2: also set DRIVERECV alongside SUBCODE — some boot
+				// firmware paths look at DRIVERECV before responding.
+				cdrom_intreq         <= cdrom_intreq | CDINT_SUBCODE | CDINT_DRIVERECV;
 			end
 		end // else !reset
 	end
@@ -678,8 +697,14 @@ if (NATIVE_CD32) begin : g_cd
 			5'b10011: cd_dout_r = cdrom_flags[15:0];
 			// $28 PIO byte read — M1 stub returns last write in upper byte
 			5'b10100: cd_dout_r = {pio_byte, 8'h0};
-			// $30/$32 NVRAM I2C — M1 stub
-			5'b11000: cd_dout_r = {nvram_io,  8'h0};
+			// $30/$32 NVRAM I2C — M5 stub: report "no slave on bus" by
+			// returning 0xFF for the I/O byte (both SDA and SCL pulled high
+			// by the external 1k resistors when no EEPROM is responding).
+			// The earlier loopback (returning the last value written) made
+			// firmware see fake ACKs and spin forever in the bit-bang loop.
+			// With 0xFF, master sees NACK on every byte and aborts NVRAM
+			// init, then proceeds to the actual CD command flow.
+			5'b11000: cd_dout_r = {8'hFF, 8'h0};
 			5'b11001: cd_dout_r = {nvram_dir, 8'h0};
 			default:  cd_dout_r = 16'h0;
 		endcase
