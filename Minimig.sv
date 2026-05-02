@@ -276,16 +276,25 @@ wire        akiko_cs_trace;
 wire        akiko_trace_rd;
 wire  [7:0] akiko_trace_din;
 
-// M5 diagnostic: dma_req/ack short-loop until a real chip-RAM master is
-// implemented. ack must be DELAYED 1 cycle after req — the RX engine has
-// an rx_inflight handshake (akiko.v:522-528) that requires at least one
-// cycle of !dma_ack while rx_busy=1 before counting an ack. Same-cycle
-// ack=req defeats it and gets RX stuck (which then blocks TX, since TX
-// completion is gated on !rx_busy). One-cycle latched ack satisfies the
-// handshake.
+// Akiko chip-RAM master wires (M5). akiko's DMA engines emit single-byte
+// requests; chipdma_arb (instantiated below sdram_ctrl) muxes them onto
+// the chipDMA port whenever minimig isn't using the slot.
 wire        akiko_dma_req_w;
-reg         akiko_dma_ack_r;
-always @(posedge clk_sys) akiko_dma_ack_r <= akiko_dma_req_w;
+wire        akiko_dma_we_w;
+wire [23:0] akiko_dma_baddr_w;
+wire  [7:0] akiko_dma_wbyte_w;
+wire  [7:0] akiko_dma_rbyte_w;
+wire        akiko_dma_ack_w;
+
+// Arbiter outputs that drive sdram_ctrl's chipDMA port (replacing the
+// direct minimig wiring). Default: pass minimig through. When akiko
+// claims an idle slot, drive akiko's address/data instead.
+wire [24:1] arb_chip_addr;
+wire        arb_chip_l;
+wire        arb_chip_u;
+wire        arb_chip_rw;
+wire        arb_chip_dma;
+wire [15:0] arb_chip_wr;
 
 wire [35:0] EXT_BUS;
 hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata));
@@ -549,14 +558,51 @@ sdram_ctrl ram1
 	.cpuRD        (ram_dout1       ),
 	.ramready     (ram_ready1      ),
 
-	.chipWR       (ram_data        ),
-	.chipAddr     (ram_address     ),
-	.chipU        (_ram_bhe        ),
-	.chipL        (_ram_ble        ),
-	.chipRW       (_ram_we         ),
-	.chipDMA      (_ram_oe         ),
+	.chipWR       (arb_chip_wr     ),
+	.chipAddr     (arb_chip_addr   ),
+	.chipU        (arb_chip_u      ),
+	.chipL        (arb_chip_l      ),
+	.chipRW       (arb_chip_rw     ),
+	.chipDMA      (arb_chip_dma    ),
 	.chipRD       (ramdata_in      ),
 	.chip48       (chip48          )
+);
+
+// M5: chip-RAM master arbiter. Sits between minimig's chipset DMA signals
+// and sdram_ctrl's chipDMA port. Default forwards minimig untouched. On
+// c_7m rising edges where minimig is idle, claims the slot for akiko's
+// single-byte master and pulses akiko_dma_ack with the read byte.
+chipdma_arb chipdma_arb
+(
+	.clk             (clk_sys              ),
+	.reset           (reset_d              ),
+	.c_7m            (c1                   ),
+
+	// From minimig (existing chipset DMA wires). chipAddr is 24-bit word
+	// addr; minimig provides only 23 bits (ram_address[23:1]) so pad MSB.
+	.chip_in_addr    ({1'b0, ram_address}  ),
+	.chip_in_l       (_ram_ble             ),
+	.chip_in_u       (_ram_bhe             ),
+	.chip_in_rw      (_ram_we              ),
+	.chip_in_dma     (_ram_oe              ),
+	.chip_in_wr      (ram_data             ),
+
+	// From / to akiko (via fastchip).
+	.akiko_dma_req   (akiko_dma_req_w      ),
+	.akiko_dma_we    (akiko_dma_we_w       ),
+	.akiko_dma_baddr (akiko_dma_baddr_w    ),
+	.akiko_dma_wbyte (akiko_dma_wbyte_w    ),
+	.akiko_dma_rbyte (akiko_dma_rbyte_w    ),
+	.akiko_dma_ack   (akiko_dma_ack_w      ),
+
+	// To sdram_ctrl chipDMA port (drives the actual SDRAM access).
+	.chip_out_addr   (arb_chip_addr        ),
+	.chip_out_l      (arb_chip_l           ),
+	.chip_out_u      (arb_chip_u           ),
+	.chip_out_rw     (arb_chip_rw          ),
+	.chip_out_dma    (arb_chip_dma         ),
+	.chip_out_wr     (arb_chip_wr          ),
+	.chip_in_rd      (ramdata_in           )
 );
 
 wire [15:0] ram_dout2;
@@ -655,19 +701,18 @@ fastchip fastchip
 
 	.akiko_irq    (akiko_f_irq       ),
 
-	// M5 diagnostic: ack every DMA request immediately with rbyte=0x00.
-	// This lets the TX engine progress (firmware queues a command, akiko
-	// DMAs N zero bytes, command_buffer fills, cmd_pending fires, bridge
-	// forwards to userspace). RX writes go to /dev/null so firmware will
-	// read stale chip RAM for responses — Cannon Fodder probably won't
-	// boot fully, but we'll see whether the FPGA→userspace command flow
-	// works at all. Real chip-RAM master is still TODO for M5+.
+	// M5: full chip-RAM master via chipdma_arb (instantiated next to
+	// sdram_ctrl). akiko's TX engine reads command bytes from chip RAM,
+	// RX engine writes response bytes back; both addressed by
+	// dma_baddr[23:0] (byte address). dma_ack pulses one clk_sys cycle
+	// per byte; rx_inflight handshake at akiko.v:522-528 expects a
+	// >=1-cycle gap between successive acks (chipdma_arb's S_COOLDOWN).
 	.akiko_dma_req   (akiko_dma_req_w   ),
-	.akiko_dma_we    (                  ),
-	.akiko_dma_baddr (                  ),
-	.akiko_dma_wbyte (                  ),
-	.akiko_dma_rbyte (8'h00             ),
-	.akiko_dma_ack   (akiko_dma_ack_r   ),
+	.akiko_dma_we    (akiko_dma_we_w    ),
+	.akiko_dma_baddr (akiko_dma_baddr_w ),
+	.akiko_dma_wbyte (akiko_dma_wbyte_w ),
+	.akiko_dma_rbyte (akiko_dma_rbyte_w ),
+	.akiko_dma_ack   (akiko_dma_ack_w   ),
 
 	// M3: Akiko HPS bridge to hps_ext (akiko_uio_* on fastchip side, akiko_*
 	// on hps_ext side — names flip because the two modules describe the
