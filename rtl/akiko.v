@@ -324,7 +324,11 @@ if (NATIVE_CD32) begin : g_cd
 
 	always @(posedge clk) begin
 		if (reset) begin
-			cdrom_intreq        <= 32'h0;
+			// WinUAE akiko.cpp:2135 inits cdrom_intreq = CDINTERRUPT_SUBCODE
+			// at reset/restore. SUBCODE bit is the "drive heartbeat" the
+			// BIOS samples at boot to confirm Akiko presence; without it
+			// BIOS may treat drive as absent and never advance to MULTI.
+			cdrom_intreq        <= CDINT_SUBCODE;
 			cdrom_intena        <= 32'h0;
 			cdrom_addressdata   <= 32'h0;
 			cdrom_addressmisc   <= 32'h0;
@@ -653,15 +657,11 @@ if (NATIVE_CD32) begin : g_cd
 			if (hps_result_done && (cdrom_receive_length == 6'd0)) begin
 				cdrom_receive_length <= hps_result_wr_ptr;
 				hps_result_wr_ptr    <= 6'd0;
-				// Wake firmware: real Akiko continuously asserts SUBCODE at 75Hz
-				// when media is present, signaling "chip alive, drive spinning".
-				// Until we have a real subcode generator, raise SUBCODE on every
-				// queued result so the periodic media-status push from userspace
-				// doubles as the alive heartbeat. Firmware clears this via byte
-				// write to $0C/$18 (handled at line 413 above).
-				// M5 patch v2: also set DRIVERECV alongside SUBCODE — some boot
-				// firmware paths look at DRIVERECV before responding.
-				cdrom_intreq         <= cdrom_intreq | CDINT_SUBCODE | CDINT_DRIVERECV;
+				// v20: drop the M5 SUBCODE-on-push hack; BIOS may interpret
+				// SUBCODE as "drive playing, subcode coming" and stall waiting
+				// for actual subcode data. DRIVERECV alone signals "result
+				// ready" which is what the BIOS path actually needs.
+				cdrom_intreq         <= cdrom_intreq | CDINT_DRIVERECV;
 			end
 		end // else !reset
 	end
