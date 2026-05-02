@@ -38,6 +38,16 @@ wire       empty = (wr_ptr == rd_ptr);
 // Stage the bus inputs one cycle. `dout_d` in particular breaks the long
 // combinational path from akiko's register-file read mux into the ring's
 // write port, which was costing ~0.4 ns of setup slack on clk_sys.
+//
+// BUGFIX: dout_d MUST be sampled when sel is asserted (same cycle as the
+// real read), not unconditionally. cd_dout reverts to 16'h0 the cycle
+// after `cs` drops, and addr/dout_r evaluate to whatever the next bus
+// access wants. Sampling unconditionally captured stale combinational
+// values from the NEXT bus cycle, producing nonsense in the ring (e.g.
+// $B80000 ID reads showed 0x0000 instead of 0xC0CA, and $B8001A reads
+// showed advancing rxinx values that did not match register state).
+// din is fine to stage unconditionally because the CPU drives it stably
+// during the write cycle and write data does not change shape.
 reg sel_d, rd_d, wr_d;
 reg [6:0] addr_d;
 reg [15:0] din_d, dout_d;
@@ -48,7 +58,7 @@ always @(posedge clk) begin
 	wr_d   <= wr;
 	addr_d <= addr;
 	din_d  <= din;
-	dout_d <= dout;
+	if (sel) dout_d <= dout;  // sample-and-hold during the actual read
 
 	// Capture one entry per sel_akiko cycle (any access within the window).
 	// Byte order on drain (LSB first):
