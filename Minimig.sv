@@ -269,6 +269,7 @@ wire        akiko_cs;
 wire        akiko_cs_sec; // M4 sub-channel selector
 wire        akiko_req;     // FROM fastchip TO hps_ext (cmd status bit)
 wire        akiko_sec_req; // FROM fastchip TO hps_ext (M4 sector status bit)
+wire        akiko_rx_busy; // FROM fastchip TO hps_ext (Phase 18: RX engine busy)
 
 // Akiko CPU-bus trace ring (debug). hps_ext drains via akiko_cs_trace sub-
 // channel; bytes flow fastchip -> hps_ext as akiko_trace_din.
@@ -727,6 +728,7 @@ fastchip fastchip
 	.akiko_uio_dout    (akiko_din      ),
 	.akiko_uio_req     (akiko_req      ),
 	.akiko_uio_sec_req (akiko_sec_req  ),
+	.akiko_uio_rx_busy (akiko_rx_busy  ),
 
 	// Trace sub-channel (debug ring buffer of CPU bus accesses to akiko window).
 	.akiko_uio_cs_trace   (akiko_cs_trace  ),

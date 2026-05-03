@@ -81,7 +81,9 @@ akiko #(.NATIVE_CD32(1)) u_dut (
 	.hps_result_done(hps_result_done),
 	// M4 HPS sector channel — M3 bench doesn't exercise it; tie off cleanly.
 	.hps_sec_req(), .hps_sec_status(),
-	.hps_sec_push(1'b0), .hps_sec_byte(8'h00), .hps_sec_done(1'b0)
+	.hps_sec_push(1'b0), .hps_sec_byte(8'h00), .hps_sec_done(1'b0),
+	// Phase 18: rx_busy status output for the M3 HPS bridge.
+	.hps_rx_busy()
 );
 
 akiko_hps_bridge u_bridge (
@@ -96,7 +98,10 @@ akiko_hps_bridge u_bridge (
 	// M4 sec channel: tied off — bench drives uio_cs_sec=0 always.
 	.sec_req(1'b0), .sec_status(8'h00),
 	.sec_push(), .sec_byte(), .sec_done(),
-	.req(uio_req), .sec_req_out()
+	// Phase 18: bench doesn't exercise rx_busy gating; tie input low,
+	// leave the status output dangling.
+	.rx_busy(1'b0),
+	.req(uio_req), .sec_req_out(), .rx_busy_out()
 );
 
 // -----------------------------------------------------------------------

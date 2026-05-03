@@ -71,7 +71,9 @@ akiko #(.NATIVE_CD32(0)) u_dut0 (
 	.hps_result_push(1'b0), .hps_result_byte(8'h00), .hps_result_done(1'b0),
 	// M4 HPS sector channel — M1 bench doesn't exercise it.
 	.hps_sec_req(), .hps_sec_status(),
-	.hps_sec_push(1'b0), .hps_sec_byte(8'h00), .hps_sec_done(1'b0)
+	.hps_sec_push(1'b0), .hps_sec_byte(8'h00), .hps_sec_done(1'b0),
+	// Phase 18: rx_busy status output — bench doesn't observe it.
+	.hps_rx_busy()
 );
 
 akiko #(.NATIVE_CD32(1)) u_dut1 (
@@ -86,7 +88,8 @@ akiko #(.NATIVE_CD32(1)) u_dut1 (
 	.hps_cmd_pop(1'b0), .hps_cmd_done(1'b0),
 	.hps_result_push(1'b0), .hps_result_byte(8'h00), .hps_result_done(1'b0),
 	.hps_sec_req(), .hps_sec_status(),
-	.hps_sec_push(1'b0), .hps_sec_byte(8'h00), .hps_sec_done(1'b0)
+	.hps_sec_push(1'b0), .hps_sec_byte(8'h00), .hps_sec_done(1'b0),
+	.hps_rx_busy()
 );
 
 // -----------------------------------------------------------------------
@@ -410,9 +413,21 @@ initial begin
 	read_dut1(5'b10100, v1);
 	check16("PIO read-back upper byte", 16'hA500, v1);
 
-	byte_write(6'h30, 8'h5A);
+	// Phase 13: $30 reads back live bus state (bit 7=SCL, bit 6=SDA), not
+	// the master register verbatim. With DIR=0 (released, both lines float
+	// high) the bus reads {1,1,6'h0} → 0xC000.
+	byte_write(6'h32, 8'h00);                 // DIR = 0 (release both lines)
+	byte_write(6'h30, 8'h5A);                 // master writes (no effect — released)
 	read_dut1(5'b11000, v1);
-	check16("NVRAM I/O read-back", 16'h5A00, v1);
+	check16("NVRAM I/O released bus high", 16'hC000, v1);
+
+	// With DIR=0xC0 (drive both) and IO=0x40 (SCL=0, SDA=1) the bus reads
+	// {0,1,6'h0} → 0x4000. Slave isn't actively driving (no START), so
+	// SDA reflects what the master is forcing.
+	byte_write(6'h32, 8'hC0);                 // DIR: SCL+SDA driven by master
+	byte_write(6'h30, 8'h40);                 // SCL=0, SDA=1
+	read_dut1(5'b11000, v1);
+	check16("NVRAM I/O master-driven SCL=0 SDA=1", 16'h4000, v1);
 
 	byte_write(6'h32, 8'h3C);
 	read_dut1(5'b11001, v1);

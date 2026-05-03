@@ -96,7 +96,12 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	output      [7:0] hps_sec_status,  // 1-byte read mux (currently == cdrom_sector_counter)
 	input             hps_sec_push,    // pulse: store hps_sec_byte at sec_wr_ptr++
 	input       [7:0] hps_sec_byte,
-	input             hps_sec_done     // pulse: commit; if sec_wr_ptr == 12'd2352, sector_ready<=1
+	input             hps_sec_done,    // pulse: commit; if sec_wr_ptr == 12'd2352, sector_ready<=1
+
+	// Phase 18: rx_busy = receive engine has a queued or in-flight response.
+	// Userspace gates unsolicited pushes (TOC drip, post-INFO media-status)
+	// on this — matches WinUAE's cdrom_can_return_data() semantics.
+	output            hps_rx_busy
 );
 
 // -----------------------------------------------------------------------
@@ -163,6 +168,7 @@ wire        cd_hps_cmd_pending;
 wire  [7:0] cd_hps_cmd_byte;
 wire        cd_hps_sec_req;
 wire  [7:0] cd_hps_sec_status;
+wire        cd_hps_rx_busy;
 
 generate
 if (NATIVE_CD32) begin : g_cd
@@ -179,8 +185,18 @@ if (NATIVE_CD32) begin : g_cd
 	reg  [7:0] cdcomtxcmp;           // TX end (compare)
 	reg  [7:0] cdcomrxcmp;           // RX end
 	reg  [7:0] pio_byte;             // last PIO write — M1 stub
-	reg  [7:0] nvram_io;             // $30 — M1 stub
-	reg  [7:0] nvram_dir;            // $32 — M1 stub
+	reg  [7:0] nvram_io;             // $30 master-driven SCL/SDA pair (bit 7=SCL, 6=SDA)
+	reg  [7:0] nvram_dir;            // $32 direction (1=master output, 0=floating-high input)
+
+	// Phase 13: real I2C slave EEPROM (1 KiB, 24LC08-equivalent) replaces
+	// the M1 stub. See akiko_nvram.v for protocol; bus model below for
+	// open-drain wiring.
+	wire       nvram_scl_master_drive = nvram_dir[7];
+	wire       nvram_sda_master_drive = nvram_dir[6];
+	wire       nvram_scl_bus = nvram_scl_master_drive ? nvram_io[7] : 1'b1;
+	wire       nvram_sda_master_value = nvram_sda_master_drive ? nvram_io[6] : 1'b1;
+	wire       nvram_slave_sda_drive;
+	wire       nvram_sda_bus = nvram_sda_master_value & ~nvram_slave_sda_drive;
 
 	// M2 TX/RX command DMA state.
 	// command_buffer / command_length accumulate bytes pulled by TX DMA;
@@ -559,6 +575,7 @@ if (NATIVE_CD32) begin : g_cd
 						// turned the post-INFO 3-byte media-status push into a
 						// single byte, leaving BIOS waiting for a frame it
 						// never received and never advancing to MULTI/TOC.
+						cdrom_intreq <= cdrom_intreq | CDINT_RXDMADONE;
 					end
 					rx_busy     <= 1'b0;
 					rx_inflight <= 1'b0;
@@ -701,14 +718,14 @@ if (NATIVE_CD32) begin : g_cd
 			5'b10011: cd_dout_r = cdrom_flags[15:0];
 			// $28 PIO byte read — M1 stub returns last write in upper byte
 			5'b10100: cd_dout_r = {pio_byte, 8'h0};
-			// $30/$32 NVRAM I2C — M5 stub: report "no slave on bus" by
-			// returning 0xFF for the I/O byte (both SDA and SCL pulled high
-			// by the external 1k resistors when no EEPROM is responding).
-			// The earlier loopback (returning the last value written) made
-			// firmware see fake ACKs and spin forever in the bit-bang loop.
-			// With 0xFF, master sees NACK on every byte and aborts NVRAM
-			// init, then proceeds to the actual CD command flow.
-			5'b11000: cd_dout_r = {8'hFF, 8'h0};
+			// $30 NVRAM I/O byte — Phase 13: now reflects the live I2C bus
+			// state (master's drives ANDed with the slave's open-drain
+			// pull-down via akiko_nvram). bit 7 = SCL, bit 6 = SDA;
+			// remaining bits are 0. WinUAE akiko.cpp:285-296 reads back
+			// the same shape from eeprom_i2c_set() returns.
+			5'b11000: cd_dout_r = {nvram_scl_bus, nvram_sda_bus, 6'h0, 8'h0};
+			// $32 direction — read-back of last write (master's choice
+			// of which lines are inputs vs outputs).
 			5'b11001: cd_dout_r = {nvram_dir, 8'h0};
 			default:  cd_dout_r = 16'h0;
 		endcase
@@ -735,6 +752,20 @@ if (NATIVE_CD32) begin : g_cd
 	assign cd_hps_sec_req     = sec_req_w;
 	assign cd_hps_sec_status  = cdrom_sector_counter;
 
+	// Phase 18: rx_busy out — receive engine has a queued or in-flight response.
+	assign cd_hps_rx_busy     = (cdrom_receive_length != 6'd0);
+
+	// Phase 13: I2C slave EEPROM (1 KiB, 24LC08-equivalent). Pulls SDA
+	// low for ACK and read-data; never drives SCL. Volatile BRAM —
+	// persistence is a separate feature.
+	akiko_nvram nvram_inst (
+		.clk       (clk),
+		.reset     (reset),
+		.scl_in    (nvram_scl_bus),
+		.sda_in    (nvram_sda_bus),
+		.sda_drive (nvram_slave_sda_drive)
+	);
+
 end else begin : g_stub
 	assign cd_dout            = 16'h0;
 	assign cd_irq             = 1'b0;
@@ -746,6 +777,7 @@ end else begin : g_stub
 	assign cd_hps_cmd_byte    = 8'h0;
 	assign cd_hps_sec_req     = 1'b0;
 	assign cd_hps_sec_status  = 8'h0;
+	assign cd_hps_rx_busy     = 1'b0;
 end
 endgenerate
 
@@ -776,5 +808,7 @@ assign hps_cmd_byte    = cd_hps_cmd_byte;
 
 assign hps_sec_req     = cd_hps_sec_req;
 assign hps_sec_status  = cd_hps_sec_status;
+
+assign hps_rx_busy     = cd_hps_rx_busy;
 
 endmodule

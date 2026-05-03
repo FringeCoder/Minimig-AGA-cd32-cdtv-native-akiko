@@ -77,6 +77,7 @@ module hps_ext
 	output reg        akiko_cs_sec,
 	input             akiko_req,
 	input             akiko_sec_req,
+	input             akiko_rx_busy,
 
 	input       [7:0] akiko_trace_din,
 	output reg        akiko_trace_rd,
@@ -154,7 +155,8 @@ always@(posedge clk_sys) begin
 			if(io_din == 'h63) begin
 				// bit [11] = akiko_req (M3: command framed, ready to drain)
 				// bit [10] = akiko_sec_req (M4: PBX wants a sector pushed)
-				io_dout <= {4'hE, akiko_req, akiko_sec_req, 1'b0, cdda_req, 2'b00, ide_req};
+				// bit  [9] = akiko_rx_busy (Phase 18: RX engine has pending response)
+				io_dout <= {4'hE, akiko_req, akiko_sec_req, akiko_rx_busy, cdda_req, 2'b00, ide_req};
 			end
 		end else begin
 			case(cmd)

@@ -72,7 +72,9 @@ akiko #(.NATIVE_CD32(1)) u_dut (
 	.hps_sec_status(hps_sec_status),
 	.hps_sec_push(hps_sec_push),
 	.hps_sec_byte(hps_sec_byte),
-	.hps_sec_done(hps_sec_done)
+	.hps_sec_done(hps_sec_done),
+	// Phase 18: rx_busy status output — bench doesn't observe it.
+	.hps_rx_busy()
 );
 
 // -----------------------------------------------------------------------

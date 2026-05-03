@@ -67,7 +67,9 @@ akiko #(.NATIVE_CD32(1)) u_dut (
 	.hps_result_push(1'b0), .hps_result_byte(8'h00), .hps_result_done(1'b0),
 	// M4 HPS sector channel — M2 bench doesn't exercise it.
 	.hps_sec_req(), .hps_sec_status(),
-	.hps_sec_push(1'b0), .hps_sec_byte(8'h00), .hps_sec_done(1'b0)
+	.hps_sec_push(1'b0), .hps_sec_byte(8'h00), .hps_sec_done(1'b0),
+	// Phase 18: rx_busy status output — bench doesn't observe it.
+	.hps_rx_busy()
 );
 
 // -----------------------------------------------------------------------

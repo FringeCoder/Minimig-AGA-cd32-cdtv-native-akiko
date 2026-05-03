@@ -69,9 +69,13 @@ module akiko_hps_bridge
 	output      [7:0] sec_byte,
 	output            sec_done,
 
+	// Phase 18: rx_busy = receive engine has a queued or in-flight response.
+	input             rx_busy,
+
 	// Status bits for hps_ext 0x63 status word
 	output            req,           // bit [11]: framed command waiting
-	output            sec_req_out    // bit [10]: sector needed
+	output            sec_req_out,   // bit [10]: sector needed
+	output            rx_busy_out    // bit [9]:  RX engine busy (Phase 18)
 );
 
 reg cs_d;
@@ -123,5 +127,6 @@ assign sec_done    = xfer_end &              cs_sec_d;
 
 assign req         = cmd_pending;
 assign sec_req_out = sec_req;
+assign rx_busy_out = rx_busy;
 
 endmodule
