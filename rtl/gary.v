@@ -118,10 +118,18 @@ assign ram_lwr = dbr ?  dbwe : cpu_lwr;
 
 //--------------------------------------------------------------------------------------
 
-// ram address multiplexer (512KB bank)		
+// ram address multiplexer (512KB bank)
 // assign ram_address_out = dbr ? dma_address_in[18:1] : cpu_address_in[18:1];
-// output full address to make mapping easier.  
-assign ram_address_out  = dbr ? {3'b000, dma_address_in[20:1]} : cpu_address_in[23:1];
+// output full address to make mapping easier.
+// CD32 Kickstart mirrors: $A8.0000-$AF.FFFF mirrors $F8.0000-$FF.FFFF (lower 512K)
+//                         $B0.0000-$B7.FFFF mirrors $E0.0000-$E7.FFFF (upper 512K, CD32 ext)
+// Remap high address bits so SDRAM lands on the same bytes as the primary region.
+wire kick_mirror_a8 = cpu_address_in[23:19] == 5'b1010_1;
+wire kick_mirror_b0 = cpu_address_in[23:19] == 5'b1011_0;
+wire [4:0] cpu_addr_hi_remap = kick_mirror_a8 ? 5'b1111_1 :
+                               kick_mirror_b0 ? 5'b1110_0 :
+                               cpu_address_in[23:19];
+assign ram_address_out  = dbr ? {3'b000, dma_address_in[20:1]} : {cpu_addr_hi_remap, cpu_address_in[18:1]};
    
    
 //--------------------------------------------------------------------------------------
@@ -157,8 +165,8 @@ begin
 		sel_slow[0] = t_sel_slow[0];
 		sel_slow[1] = t_sel_slow[1];
 		sel_slow[2] = t_sel_slow[2];
-		sel_kick    = (cpu_address_in[23:19]==5'b1111_1 && (cpu_rd || cpu_hlt || (!rom_readonly && cpu_address_in[18])))  || (cpu_rd && ovl && cpu_address_in[23:19]==5'b0000_0); //$F80000 - $FFFFFF
-		sel_kick1mb = cpu_address_in[23:19]==5'b1110_0 && (cpu_rd || cpu_hlt); // $E00000 - $E7FFFF
+		sel_kick    = (cpu_address_in[23:19]==5'b1111_1 && (cpu_rd || cpu_hlt || (!rom_readonly && cpu_address_in[18])))  || (cpu_rd && ovl && cpu_address_in[23:19]==5'b0000_0) || (cpu_rd && kick_mirror_a8); //$F80000-$FFFFFF + $A80000-$AFFFFF mirror (CD32)
+		sel_kick1mb = (cpu_address_in[23:19]==5'b1110_0 && (cpu_rd || cpu_hlt)) || (cpu_rd && kick_mirror_b0); // $E00000-$E7FFFF + $B00000-$B7FFFF mirror (CD32)
 		sel_kick256kmirror = cpu_address_in[23:19]==5'b1111_1 &&  cpu_rd && rom_readonly && !cpu_hlt && bootrom;
 	end
 end
