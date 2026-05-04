@@ -101,7 +101,21 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	// Phase 18: rx_busy = receive engine has a queued or in-flight response.
 	// Userspace gates unsolicited pushes (TOC drip, post-INFO media-status)
 	// on this — matches WinUAE's cdrom_can_return_data() semantics.
-	output            hps_rx_busy
+	output            hps_rx_busy,
+
+	// Phase 32: NVRAM save-dump port. Bridge drives hps_nvr_addr / pulses
+	// hps_nvr_clear_dirty; nvram returns hps_nvr_dout one clk later.
+	// hps_nvr_dirty flags any successful BIOS write to the EEPROM since the
+	// last clear-dirty pulse.
+	// Phase 32.5: hps_nvr_din / hps_nvr_we for the load-from-disk push.
+	// host_we writes BRAM but does NOT set dirty (loading saved state must
+	// not trigger an immediate re-save).
+	input       [9:0] hps_nvr_addr,
+	input       [7:0] hps_nvr_din,
+	input             hps_nvr_we,
+	output      [7:0] hps_nvr_dout,
+	input             hps_nvr_clear_dirty,
+	output            hps_nvr_dirty
 );
 
 // -----------------------------------------------------------------------
@@ -169,6 +183,8 @@ wire  [7:0] cd_hps_cmd_byte;
 wire        cd_hps_sec_req;
 wire  [7:0] cd_hps_sec_status;
 wire        cd_hps_rx_busy;
+wire  [7:0] cd_hps_nvr_dout;
+wire        cd_hps_nvr_dirty;
 
 generate
 if (NATIVE_CD32) begin : g_cd
@@ -305,10 +321,21 @@ if (NATIVE_CD32) begin : g_cd
 	//   byte 3:     sector_counter & 31
 	//   bytes 4..2351: sector_buffer[idx]
 	wire [23:0] pbx_slot_base = cdrom_addressdata[23:0] + {8'h0, pbx_seccnt, 12'h0};
-	wire [23:0] pbx_addr      = pbx_slot_base
+	wire [23:0] pbx_addr_c    = pbx_slot_base
 	                          + ((pbx_state == PBX_DATA)
 	                              ? {12'h0, pbx_byte_idx}
 	                              : (24'h000c00 + {12'h0, pbx_byte_idx}));
+	// Phase 32 timing fix: register pbx_addr so the SDRAM-bound critical
+	// path no longer carries two cascaded 24-bit adders + chipdma_arb mux
+	// chain in a single combinational arc. The downstream chipdma_arb only
+	// samples this address on c_7m_rise (≥3 clk_sys cycles after the byte
+	// transition that updates pbx_byte_idx), so a 1-cycle latency here is
+	// invisible to the SDRAM master.
+	reg  [23:0] pbx_addr;
+	always @(posedge clk) begin
+		if (reset) pbx_addr <= 24'h0;
+		else       pbx_addr <= pbx_addr_c;
+	end
 	wire [7:0]  sector_byte_at_idx = (pbx_byte_idx <  12'd3   ) ? 8'h00 :
 	                                 (pbx_byte_idx == 12'd3   ) ? (cdrom_sector_counter & 8'h1f) :
 	                                 (pbx_byte_idx <  12'd2352) ? sector_buffer[pbx_byte_idx] :
@@ -759,11 +786,20 @@ if (NATIVE_CD32) begin : g_cd
 	// low for ACK and read-data; never drives SCL. Volatile BRAM —
 	// persistence is a separate feature.
 	akiko_nvram nvram_inst (
-		.clk       (clk),
-		.reset     (reset),
-		.scl_in    (nvram_scl_bus),
-		.sda_in    (nvram_sda_bus),
-		.sda_drive (nvram_slave_sda_drive)
+		.clk              (clk),
+		.reset            (reset),
+		.scl_in           (nvram_scl_bus),
+		.sda_in           (nvram_sda_bus),
+		.sda_drive        (nvram_slave_sda_drive),
+
+		// Phase 32 / 32.5: HPS save-dump + load-back port wired through
+		// to the bridge.
+		.host_addr        (hps_nvr_addr),
+		.host_din         (hps_nvr_din),
+		.host_we          (hps_nvr_we),
+		.host_dout        (cd_hps_nvr_dout),
+		.host_clear_dirty (hps_nvr_clear_dirty),
+		.nvram_dirty      (cd_hps_nvr_dirty)
 	);
 
 end else begin : g_stub
@@ -778,6 +814,8 @@ end else begin : g_stub
 	assign cd_hps_sec_req     = 1'b0;
 	assign cd_hps_sec_status  = 8'h0;
 	assign cd_hps_rx_busy     = 1'b0;
+	assign cd_hps_nvr_dout    = 8'h0;
+	assign cd_hps_nvr_dirty   = 1'b0;
 end
 endgenerate
 
@@ -810,5 +848,9 @@ assign hps_sec_req     = cd_hps_sec_req;
 assign hps_sec_status  = cd_hps_sec_status;
 
 assign hps_rx_busy     = cd_hps_rx_busy;
+
+// Phase 32: NVRAM save-dump port out to fastchip / bridge.
+assign hps_nvr_dout    = cd_hps_nvr_dout;
+assign hps_nvr_dirty   = cd_hps_nvr_dirty;
 
 endmodule

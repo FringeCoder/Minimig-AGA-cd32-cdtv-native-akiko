@@ -36,7 +36,22 @@ module akiko_nvram
 	input  wire        sda_in,    // current SDA value on the bus
 
 	// Slave open-drain pull-down. 1 = slave is asserting SDA low.
-	output wire        sda_drive
+	output wire        sda_drive,
+
+	// Phase 32: HPS host port for save-to-disk dump.
+	// Phase 32.5: extended with write port for load-from-disk on core init.
+	// Inferred as a true dual-port M10K alongside the I2C path. host_addr
+	// is registered into BRAM by the always block; host_dout lags by one
+	// clk edge. host_we writes host_din at host_addr (does NOT set dirty —
+	// loading saved state should NOT trigger an immediate re-save).
+	// host_clear_dirty pulses to clear nvram_dirty after a save dump
+	// completes (driven by bridge xfer_end on a read transaction).
+	input  wire [9:0]  host_addr,
+	input  wire [7:0]  host_din,
+	input  wire        host_we,
+	output reg  [7:0]  host_dout,
+	input  wire        host_clear_dirty,
+	output reg         nvram_dirty
 );
 
 // 24LC08: 1 KiB = 1024 bytes, 16-byte page, addr-bits-in-device-byte = 2 (A8..A9)
@@ -47,7 +62,22 @@ module akiko_nvram
 // across the device (~3900 ALMs) which pushes the borderline pbx_seccnt -> sdram
 // path into setup violation.
 localparam ADDR_W = 10;
-(* ramstyle = "M10K" *) reg [7:0] memory [0:1023];
+// Phase 33-A iter3 (2026-05-04): explicit dual-memory pattern. Iter2's
+// single-array+single-write-port template was supposed to infer one M10K
+// or fan a single write to two duplicates. Quartus 17 actually inferred
+// TWO M10Ks (memory_rtl_0 for I2C reads, memory_rtl_1 for HPS reads) but
+// only fanned the I2C-side mem_we write port to BOTH; host_we writes
+// landed nowhere visible to host_dout. Empirically: host_dout returned
+// all zeros even after host_we write loops, then "magically" returned
+// FlashFile magic 5s after boot — i.e., once BIOS wrote the same magic
+// via I2C. The .mif also didn't initialize memory_rtl_1 at FPGA config.
+//
+// Fix: declare TWO memory arrays explicitly. Both get $readmemh init,
+// both receive both writes (host_we and mem_we) on the same cycle. This
+// removes all inference ambiguity — Quartus must give us 2 M10Ks each
+// with their own write port driven by both signals (ORed via mem_we_mux).
+(* ramstyle = "M10K, no_rw_check" *) reg [7:0] memory_a [0:1023];
+(* ramstyle = "M10K, no_rw_check" *) reg [7:0] memory_b [0:1023];
 reg [7:0]        mem_dout;
 reg              mem_we;
 reg [ADDR_W-1:0] mem_waddr;     // captured at write-issue time so eeprom_addr can advance NBA in the same cycle
@@ -57,7 +87,8 @@ reg [ADDR_W-1:0] mem_waddr;     // captured at write-issue time so eeprom_addr c
 // FlashFile root-block check and loops searching forever instead of issuing
 // MULTI. $readmemh is honored by both ModelSim and Quartus 17 for inferred
 // M10K, so the same image is used in sim and on hardware.
-initial $readmemh(INIT_FILE, memory);
+initial $readmemh(INIT_FILE, memory_a);
+initial $readmemh(INIT_FILE, memory_b);
 
 // I2C state machine. Mirrors WinUAE bitbang_i2c_state but compacted:
 // the WinUAE per-bit states (SENDING_BIT7..0, RECEIVING_BIT7..0) are
@@ -94,12 +125,68 @@ wire sda_fall =  prev_sda & ~sda_in;
 wire start_cond = scl_in & sda_fall;
 wire stop_cond  = scl_in & sda_rise;
 
-// Synchronous BRAM port. mem_dout always lags eeprom_addr by 1 cycle; since
-// eeprom_addr is stable for many clk_sys cycles between I2C edge events, the
-// readout is always valid by the time a state transition consumes it.
+// Synchronous BRAM ports. mem_dout / host_dout each lag their respective
+// addr by 1 cycle. Since the I2C addr is stable for many clk cycles
+// between bus edges and the host_addr increments deliberately per UIO
+// strobe, the readouts are always valid by the time downstream consumes
+// them.
+//
+// Phase 32  — added a second read port for the HPS save-dump path.
+// Phase 32.5 — added a write side (host_we / host_din) so userspace can
+//              push a saved cd32-<hash>.nvr back into BRAM at core init.
+// Phase 33-A iter1 (2026-05-04) — TDP attempt with two separate always
+//              blocks: Quartus 17 refused inference ("RAM logic ... is
+//              uninferred due to too many ports") AND the fabric-flop
+//              fallback also dropped host_we writes (verified on
+//              hardware: NVR LOAD VERIFY FAILED 4/1024). Reverted.
+// Phase 33-A iter2 (2026-05-04) — canonical SIMPLE DUAL PORT template.
+//              Both writes feed a single muxed write port; host_we wins
+//              on (impossible) collision. Two read ports remain (one
+//              for I2C, one for HPS dump). This is the textbook SDP-2R
+//              pattern Quartus 17 reliably infers as one M10K with no
+//              inference ambiguity.
+//
+// Write-write collision protocol: host_we only fires during the
+// load-from-disk burst, which happens at akiko_cd32_init() before BIOS
+// touches I2C. mem_we only fires during runtime I2C transactions, after
+// BIOS owns the bus. Temporally disjoint, so the priority mux is purely
+// a safety belt; runtime behaviour is unaffected.
+
+wire [ADDR_W-1:0] mem_waddr_mux = host_we ? host_addr : mem_waddr;
+wire        [7:0] mem_din_mux   = host_we ? host_din  : shift_reg;
+wire              mem_we_mux    = host_we | mem_we;
+
+// memory_a feeds the I2C read port (mem_dout, addressed by eeprom_addr).
+// memory_b feeds the HPS read port (host_dout, addressed by host_addr).
+// Both arrays receive the same writes on every clock — they are kept
+// byte-for-byte identical. This is the canonical "1W+2R = 2 SDP M10Ks
+// with shared write" pattern, written explicitly so Quartus can't lose
+// the host_we fan-out.
 always @(posedge clk) begin
-	if (mem_we) memory[mem_waddr] <= shift_reg;
-	mem_dout <= memory[eeprom_addr];
+	if (mem_we_mux) begin
+		memory_a[mem_waddr_mux] <= mem_din_mux;
+		memory_b[mem_waddr_mux] <= mem_din_mux;
+	end
+	mem_dout  <= memory_a[eeprom_addr];
+	host_dout <= memory_b[host_addr];
+end
+
+// Dirty flag: latched by any successful sequential write from the I2C
+// path (mem_we). Userspace reads the flag via the bridge status word,
+// dumps NVRAM via the read sub-channel — which auto-clears dirty on
+// transaction end (host_clear_dirty pulse from the bridge). Reset
+// clears it so a fresh boot doesn't look dirty just because the .hex
+// baseline equals the eventual SD-saved file.
+//
+// Phase 32.5 invariants:
+//   - host_we does NOT set dirty (loading from disk should not trigger
+//     an immediate re-save of what we just loaded).
+//   - mem_we wins over host_clear_dirty on the same cycle: if BIOS
+//     writes during the dump, dirty stays set so the next poll re-saves.
+always @(posedge clk) begin
+	if (reset)                  nvram_dirty <= 1'b0;
+	else if (mem_we)            nvram_dirty <= 1'b1;
+	else if (host_clear_dirty)  nvram_dirty <= 1'b0;
 end
 
 always @(posedge clk) begin

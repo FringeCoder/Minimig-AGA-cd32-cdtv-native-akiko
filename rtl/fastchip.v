@@ -79,13 +79,15 @@ module fastchip
 	// Main → hps_ext.akiko_dout). Inactive when NATIVE_CD32 = 0.
 	input         akiko_uio_cs,
 	input         akiko_uio_cs_sec, // M4 sub-channel (io_din[8] from byte_cnt==1)
+	input         akiko_uio_cs_nvr, // Phase 32: NVRAM save-dump sub-channel (io_din[6])
 	input         akiko_uio_wr,
 	input         akiko_uio_rd,
 	input  [15:0] akiko_uio_din,    // = hps_ext.akiko_dout
 	output [15:0] akiko_uio_dout,   // = hps_ext.akiko_din
-	output        akiko_uio_req,    // = hps_ext.akiko_req     (M3)
-	output        akiko_uio_sec_req,// = hps_ext.akiko_sec_req (M4)
-	output        akiko_uio_rx_busy,// = hps_ext.akiko_rx_busy (Phase 18)
+	output        akiko_uio_req,    // = hps_ext.akiko_req       (M3)
+	output        akiko_uio_sec_req,// = hps_ext.akiko_sec_req   (M4)
+	output        akiko_uio_rx_busy,// = hps_ext.akiko_rx_busy   (Phase 18)
+	output        akiko_uio_nvr_dirty, // = hps_ext.akiko_nvr_dirty (Phase 32)
 
 	// Akiko CPU-bus trace ring (debug). Independent of M3/M4 bridge: hps_ext
 	// pulses akiko_uio_trace_rd to drain one byte at a time; trace_dout returns
@@ -122,6 +124,15 @@ wire        akiko_hps_sec_done;
 wire        akiko_hps_rx_busy;
 wire  [7:0] akiko_uio_dout_byte;
 
+// Phase 32 / 32.5: NVRAM save-dump + load-back wires between bridge and akiko.
+wire  [9:0] akiko_hps_nvr_addr;
+wire  [7:0] akiko_hps_nvr_din;
+wire        akiko_hps_nvr_we;
+wire  [7:0] akiko_hps_nvr_dout;
+wire        akiko_hps_nvr_clear_dirty;
+wire        akiko_hps_nvr_dirty;
+wire        akiko_hps_nvr_done;       // currently unused; reserved for diag
+
 assign akiko_uio_dout = {8'h0, akiko_uio_dout_byte};
 
 akiko #(.NATIVE_CD32(NATIVE_CD32)) akiko
@@ -155,7 +166,13 @@ akiko #(.NATIVE_CD32(NATIVE_CD32)) akiko
 	.hps_sec_push(akiko_hps_sec_push),
 	.hps_sec_byte(akiko_hps_sec_byte),
 	.hps_sec_done(akiko_hps_sec_done),
-	.hps_rx_busy(akiko_hps_rx_busy)
+	.hps_rx_busy(akiko_hps_rx_busy),
+	.hps_nvr_addr(akiko_hps_nvr_addr),
+	.hps_nvr_din(akiko_hps_nvr_din),
+	.hps_nvr_we(akiko_hps_nvr_we),
+	.hps_nvr_dout(akiko_hps_nvr_dout),
+	.hps_nvr_clear_dirty(akiko_hps_nvr_clear_dirty),
+	.hps_nvr_dirty(akiko_hps_nvr_dirty)
 );
 
 // CPU-bus trace ring: snapshots every CPU access in the akiko window
@@ -184,6 +201,7 @@ akiko_hps_bridge akiko_hps_bridge
 	.reset(reset),
 	.uio_cs(akiko_uio_cs),
 	.uio_cs_sec(akiko_uio_cs_sec),
+	.uio_cs_nvr(akiko_uio_cs_nvr),
 	.uio_wr(akiko_uio_wr),
 	.uio_rd(akiko_uio_rd),
 	.uio_din(akiko_uio_din[7:0]),
@@ -200,10 +218,18 @@ akiko_hps_bridge akiko_hps_bridge
 	.sec_push(akiko_hps_sec_push),
 	.sec_byte(akiko_hps_sec_byte),
 	.sec_done(akiko_hps_sec_done),
+	.nvr_addr(akiko_hps_nvr_addr),
+	.nvr_dout(akiko_hps_nvr_dout),
+	.nvr_din(akiko_hps_nvr_din),
+	.nvr_we(akiko_hps_nvr_we),
+	.nvr_clear_dirty(akiko_hps_nvr_clear_dirty),
+	.nvr_done(akiko_hps_nvr_done),
+	.nvr_dirty(akiko_hps_nvr_dirty),
 	.rx_busy(akiko_hps_rx_busy),
 	.req(akiko_uio_req),
 	.sec_req_out(akiko_uio_sec_req),
-	.rx_busy_out(akiko_uio_rx_busy)
+	.rx_busy_out(akiko_uio_rx_busy),
+	.nvr_dirty_out(akiko_uio_nvr_dirty)
 );
 
 wire sel_ide   = ide_ena && sel && addr[23:16] ==  8'b1101_1010;       //IDE registers at $DA0000 - $DAFFFF	

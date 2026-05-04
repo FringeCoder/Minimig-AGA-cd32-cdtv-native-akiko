@@ -73,7 +73,10 @@ akiko #(.NATIVE_CD32(0)) u_dut0 (
 	.hps_sec_req(), .hps_sec_status(),
 	.hps_sec_push(1'b0), .hps_sec_byte(8'h00), .hps_sec_done(1'b0),
 	// Phase 18: rx_busy status output — bench doesn't observe it.
-	.hps_rx_busy()
+	.hps_rx_busy(),
+	// Phase 32 / 32.5: NVRAM port — bench doesn't exercise it.
+	.hps_nvr_addr(10'd0), .hps_nvr_din(8'h00), .hps_nvr_we(1'b0),
+	.hps_nvr_dout(), .hps_nvr_clear_dirty(1'b0), .hps_nvr_dirty()
 );
 
 akiko #(.NATIVE_CD32(1)) u_dut1 (
@@ -89,7 +92,9 @@ akiko #(.NATIVE_CD32(1)) u_dut1 (
 	.hps_result_push(1'b0), .hps_result_byte(8'h00), .hps_result_done(1'b0),
 	.hps_sec_req(), .hps_sec_status(),
 	.hps_sec_push(1'b0), .hps_sec_byte(8'h00), .hps_sec_done(1'b0),
-	.hps_rx_busy()
+	.hps_rx_busy(),
+	.hps_nvr_addr(10'd0), .hps_nvr_din(8'h00), .hps_nvr_we(1'b0),
+	.hps_nvr_dout(), .hps_nvr_clear_dirty(1'b0), .hps_nvr_dirty()
 );
 
 // -----------------------------------------------------------------------

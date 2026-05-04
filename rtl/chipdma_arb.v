@@ -79,6 +79,21 @@ reg c_7m_d;
 always @(posedge clk) c_7m_d <= c_7m;
 wire c_7m_rise = c_7m & ~c_7m_d;
 
+// --- Phase 32.5 timing fix: register akiko_dma_req to cut the long
+// combinational arc from akiko's rx_busy/tx_busy state-machine internals
+// through arm_now → arb_request → arb_drive into the sd_addr mux selector.
+// That arc was the worst-case setup path on the emu PLL (-0.981 ns slack).
+// Latency cost: up to 1 clk_sys cycle on the first byte of an akiko burst;
+// since req → next c_7m_rise is typically 0..3 clk_sys cycles anyway, this
+// is invisible at burst level. Only the SELECTOR is registered — the data
+// fields (akiko_dma_baddr, _we, _wbyte) remain combinational into ak_*_w
+// so chip_out_addr/etc. still arrive at sdram_ctrl on the same edge.
+reg akiko_dma_req_q;
+always @(posedge clk) begin
+	if (reset) akiko_dma_req_q <= 1'b0;
+	else       akiko_dma_req_q <= akiko_dma_req;
+end
+
 // --- Slot timer: counts clk_sys cycles within the active akiko slot. ---
 // 4 clk_sys cycles per c_7m period (= 16 clk_114 cycles in sdram_ctrl).
 // At slot_cnt==3 sdram_ctrl's chipRD register has been valid for >3
@@ -122,7 +137,7 @@ wire minimig_busy = ~minimig_idle;
 //     sdram_ctrl to see it ~8.7 ns later (the existing minimig path
 //     fits the same budget the same way). Gated by minimig_idle so we
 //     never preempt the chipset.
-wire arm_now = (state == S_IDLE) & c_7m_rise & minimig_idle & akiko_dma_req;
+wire arm_now = (state == S_IDLE) & c_7m_rise & minimig_idle & akiko_dma_req_q;
 
 // --- arb_request: we want to be on the bus this cycle. Either we
 //     just armed combinationally, or we are mid-slot (S_DRIVE).

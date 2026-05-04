@@ -40,14 +40,30 @@ wire  sda_drive;            // from DUT
 wire  bus_scl = scl_master;
 wire  bus_sda = sda_master & ~sda_drive;
 
+// Phase 32 / 32.5: host port wires. Test 6 covers the read side; Test 7
+// adds the write side (load-from-disk) and verifies host writes do NOT
+// set the dirty flag.
+logic [9:0] host_addr        = 10'd0;
+logic [7:0] host_din         = 8'h00;
+logic       host_we          = 1'b0;
+logic       host_clear_dirty = 1'b0;
+wire  [7:0] host_dout;
+wire        nvram_dirty;
+
 // Sim runs from rtl/sim/akiko/, override INIT_FILE accordingly so $readmemh
 // finds the same cd32.nvr image Quartus loads from project root.
 akiko_nvram #(.INIT_FILE("../../init/nvram_init.hex")) dut (
-	.clk       (clk),
-	.reset     (reset),
-	.scl_in    (bus_scl),
-	.sda_in    (bus_sda),
-	.sda_drive (sda_drive)
+	.clk              (clk),
+	.reset            (reset),
+	.scl_in           (bus_scl),
+	.sda_in           (bus_sda),
+	.sda_drive        (sda_drive),
+	.host_addr        (host_addr),
+	.host_din         (host_din),
+	.host_we          (host_we),
+	.host_dout        (host_dout),
+	.host_clear_dirty (host_clear_dirty),
+	.nvram_dirty      (nvram_dirty)
 );
 
 int errs = 0;
@@ -273,6 +289,139 @@ initial begin
 			i2c_read(data, i < 15 ? 1 : 0);  // ACK on all but last
 			check($sformatf("init[%0d]", i), data, expected[i]);
 		end
+		i2c_stop();
+	end
+
+	repeat (8) @(posedge clk);
+
+	// --------------------------------------------------------------
+	// Test 6: Phase 32 — HPS host read port + dirty flag.
+	//   a) After Tests 1-4 wrote bytes via I2C, nvram_dirty must be 1.
+	//   b) Pulse host_clear_dirty -> nvram_dirty falls to 0.
+	//   c) Drive host_addr through 0..1023 and verify host_dout matches:
+	//      - 0x042 (Test 1)             = 0xAB
+	//      - 0x100..0x103 (Test 2)      = 0x11 0x22 0x33 0x44
+	//      - 0x300 (Test 4)             = 0x5A
+	//      - 0x000 (init image)         = 0x00 (FlashFile magic byte 0)
+	//      - 0x001 (init image)         = 0x56
+	//   d) Re-trigger an I2C write; verify nvram_dirty re-asserts.
+	// --------------------------------------------------------------
+	begin
+		bit [7:0] hd;
+		$display("=== Test 6: HPS host port + dirty flag ===");
+
+		// (a) Dirty should be set from prior I2C writes (Tests 1, 2, 4).
+		check_bit("dirty_set_after_i2c", nvram_dirty, 1);
+
+		// (b) Pulse host_clear_dirty for one cycle -> dirty falls.
+		host_clear_dirty = 1'b1;
+		@(posedge clk);
+		host_clear_dirty = 1'b0;
+		@(posedge clk);  // one extra cycle for the FF to settle
+		check_bit("dirty_cleared", nvram_dirty, 0);
+
+		// (c) Spot-check known byte values via the host port.
+		// host_dout lags host_addr by one clk edge (sync BRAM read).
+		host_addr = 10'h042; @(posedge clk); @(posedge clk);
+		check("host_rd_0x042 (Test 1)", host_dout, 8'hAB);
+
+		host_addr = 10'h100; @(posedge clk); @(posedge clk);
+		check("host_rd_0x100 (Test 2)", host_dout, 8'h11);
+		host_addr = 10'h101; @(posedge clk); @(posedge clk);
+		check("host_rd_0x101 (Test 2)", host_dout, 8'h22);
+		host_addr = 10'h102; @(posedge clk); @(posedge clk);
+		check("host_rd_0x102 (Test 2)", host_dout, 8'h33);
+		host_addr = 10'h103; @(posedge clk); @(posedge clk);
+		check("host_rd_0x103 (Test 2)", host_dout, 8'h44);
+
+		host_addr = 10'h300; @(posedge clk); @(posedge clk);
+		check("host_rd_0x300 (Test 4)", host_dout, 8'h5A);
+
+		host_addr = 10'h000; @(posedge clk); @(posedge clk);
+		check("host_rd_0x000 (init)",   host_dout, 8'h00);
+		host_addr = 10'h001; @(posedge clk); @(posedge clk);
+		check("host_rd_0x001 (init)",   host_dout, 8'h56);
+
+		// (d) Re-trigger a write through I2C; nvram_dirty must re-assert.
+		i2c_start();
+		i2c_write(8'hA0, ack);
+		i2c_write(8'h10, ack);
+		i2c_write(8'hCD, ack);
+		i2c_stop();
+		repeat (4) @(posedge clk);
+		check_bit("dirty_relatched", nvram_dirty, 1);
+
+		// And the host port sees the new byte.
+		host_addr = 10'h010; @(posedge clk); @(posedge clk);
+		check("host_rd_0x010 (relatch)", host_dout, 8'hCD);
+	end
+
+	repeat (8) @(posedge clk);
+
+	// --------------------------------------------------------------
+	// Test 7: Phase 32.5 — host write port (load-from-disk path).
+	//   a) Pulse host_clear_dirty so we start clean.
+	//   b) Drive host_we for 4 cycles writing 0xDE 0xAD 0xBE 0xEF
+	//      at addresses 0x200..0x203.
+	//   c) Read back via host port — bytes match.
+	//   d) Verify nvram_dirty is STILL 0 (host writes must NOT set dirty).
+	//   e) Drive a single I2C write — dirty must re-assert (the I2C path
+	//      is the only thing that sets dirty).
+	//   f) Verify the loaded bytes survive: read back via I2C and compare.
+	// --------------------------------------------------------------
+	begin
+		bit [7:0] hd;
+		$display("=== Test 7: Phase 32.5 host write port (load-back) ===");
+
+		// (a) Start from a known-clean state.
+		host_clear_dirty = 1'b1; @(posedge clk);
+		host_clear_dirty = 1'b0; @(posedge clk);
+		check_bit("dirty_clean_pre_load", nvram_dirty, 0);
+
+		// (b) Burst-write 4 bytes via the host port. Each cycle: set
+		//     host_addr / host_din, pulse host_we high.
+		host_addr = 10'h200; host_din = 8'hDE; host_we = 1'b1; @(posedge clk);
+		host_addr = 10'h201; host_din = 8'hAD;                 @(posedge clk);
+		host_addr = 10'h202; host_din = 8'hBE;                 @(posedge clk);
+		host_addr = 10'h203; host_din = 8'hEF;                 @(posedge clk);
+		host_we = 1'b0; @(posedge clk);
+
+		// (c) Read back via host port. host_dout lags host_addr by 1 clk.
+		host_addr = 10'h200; @(posedge clk); @(posedge clk);
+		check("load_rd_0x200", host_dout, 8'hDE);
+		host_addr = 10'h201; @(posedge clk); @(posedge clk);
+		check("load_rd_0x201", host_dout, 8'hAD);
+		host_addr = 10'h202; @(posedge clk); @(posedge clk);
+		check("load_rd_0x202", host_dout, 8'hBE);
+		host_addr = 10'h203; @(posedge clk); @(posedge clk);
+		check("load_rd_0x203", host_dout, 8'hEF);
+
+		// (d) Critical invariant: host writes do NOT set dirty.
+		check_bit("dirty_unset_after_load", nvram_dirty, 0);
+
+		// (e) An I2C write still sets dirty.
+		i2c_start();
+		i2c_write(8'hA0, ack);                  // devaddr W
+		i2c_write(8'h50, ack);                  // wordaddr 0x050
+		i2c_write(8'h99, ack);
+		i2c_stop();
+		repeat (4) @(posedge clk);
+		check_bit("dirty_set_after_i2c_post_load", nvram_dirty, 1);
+
+		// (f) Loaded bytes survive: read back 0x200..0x203 via I2C.
+		i2c_start();
+		i2c_write(8'hA0, ack);                  // devaddr W (set addr)
+		i2c_write(8'h00, ack);                  // wordaddr 0x000 (high page = 2 -> devaddr A4)
+		i2c_stop();
+		i2c_start();
+		i2c_write(8'hA4, ack);                  // devaddr W, page 2 (A8=0,A9=1) -> selects 0x200..0x2FF
+		i2c_write(8'h00, ack);                  // wordaddr 0x00 within page
+		i2c_start();
+		i2c_write(8'hA5, ack);                  // devaddr R, page 2
+		i2c_read(hd, 1); check("i2c_rd_0x200", hd, 8'hDE);
+		i2c_read(hd, 1); check("i2c_rd_0x201", hd, 8'hAD);
+		i2c_read(hd, 1); check("i2c_rd_0x202", hd, 8'hBE);
+		i2c_read(hd, 0); check("i2c_rd_0x203", hd, 8'hEF);
 		i2c_stop();
 	end
 

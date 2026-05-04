@@ -56,12 +56,32 @@ wire  [7:0] hps_result_byte;
 wire        hps_result_done;
 
 // UIO side (bench -> bridge)
-logic       uio_cs    = 0;
-logic       uio_wr    = 0;
-logic       uio_rd    = 0;
-logic [7:0] uio_din   = 0;
+logic       uio_cs     = 0;
+logic       uio_cs_nvr = 0;     // Phase 32.5 — driven by Test 9
+logic       uio_wr     = 0;
+logic       uio_rd     = 0;
+logic [7:0] uio_din    = 0;
 wire  [7:0] uio_dout;
 wire        uio_req;
+
+// Phase 32.5: NVRAM channel observability (bridge outputs/inputs)
+wire  [9:0] nvr_addr_w;
+wire  [7:0] nvr_din_w;
+wire        nvr_we_w;
+wire        nvr_clear_dirty_w;
+wire        nvr_done_w;
+logic [7:0] nvr_dout_drv  = 8'h00;
+logic       nvr_dirty_drv = 1'b0;
+
+// Sticky latches for the 1-cycle nvr_done / nvr_clear_dirty pulses so the
+// bench can sample them after the fact without racing the active region.
+// Cleared by writing 0 to nvr_done_seen / nvr_clear_dirty_seen.
+logic       nvr_done_seen        = 1'b0;
+logic       nvr_clear_dirty_seen = 1'b0;
+always @(posedge clk) begin
+	if (nvr_done_w)        nvr_done_seen        <= 1'b1;
+	if (nvr_clear_dirty_w) nvr_clear_dirty_seen <= 1'b1;
+end
 
 akiko #(.NATIVE_CD32(1)) u_dut (
 	.clk(clk), .reset(reset),
@@ -83,12 +103,15 @@ akiko #(.NATIVE_CD32(1)) u_dut (
 	.hps_sec_req(), .hps_sec_status(),
 	.hps_sec_push(1'b0), .hps_sec_byte(8'h00), .hps_sec_done(1'b0),
 	// Phase 18: rx_busy status output for the M3 HPS bridge.
-	.hps_rx_busy()
+	.hps_rx_busy(),
+	// Phase 32 / 32.5: NVRAM port — bench doesn't exercise it.
+	.hps_nvr_addr(10'd0), .hps_nvr_din(8'h00), .hps_nvr_we(),
+	.hps_nvr_dout(), .hps_nvr_clear_dirty(1'b0), .hps_nvr_dirty()
 );
 
 akiko_hps_bridge u_bridge (
 	.clk(clk), .reset(reset),
-	.uio_cs(uio_cs), .uio_cs_sec(1'b0),
+	.uio_cs(uio_cs), .uio_cs_sec(1'b0), .uio_cs_nvr(uio_cs_nvr),
 	.uio_wr(uio_wr), .uio_rd(uio_rd),
 	.uio_din(uio_din), .uio_dout(uio_dout),
 	.cmd_pending(hps_cmd_pending), .cmd_byte(hps_cmd_byte),
@@ -98,6 +121,11 @@ akiko_hps_bridge u_bridge (
 	// M4 sec channel: tied off — bench drives uio_cs_sec=0 always.
 	.sec_req(1'b0), .sec_status(8'h00),
 	.sec_push(), .sec_byte(), .sec_done(),
+	// Phase 32 / 32.5: NVRAM channel — bench Test 9 drives uio_cs_nvr.
+	.nvr_addr(nvr_addr_w), .nvr_dout(nvr_dout_drv),
+	.nvr_din(nvr_din_w),   .nvr_we(nvr_we_w),
+	.nvr_clear_dirty(nvr_clear_dirty_w), .nvr_done(nvr_done_w),
+	.nvr_dirty(nvr_dirty_drv), .nvr_dirty_out(),
 	// Phase 18: bench doesn't exercise rx_busy gating; tie input low,
 	// leave the status output dangling.
 	.rx_busy(1'b0),
@@ -462,6 +490,89 @@ initial begin
 	wait_cmd_pending(2000, cyc);
 	check_bit("H.pending_full", 1'b1, hps_cmd_pending);
 	check8 ("H.cmdlen_full", 8'd32, {2'h0, u_dut.g_cd.cdrom_command_length});
+
+	// =====================================================================
+	$display("--- Test I: Phase 32.5 NVR sub-channel — write burst protocol ---");
+	// Drives a 4-byte WRITE burst on the NVR sub-channel. Verifies:
+	//   - nvr_addr increments per write strobe (resets to 0 on cs_nvr rising)
+	//   - nvr_done pulses at xfer_end (cs_d & ~uio_cs) — observed via sticky
+	//     latch nvr_done_seen because xfer_end is a 1-cycle pulse
+	//   - nvr_clear_dirty does NOT fire (write burst preserves dirty)
+	// Each drive uses a `@(posedge clk)` AFTER setting signals so NBA flushes
+	// before the next sample point (per existing bench convention).
+	begin
+		nvr_dirty_drv = 1'b1;
+		nvr_done_seen        <= 1'b0;
+		nvr_clear_dirty_seen <= 1'b0;
+		@(posedge clk);
+
+		// cs_nvr rising — counter resets to 0.
+		@(posedge clk); uio_cs <= 1; uio_cs_nvr <= 1;
+		@(posedge clk);
+		@(posedge clk);
+		check_bit("I.nvr_addr_reset_pre", 1'b0, |nvr_addr_w);
+
+		// Write 4 bytes. Each byte = uio_wr high for 1 cycle then low,
+		// plus an idle cycle so we can sample the post-update counter.
+		@(posedge clk); uio_wr <= 1; uio_din <= 8'hDE;
+		@(posedge clk); uio_wr <= 0;
+		@(posedge clk);
+		check_bit("I.nvr_addr_post0", 1'b1, nvr_addr_w == 10'd1);
+
+		@(posedge clk); uio_wr <= 1; uio_din <= 8'hAD;
+		@(posedge clk); uio_wr <= 0;
+		@(posedge clk);
+		check_bit("I.nvr_addr_post1", 1'b1, nvr_addr_w == 10'd2);
+
+		@(posedge clk); uio_wr <= 1; uio_din <= 8'hBE;
+		@(posedge clk); uio_wr <= 0;
+		@(posedge clk);
+		@(posedge clk); uio_wr <= 1; uio_din <= 8'hEF;
+		@(posedge clk); uio_wr <= 0;
+		@(posedge clk);
+		check_bit("I.nvr_addr_post3", 1'b1, nvr_addr_w == 10'd4);
+
+		// During a WRITE burst, nvr_clear_dirty must not have fired.
+		check_bit("I.no_clear_during_write", 1'b0, nvr_clear_dirty_seen);
+
+		// Drop cs — xfer_end fires nvr_done. clear_dirty must STILL be 0
+		// (write burst doesn't touch dirty).
+		@(posedge clk); uio_cs <= 0; uio_cs_nvr <= 0;
+		@(posedge clk);
+		@(posedge clk);
+		check_bit("I.nvr_done_after_write", 1'b1, nvr_done_seen);
+		check_bit("I.no_clear_after_write", 1'b0, nvr_clear_dirty_seen);
+	end
+
+	// =====================================================================
+	$display("--- Test J: Phase 32 NVR sub-channel — read burst auto-clears dirty ---");
+	begin
+		nvr_dout_drv = 8'h11; nvr_dirty_drv = 1'b1;
+		nvr_done_seen        <= 1'b0;
+		nvr_clear_dirty_seen <= 1'b0;
+		@(posedge clk);
+
+		@(posedge clk); uio_cs <= 1; uio_cs_nvr <= 1;
+		@(posedge clk);
+		@(posedge clk);
+
+		// 4 read strobes
+		@(posedge clk); uio_rd <= 1; @(posedge clk); uio_rd <= 0; @(posedge clk);
+		@(posedge clk); uio_rd <= 1; @(posedge clk); uio_rd <= 0; @(posedge clk);
+		@(posedge clk); uio_rd <= 1; @(posedge clk); uio_rd <= 0; @(posedge clk);
+		@(posedge clk); uio_rd <= 1; @(posedge clk); uio_rd <= 0; @(posedge clk);
+		check_bit("J.nvr_addr_after_4rd", 1'b1, nvr_addr_w == 10'd4);
+
+		// Mid-burst: clear_dirty must NOT have fired yet.
+		check_bit("J.no_clear_mid_read", 1'b0, nvr_clear_dirty_seen);
+
+		// Drop cs — clear_dirty pulses one cycle after, nvr_done too.
+		@(posedge clk); uio_cs <= 0; uio_cs_nvr <= 0;
+		@(posedge clk);
+		@(posedge clk);
+		check_bit("J.clear_dirty_at_end", 1'b1, nvr_clear_dirty_seen);
+		check_bit("J.nvr_done_after_read", 1'b1, nvr_done_seen);
+	end
 
 	// =====================================================================
 	$display("------------------------------------");

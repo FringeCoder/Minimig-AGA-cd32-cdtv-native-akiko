@@ -61,23 +61,26 @@ module hps_ext
 	output reg [15:0] cdda_dout,
 
 	// Akiko bridge (CD32 native mode). Address class 0xF400 = io_din[15:9]==7'b1111_010.
-	// Three sub-channels share the class, picked from io_din[8:7] captured on
-	// byte_cnt==1:
-	//   io_din[7]=0, io_din[8]=0 -> cmd/result stream (M3)
-	//   io_din[7]=0, io_din[8]=1 -> sector data stream (M4)
-	//   io_din[7]=1                -> bus trace ring (debug, drain-only)
-	// Trace is exclusive: when io_din[7] is set, akiko_cs/akiko_cs_sec stay LOW
-	// so the bridge isn't disturbed. Trace reads return akiko_trace_din and pulse
-	// akiko_trace_rd to advance the ring's byte counter.
+	// Sub-channels share the class, picked from extra bits captured on
+	// byte_cnt==1 (mutually exclusive — at most one extra bit set per txn):
+	//   no extra bits  -> cmd/result stream (M3)             0xF400
+	//   io_din[8]=1    -> sector data stream (M4)            0xF500
+	//   io_din[7]=1    -> bus trace ring (debug, drain-only) 0xF480
+	//   io_din[6]=1    -> NVRAM save-dump (Phase 32)         0xF440
+	//   io_din[5]=1    -> reserved for CDDA streaming (Phase 33) 0xF420
+	// Trace is exclusive (overrides cs entirely). Sec and Nvr both ride
+	// alongside akiko_cs so the bridge can mux on the sub-channel cs flag.
 	input      [15:0] akiko_din,
 	output reg [15:0] akiko_dout,
 	output reg        akiko_wr,
 	output reg        akiko_rd,
 	output reg        akiko_cs,
 	output reg        akiko_cs_sec,
+	output reg        akiko_cs_nvr,    // Phase 32: NVRAM save-dump sub-channel
 	input             akiko_req,
 	input             akiko_sec_req,
 	input             akiko_rx_busy,
+	input             akiko_nvr_dirty, // Phase 32: status word bit 7
 
 	input       [7:0] akiko_trace_din,
 	output reg        akiko_trace_rd,
@@ -127,6 +130,7 @@ always@(posedge clk_sys) begin
 		cdda_cs <= 0;
 		akiko_cs <= 0;
 		akiko_cs_sec <= 0;
+		akiko_cs_nvr <= 0;
 		akiko_cs_trace <= 0;
 		if(cmd == 'h2D) sset <= 1;
 	end
@@ -146,6 +150,7 @@ always@(posedge clk_sys) begin
 			// the M3/M4 bridge isn't fed during a debug drain.
 			akiko_cs       <= (io_din[15:9] == 7'b1111010) && !io_din[7];
 			akiko_cs_sec   <= (io_din[15:9] == 7'b1111010) && !io_din[7] && io_din[8];
+			akiko_cs_nvr   <= (io_din[15:9] == 7'b1111010) && !io_din[7] && io_din[6];
 			akiko_cs_trace <= (io_din[15:9] == 7'b1111010) &&  io_din[7];
 		end
 
@@ -156,7 +161,10 @@ always@(posedge clk_sys) begin
 				// bit [11] = akiko_req (M3: command framed, ready to drain)
 				// bit [10] = akiko_sec_req (M4: PBX wants a sector pushed)
 				// bit  [9] = akiko_rx_busy (Phase 18: RX engine has pending response)
-				io_dout <= {4'hE, akiko_req, akiko_sec_req, akiko_rx_busy, cdda_req, 2'b00, ide_req};
+				// bit  [8] = cdda_req (legacy stock-Minimig CDDA — dormant in NATIVE_CD32)
+				// bit  [7] = akiko_nvr_dirty (Phase 32: NVRAM written since last clear)
+				// bit  [6] = reserved (CDDA aud_ready, Phase 33)
+				io_dout <= {4'hE, akiko_req, akiko_sec_req, akiko_rx_busy, cdda_req, akiko_nvr_dirty, 1'b0, ide_req};
 			end
 		end else begin
 			case(cmd)
