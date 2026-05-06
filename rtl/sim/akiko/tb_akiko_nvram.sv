@@ -486,6 +486,58 @@ initial begin
 	repeat (8) @(posedge clk);
 
 	// --------------------------------------------------------------
+	// Test 9: 1024-byte sequential load burst.
+	// Mirrors the production hps_io.ioctl_download path: 1024 back-to-back
+	// load_we pulses with load_din varying every cycle. Then read every
+	// byte back via host_addr to confirm each address landed with the
+	// correct value (and not the stale prior-cycle value, which is what
+	// hardware was doing on 2026-05-06 — bytes 0x200..0x3FF stuck at the
+	// 0x1FF value while ioctl_addr advanced correctly).
+	// --------------------------------------------------------------
+	begin
+		bit [7:0] hd;
+		bit [7:0] expected;
+		int    miscount = 0;
+		$display("=== Test 9: 1024-byte sequential load burst ===");
+
+		// Drive 1024 distinct bytes: pattern lets a single mismatch at
+		// offset N show up as got != want (no aliasing collisions across
+		// the 1024 byte address space, unlike the (i & 0x3F) variant we
+		// hit on hardware).
+		for (int i = 0; i < 1024; i++) begin
+			load_addr = i[9:0];
+			load_din  = 8'(i ^ (i >> 3));   // varying per address
+			load_we   = 1'b1;
+			@(posedge clk);
+		end
+		load_we = 1'b0;
+		@(posedge clk); @(posedge clk);
+
+		// Read back every byte and compare. Don't check_*  per-byte (that
+		// would log 1024 lines); accumulate and report the count at end.
+		for (int i = 0; i < 1024; i++) begin
+			host_addr = i[9:0];
+			@(posedge clk); @(posedge clk);
+			expected = 8'(i ^ (i >> 3));
+			if (host_dout !== expected) begin
+				if (miscount < 8)
+					$display("FAIL [burst @0x%03x]: got 0x%02h, want 0x%02h",
+					         i, host_dout, expected);
+				miscount++;
+			end
+		end
+		tests++;
+		if (miscount) begin
+			$display("FAIL [burst_1024]: %0d/1024 mismatched", miscount);
+			errs++;
+		end else begin
+			$display("PASS [burst_1024]: 1024 bytes round-trip");
+		end
+	end
+
+	repeat (8) @(posedge clk);
+
+	// --------------------------------------------------------------
 	// Summary
 	// --------------------------------------------------------------
 	$display("=================================================");
