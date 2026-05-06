@@ -220,7 +220,10 @@ wire [21:0] gamma_bus;
 
 wire  [7:0] uart_mode;
 
-hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
+// VDNUM=1: one virtual disk slot — slot 0 is the NVRAM .nvr file.
+// BLKSZ=3: 1024 bytes per LBA; with sd_blk_cnt_nvr[0]=0 (= 1 block) the
+// whole 1 KiB NVR transfers in a single LBA read.
+hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0), .VDNUM(1), .BLKSZ(3)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS({HPS_BUS[48:42],ce_pix,HPS_BUS[40:0]}),
@@ -236,13 +239,22 @@ hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 	.joystick_3(JOY3),
 	.joystick_l_analog_0(JOYA0),
 	.joystick_l_analog_1(JOYA1),
-	
+
 	.ioctl_wait(io_wait),
-	.ioctl_download(ioctl_download),
-	.ioctl_index(ioctl_index),
-	.ioctl_wr(ioctl_wr),
-	.ioctl_addr(ioctl_addr),
-	.ioctl_dout(ioctl_dout),
+
+	.img_mounted(img_mounted),
+	.img_readonly(img_readonly),
+	.img_size(img_size),
+
+	.sd_lba(sd_lba_nvr),
+	.sd_blk_cnt(sd_blk_cnt_nvr),
+	.sd_rd(sd_rd_nvr),
+	.sd_wr(sd_wr_nvr),
+	.sd_ack(sd_ack),
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_din(sd_buff_din_nvr),
+	.sd_buff_wr(sd_buff_wr),
 
 	.buttons(buttons),
 	.forced_scandoubler(forced_scandoubler),
@@ -284,28 +296,60 @@ wire        akiko_cs_trace;
 wire        akiko_trace_rd;
 wire  [7:0] akiko_trace_din;
 
-// NVRAM load-from-disk via canonical hps_io.ioctl_download. Userspace
-// streams the file with index = NVR_LOAD_INDEX; hps_io presents bytes
-// on ioctl_dout with byte-incrementing ioctl_addr. We gate the write
-// enable by index match and clamp the address to 1 KiB so a malformed
-// upload can't corrupt anything outside the BRAM. The akiko_nvram BRAM
-// write port lives outside the CD32 CPU reset domain (see akiko.v: the
-// nvram_inst has .reset(1'b0)), so the load works whether or not cpu_rst
-// is asserted while the burst arrives.
-localparam [7:0] NVR_LOAD_INDEX = 8'd1;
+// NVRAM load-from-disk via canonical SD-block path (the pattern SNES,
+// Saturn, GBA, NeoGeo, CDi all use). Userspace calls user_io_file_mount
+// with the .nvr path; hps_io fires img_mounted[0], we kick off a single
+// 1024-byte read by raising sd_rd_nvr with sd_lba_nvr=0, hps_io streams
+// each byte on sd_buff_dout / sd_buff_addr / sd_buff_wr, and we forward
+// directly to akiko_nvram's load_we BRAM port. Sidesteps the gp_out CDC
+// race that broke the ioctl_download path on hardware (data freezes at
+// the first byte-value transition; bench-clean, hw-broken).
+//
+// VDNUM=1 (slot 0 = NVR), BLKSZ=3 (1024 B/block — whole NVR fits in one
+// LBA), WIDE=0 (byte-wide sd_buff_dout — direct match for our 8-bit
+// BRAM port, no unpack needed). The akiko_nvram BRAM write port lives
+// outside the CD32 CPU reset domain (akiko.v nvram_inst has .reset(1'b0)),
+// so the load works whether or not cpu_rst is asserted at mount time.
+wire        img_mounted;
+wire        img_readonly;
+wire [63:0] img_size;
+wire [31:0] sd_lba_nvr   [0:0];
+wire  [5:0] sd_blk_cnt_nvr[0:0];
+wire        sd_ack;
+wire [13:0] sd_buff_addr;
+wire  [7:0] sd_buff_dout;
+wire  [7:0] sd_buff_din_nvr[0:0];
+wire        sd_buff_wr;
 
-wire        ioctl_download;
-wire [15:0] ioctl_index;
-wire        ioctl_wr;
-wire [26:0] ioctl_addr;
-wire  [7:0] ioctl_dout;
+reg         sd_rd_nvr;
+reg         sd_wr_nvr;        // unused for now (save still goes via UIO dump)
+reg         img_mounted_d;
 
-wire        nvr_load_match = ioctl_download &&
-                             (ioctl_index[7:0] == NVR_LOAD_INDEX) &&
-                             (ioctl_addr      <  27'd1024);
-wire [9:0]  nvr_load_addr  = ioctl_addr[9:0];
-wire [7:0]  nvr_load_din   = ioctl_dout;
-wire        nvr_load_we    = nvr_load_match && ioctl_wr;
+assign sd_lba_nvr[0]      = 32'd0;
+assign sd_blk_cnt_nvr[0]  = 6'd0;     // single 1024-byte block per load
+assign sd_buff_din_nvr[0] = 8'h00;    // save side not wired through this path
+
+always @(posedge clk_sys) begin
+	img_mounted_d <= img_mounted;
+	// Rising edge of img_mounted with the right size kicks off the
+	// load by raising sd_rd_nvr. hps_io picks this up, asserts sd_ack
+	// (HIGH for the *entire* transfer — see sys/hps_io.sv 'h17/0X18
+	// case) and streams bytes on sd_buff_dout/_addr/_wr. We drop
+	// sd_rd_nvr the moment sd_ack rises so the request isn't re-issued.
+	if (img_mounted && !img_mounted_d &&
+	    (img_size == 64'd1024) && !img_readonly) begin
+		sd_rd_nvr <= 1'b1;
+	end else if (sd_ack) begin
+		sd_rd_nvr <= 1'b0;
+	end
+	sd_wr_nvr <= 1'b0;
+end
+
+// Gate by sd_ack (HIGH for the whole transfer), NOT sd_rd_nvr (which
+// drops one cycle after the transfer starts and would mask every byte).
+wire [9:0]  nvr_load_addr  = sd_buff_addr[9:0];
+wire [7:0]  nvr_load_din   = sd_buff_dout;
+wire        nvr_load_we    = sd_buff_wr & sd_ack;
 
 // Akiko chip-RAM master wires (M5). akiko's DMA engines emit single-byte
 // requests; chipdma_arb (instantiated below sdram_ctrl) muxes them onto
