@@ -431,6 +431,61 @@ initial begin
 	repeat (8) @(posedge clk);
 
 	// --------------------------------------------------------------
+	// Test 8: load port works while reset is HIGH.
+	// In the integrated design akiko.v ties akiko_nvram .reset(1'b0),
+	// so the I2C state machine never sees the CD32 cpu_rst. Bench-side,
+	// we model the worst-case "downstream sees reset" scenario by
+	// asserting `reset` HIGH for the full duration of a 4-byte load
+	// burst, then checking the bytes landed and survived reset release.
+	// If the BRAM write port were gated by reset (it isn't, per the
+	// load_addr/load_din/load_we mux in akiko_nvram.v), this test
+	// would fail and we'd catch any regression that re-couples the
+	// load path to a reset domain.
+	// --------------------------------------------------------------
+	begin
+		bit [7:0] hd;
+		$display("=== Test 8: load while reset asserted (domain-decoupling) ===");
+
+		// Hold reset HIGH for the entire load burst.
+		reset = 1'b1;
+		@(posedge clk);
+		load_addr = 10'h280; load_din = 8'hCA; load_we = 1'b1; @(posedge clk);
+		load_addr = 10'h281; load_din = 8'hFE;                 @(posedge clk);
+		load_addr = 10'h282; load_din = 8'hBA;                 @(posedge clk);
+		load_addr = 10'h283; load_din = 8'hBE;                 @(posedge clk);
+		load_we = 1'b0; @(posedge clk);
+
+		// Release reset; let the I2C path settle.
+		reset = 1'b0;
+		repeat (8) @(posedge clk);
+
+		// Read back via host port.
+		host_addr = 10'h280; @(posedge clk); @(posedge clk);
+		check("rst_load_rd_0x280", host_dout, 8'hCA);
+		host_addr = 10'h281; @(posedge clk); @(posedge clk);
+		check("rst_load_rd_0x281", host_dout, 8'hFE);
+		host_addr = 10'h282; @(posedge clk); @(posedge clk);
+		check("rst_load_rd_0x282", host_dout, 8'hBA);
+		host_addr = 10'h283; @(posedge clk); @(posedge clk);
+		check("rst_load_rd_0x283", host_dout, 8'hBE);
+
+		// And via I2C — reset deassertion must leave the I2C path
+		// functional and seeing the loaded bytes.
+		i2c_start();
+		i2c_write(8'hA4, ack);                  // devaddr W, page 2
+		i2c_write(8'h80, ack);                  // wordaddr 0x80 -> full 0x280
+		i2c_start();
+		i2c_write(8'hA5, ack);                  // devaddr R, page 2
+		i2c_read(hd, 1); check("rst_i2c_rd_0x280", hd, 8'hCA);
+		i2c_read(hd, 1); check("rst_i2c_rd_0x281", hd, 8'hFE);
+		i2c_read(hd, 1); check("rst_i2c_rd_0x282", hd, 8'hBA);
+		i2c_read(hd, 0); check("rst_i2c_rd_0x283", hd, 8'hBE);
+		i2c_stop();
+	end
+
+	repeat (8) @(posedge clk);
+
+	// --------------------------------------------------------------
 	// Summary
 	// --------------------------------------------------------------
 	$display("=================================================");
