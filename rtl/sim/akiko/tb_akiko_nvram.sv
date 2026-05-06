@@ -40,30 +40,33 @@ wire  sda_drive;            // from DUT
 wire  bus_scl = scl_master;
 wire  bus_sda = sda_master & ~sda_drive;
 
-// Phase 32 / 32.5: host port wires. Test 6 covers the read side; Test 7
-// adds the write side (load-from-disk) and verifies host writes do NOT
-// set the dirty flag.
+// host_* ports are the read-side (save dump). load_* ports are the write-side
+// (ioctl_download path). Test 6 covers the read side; Test 7 covers the
+// write side and verifies load writes do NOT set the dirty flag.
 logic [9:0] host_addr        = 10'd0;
-logic [7:0] host_din         = 8'h00;
-logic       host_we          = 1'b0;
 logic       host_clear_dirty = 1'b0;
 wire  [7:0] host_dout;
 wire        nvram_dirty;
 
-// Sim runs from rtl/sim/akiko/, override INIT_FILE accordingly so $readmemh
-// finds the same cd32.nvr image Quartus loads from project root.
-akiko_nvram #(.INIT_FILE("../../init/nvram_init.hex")) dut (
+logic [9:0] load_addr        = 10'd0;
+logic [7:0] load_din         = 8'h00;
+logic       load_we          = 1'b0;
+
+// Sim runs from rtl/sim/akiko/, override INIT_FILE accordingly so altsyncram's
+// init_file finds the same cd32.nvr image Quartus loads from project root.
+akiko_nvram #(.INIT_FILE("../../init/nvram_init.mif")) dut (
 	.clk              (clk),
 	.reset            (reset),
 	.scl_in           (bus_scl),
 	.sda_in           (bus_sda),
 	.sda_drive        (sda_drive),
 	.host_addr        (host_addr),
-	.host_din         (host_din),
-	.host_we          (host_we),
 	.host_dout        (host_dout),
 	.host_clear_dirty (host_clear_dirty),
-	.nvram_dirty      (nvram_dirty)
+	.nvram_dirty      (nvram_dirty),
+	.load_addr        (load_addr),
+	.load_din         (load_din),
+	.load_we          (load_we)
 );
 
 int errs = 0;
@@ -359,32 +362,32 @@ initial begin
 	repeat (8) @(posedge clk);
 
 	// --------------------------------------------------------------
-	// Test 7: Phase 32.5 — host write port (load-from-disk path).
+	// Test 7: load write port (ioctl_download path).
 	//   a) Pulse host_clear_dirty so we start clean.
-	//   b) Drive host_we for 4 cycles writing 0xDE 0xAD 0xBE 0xEF
+	//   b) Drive load_we for 4 cycles writing 0xDE 0xAD 0xBE 0xEF
 	//      at addresses 0x200..0x203.
 	//   c) Read back via host port — bytes match.
-	//   d) Verify nvram_dirty is STILL 0 (host writes must NOT set dirty).
+	//   d) Verify nvram_dirty is STILL 0 (load writes must NOT set dirty).
 	//   e) Drive a single I2C write — dirty must re-assert (the I2C path
 	//      is the only thing that sets dirty).
 	//   f) Verify the loaded bytes survive: read back via I2C and compare.
 	// --------------------------------------------------------------
 	begin
 		bit [7:0] hd;
-		$display("=== Test 7: Phase 32.5 host write port (load-back) ===");
+		$display("=== Test 7: load write port (ioctl_download path) ===");
 
 		// (a) Start from a known-clean state.
 		host_clear_dirty = 1'b1; @(posedge clk);
 		host_clear_dirty = 1'b0; @(posedge clk);
 		check_bit("dirty_clean_pre_load", nvram_dirty, 0);
 
-		// (b) Burst-write 4 bytes via the host port. Each cycle: set
-		//     host_addr / host_din, pulse host_we high.
-		host_addr = 10'h200; host_din = 8'hDE; host_we = 1'b1; @(posedge clk);
-		host_addr = 10'h201; host_din = 8'hAD;                 @(posedge clk);
-		host_addr = 10'h202; host_din = 8'hBE;                 @(posedge clk);
-		host_addr = 10'h203; host_din = 8'hEF;                 @(posedge clk);
-		host_we = 1'b0; @(posedge clk);
+		// (b) Burst-write 4 bytes via the load port. Each cycle: set
+		//     load_addr / load_din, pulse load_we high.
+		load_addr = 10'h200; load_din = 8'hDE; load_we = 1'b1; @(posedge clk);
+		load_addr = 10'h201; load_din = 8'hAD;                 @(posedge clk);
+		load_addr = 10'h202; load_din = 8'hBE;                 @(posedge clk);
+		load_addr = 10'h203; load_din = 8'hEF;                 @(posedge clk);
+		load_we = 1'b0; @(posedge clk);
 
 		// (c) Read back via host port. host_dout lags host_addr by 1 clk.
 		host_addr = 10'h200; @(posedge clk); @(posedge clk);
@@ -396,7 +399,7 @@ initial begin
 		host_addr = 10'h203; @(posedge clk); @(posedge clk);
 		check("load_rd_0x203", host_dout, 8'hEF);
 
-		// (d) Critical invariant: host writes do NOT set dirty.
+		// (d) Critical invariant: load writes do NOT set dirty.
 		check_bit("dirty_unset_after_load", nvram_dirty, 0);
 
 		// (e) An I2C write still sets dirty.

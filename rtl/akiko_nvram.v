@@ -22,10 +22,12 @@
 
 module akiko_nvram
 #(
-	// Path to a 1024-byte hex image (one byte per line) used to pre-load
-	// the M10K. Default works when synthesis is run from the project root
-	// (Quartus); standalone benches override with the sim-relative path.
-	parameter INIT_FILE = "rtl/init/nvram_init.hex"
+	// Path to a Quartus .mif image (1024 bytes) that pre-loads the
+	// altsyncram M10K instances. Default works when synthesis is run
+	// from the project root (Quartus); standalone benches override
+	// with a sim-relative path or the literal string "UNUSED" to skip
+	// preload (RAM powers up all-zero with power_up_uninitialized=FALSE).
+	parameter INIT_FILE = "rtl/init/nvram_init.mif"
 )
 (
 	input  wire        clk,
@@ -38,57 +40,38 @@ module akiko_nvram
 	// Slave open-drain pull-down. 1 = slave is asserting SDA low.
 	output wire        sda_drive,
 
-	// Phase 32: HPS host port for save-to-disk dump.
-	// Phase 32.5: extended with write port for load-from-disk on core init.
-	// Inferred as a true dual-port M10K alongside the I2C path. host_addr
-	// is registered into BRAM by the always block; host_dout lags by one
-	// clk edge. host_we writes host_din at host_addr (does NOT set dirty —
-	// loading saved state should NOT trigger an immediate re-save).
+	// HPS save-dump read port. host_addr is registered into BRAM by the
+	// altsyncram Port B address register; host_dout lags by one clk edge.
 	// host_clear_dirty pulses to clear nvram_dirty after a save dump
 	// completes (driven by bridge xfer_end on a read transaction).
 	input  wire [9:0]  host_addr,
-	input  wire [7:0]  host_din,
-	input  wire        host_we,
-	output reg  [7:0]  host_dout,
+	output wire [7:0]  host_dout,
 	input  wire        host_clear_dirty,
-	output reg         nvram_dirty
+	output reg         nvram_dirty = 1'b0,
+
+	// HPS load-from-disk write port. Driven by hps_io.ioctl_download
+	// gated on NVR_LOAD_INDEX in Minimig.sv. Lives in HPS reset domain —
+	// fires before BIOS touches I²C, so no contention with the slave
+	// state machine. load_we does NOT set nvram_dirty (loading saved
+	// state must not provoke an immediate re-save).
+	input  wire [9:0]  load_addr,
+	input  wire [7:0]  load_din,
+	input  wire        load_we
 );
 
 // 24LC08: 1 KiB = 1024 bytes, 16-byte page, addr-bits-in-device-byte = 2 (A8..A9)
-//
-// Memory is inferred as a single M10K block: one synchronous read port (mem_dout
-// always reflects memory[eeprom_addr] one cycle later) and one synchronous write
-// port (mem_we gated). Without this structure Quartus 17 spreads 8192 flops
-// across the device (~3900 ALMs) which pushes the borderline pbx_seccnt -> sdram
-// path into setup violation.
 localparam ADDR_W = 10;
-// Phase 33-A iter3 (2026-05-04): explicit dual-memory pattern. Iter2's
-// single-array+single-write-port template was supposed to infer one M10K
-// or fan a single write to two duplicates. Quartus 17 actually inferred
-// TWO M10Ks (memory_rtl_0 for I2C reads, memory_rtl_1 for HPS reads) but
-// only fanned the I2C-side mem_we write port to BOTH; host_we writes
-// landed nowhere visible to host_dout. Empirically: host_dout returned
-// all zeros even after host_we write loops, then "magically" returned
-// FlashFile magic 5s after boot — i.e., once BIOS wrote the same magic
-// via I2C. The .mif also didn't initialize memory_rtl_1 at FPGA config.
-//
-// Fix: declare TWO memory arrays explicitly. Both get $readmemh init,
-// both receive both writes (host_we and mem_we) on the same cycle. This
-// removes all inference ambiguity — Quartus must give us 2 M10Ks each
-// with their own write port driven by both signals (ORed via mem_we_mux).
-(* ramstyle = "M10K, no_rw_check" *) reg [7:0] memory_a [0:1023];
-(* ramstyle = "M10K, no_rw_check" *) reg [7:0] memory_b [0:1023];
-reg [7:0]        mem_dout;
-reg              mem_we;
-reg [ADDR_W-1:0] mem_waddr;     // captured at write-issue time so eeprom_addr can advance NBA in the same cycle
 
-// Phase 14: pre-load M10K with a real cd32.nvr so BIOS sees the FlashFile
-// magic (0x00 0x56 0xA9 ...) at boot. With all-zeros NVRAM, BIOS fails its
-// FlashFile root-block check and loops searching forever instead of issuing
-// MULTI. $readmemh is honored by both ModelSim and Quartus 17 for inferred
-// M10K, so the same image is used in sim and on hardware.
-initial $readmemh(INIT_FILE, memory_a);
-initial $readmemh(INIT_FILE, memory_b);
+// Storage signals; mem_dout/host_dout are driven by altsyncram Port B
+// outputs declared further down. mem_we / mem_waddr are produced by the
+// I2C state machine and routed via mem_*_mux to Port A of both rams.
+// Initial values (no-reset). The slave's I²C state machine is decoupled
+// from the chip-wide `reset` signal (= ~cpu_rst | ~cpu_nrst_out) so the
+// load_we-driven HPS write path can fire regardless of CD32 CPU reset
+// state — load happens before BIOS touches I²C.
+wire [7:0]        mem_dout;
+reg               mem_we    = 1'b0;
+reg  [ADDR_W-1:0] mem_waddr = {ADDR_W{1'b0}}; // captured at write-issue time so eeprom_addr can advance NBA in the same cycle
 
 // I2C state machine. Mirrors WinUAE bitbang_i2c_state but compacted:
 // the WinUAE per-bit states (SENDING_BIT7..0, RECEIVING_BIT7..0) are
@@ -104,18 +87,20 @@ localparam BYTE_DEVADDR  = 2'd0;
 localparam BYTE_WORDADDR = 2'd1;
 localparam BYTE_DATA     = 2'd2;
 
-reg [2:0] state;
-reg [1:0] byte_phase;       // BYTE_DEVADDR/WORDADDR/DATA
-reg [3:0] bit_count;        // 0..7 within a byte, plus a 1-bit "ack second-fall" flag
-reg [7:0] shift_reg;
-reg [ADDR_W-1:0] eeprom_addr;
-reg       is_read;          // direction from device-address byte (1=read, 0=write)
-reg       dev_match;        // device address byte was 1010xxxx
-reg       sda_oe;           // 1 = pull SDA low
+// Phase 33-J: initial values for all I²C state-machine regs (no-reset
+// powerup). See banner comment above.
+reg [2:0] state                   = ST_IDLE;
+reg [1:0] byte_phase              = BYTE_DEVADDR;
+reg [3:0] bit_count               = 4'd0;
+reg [7:0] shift_reg               = 8'h00;
+reg [ADDR_W-1:0] eeprom_addr      = {ADDR_W{1'b0}};
+reg       is_read                 = 1'b0;          // direction from device-address byte (1=read, 0=write)
+reg       dev_match                = 1'b0;          // device address byte was 1010xxxx
+reg       sda_oe                  = 1'b0;          // 1 = pull SDA low
 
 // Edge detection on SCL/SDA. Sampled at clk_sys, way faster than I2C
 // software bit-bang (BIOS toggles in microseconds vs our nanosecond clock).
-reg prev_scl, prev_sda;
+reg prev_scl = 1'b1, prev_sda = 1'b1;
 wire scl_rise = ~prev_scl &  scl_in;
 wire scl_fall =  prev_scl & ~scl_in;
 wire sda_rise = ~prev_sda &  sda_in;
@@ -131,61 +116,138 @@ wire stop_cond  = scl_in & sda_rise;
 // strobe, the readouts are always valid by the time downstream consumes
 // them.
 //
-// Phase 32  — added a second read port for the HPS save-dump path.
-// Phase 32.5 — added a write side (host_we / host_din) so userspace can
-//              push a saved cd32-<hash>.nvr back into BRAM at core init.
-// Phase 33-A iter1 (2026-05-04) — TDP attempt with two separate always
-//              blocks: Quartus 17 refused inference ("RAM logic ... is
-//              uninferred due to too many ports") AND the fabric-flop
-//              fallback also dropped host_we writes (verified on
-//              hardware: NVR LOAD VERIFY FAILED 4/1024). Reverted.
-// Phase 33-A iter2 (2026-05-04) — canonical SIMPLE DUAL PORT template.
-//              Both writes feed a single muxed write port; host_we wins
-//              on (impossible) collision. Two read ports remain (one
-//              for I2C, one for HPS dump). This is the textbook SDP-2R
-//              pattern Quartus 17 reliably infers as one M10K with no
-//              inference ambiguity.
+// Two altsyncram megafunctions explicitly instantiated (rather than
+// inferred) so Quartus emits a per-instance .mif binding for the M10K
+// init_file — one shared write port, two independent read ports
+// (memory_a feeds the I²C slave, memory_b feeds the HPS save-dump).
 //
-// Write-write collision protocol: host_we only fires during the
-// load-from-disk burst, which happens at akiko_cd32_init() before BIOS
-// touches I2C. mem_we only fires during runtime I2C transactions, after
-// BIOS owns the bus. Temporally disjoint, so the priority mux is purely
-// a safety belt; runtime behaviour is unaffected.
+// Write priority: load_we (HPS-driven from ioctl_download) wins over
+// mem_we (I²C slave). They are temporally disjoint in normal use —
+// load fires at core init before BIOS touches I²C — so the priority
+// is a safety belt, not a contention resolver.
 
-wire [ADDR_W-1:0] mem_waddr_mux = host_we ? host_addr : mem_waddr;
-wire        [7:0] mem_din_mux   = host_we ? host_din  : shift_reg;
-wire              mem_we_mux    = host_we | mem_we;
+wire [ADDR_W-1:0] mem_waddr_mux = load_we ? load_addr : mem_waddr;
+wire        [7:0] mem_din_mux   = load_we ? load_din  : shift_reg;
+wire              mem_we_mux    = load_we | mem_we;
 
-// memory_a feeds the I2C read port (mem_dout, addressed by eeprom_addr).
-// memory_b feeds the HPS read port (host_dout, addressed by host_addr).
-// Both arrays receive the same writes on every clock — they are kept
-// byte-for-byte identical. This is the canonical "1W+2R = 2 SDP M10Ks
-// with shared write" pattern, written explicitly so Quartus can't lose
-// the host_we fan-out.
-always @(posedge clk) begin
-	if (mem_we_mux) begin
-		memory_a[mem_waddr_mux] <= mem_din_mux;
-		memory_b[mem_waddr_mux] <= mem_din_mux;
-	end
-	mem_dout  <= memory_a[eeprom_addr];
-	host_dout <= memory_b[host_addr];
-end
+// memory_a_inst feeds the I2C read port (mem_dout, addressed by eeprom_addr).
+// memory_b_inst feeds the HPS read port (host_dout, addressed by host_addr).
+// Both instances receive identical writes on Port A every clock and use the
+// same INIT_FILE. Output latency = 1 clk (address registered into Port B,
+// output wire combinational from BRAM array — matches the prior always-block
+// behaviour exactly).
+altsyncram memory_a_inst (
+	.address_a (mem_waddr_mux),
+	.clock0    (clk),
+	.data_a    (mem_din_mux),
+	.wren_a    (mem_we_mux),
+	.address_b (eeprom_addr),
+	.q_b       (mem_dout),
+	.aclr0     (1'b0),
+	.aclr1     (1'b0),
+	.addressstall_a (1'b0),
+	.addressstall_b (1'b0),
+	.byteena_a (1'b1),
+	.byteena_b (1'b1),
+	.clock1    (1'b1),
+	.clocken0  (1'b1),
+	.clocken1  (1'b1),
+	.clocken2  (1'b1),
+	.clocken3  (1'b1),
+	.data_b    (8'h00),
+	.eccstatus (),
+	.q_a       (),
+	.rden_a    (1'b1),
+	.rden_b    (1'b1),
+	.wren_b    (1'b0)
+);
+defparam
+	memory_a_inst.address_aclr_b = "NONE",
+	memory_a_inst.address_reg_b = "CLOCK0",
+	memory_a_inst.clock_enable_input_a = "BYPASS",
+	memory_a_inst.clock_enable_input_b = "BYPASS",
+	memory_a_inst.clock_enable_output_b = "BYPASS",
+	memory_a_inst.init_file = INIT_FILE,
+	memory_a_inst.intended_device_family = "Cyclone V",
+	memory_a_inst.lpm_type = "altsyncram",
+	memory_a_inst.numwords_a = 1024,
+	memory_a_inst.numwords_b = 1024,
+	memory_a_inst.operation_mode = "DUAL_PORT",
+	memory_a_inst.outdata_aclr_b = "NONE",
+	memory_a_inst.outdata_reg_b = "UNREGISTERED",
+	memory_a_inst.power_up_uninitialized = "FALSE",
+	memory_a_inst.ram_block_type = "M10K",
+	memory_a_inst.read_during_write_mode_mixed_ports = "OLD_DATA",
+	memory_a_inst.widthad_a = 10,
+	memory_a_inst.widthad_b = 10,
+	memory_a_inst.width_a = 8,
+	memory_a_inst.width_b = 8,
+	memory_a_inst.width_byteena_a = 1;
+
+altsyncram memory_b_inst (
+	.address_a (mem_waddr_mux),
+	.clock0    (clk),
+	.data_a    (mem_din_mux),
+	.wren_a    (mem_we_mux),
+	.address_b (host_addr),
+	.q_b       (host_dout),
+	.aclr0     (1'b0),
+	.aclr1     (1'b0),
+	.addressstall_a (1'b0),
+	.addressstall_b (1'b0),
+	.byteena_a (1'b1),
+	.byteena_b (1'b1),
+	.clock1    (1'b1),
+	.clocken0  (1'b1),
+	.clocken1  (1'b1),
+	.clocken2  (1'b1),
+	.clocken3  (1'b1),
+	.data_b    (8'h00),
+	.eccstatus (),
+	.q_a       (),
+	.rden_a    (1'b1),
+	.rden_b    (1'b1),
+	.wren_b    (1'b0)
+);
+defparam
+	memory_b_inst.address_aclr_b = "NONE",
+	memory_b_inst.address_reg_b = "CLOCK0",
+	memory_b_inst.clock_enable_input_a = "BYPASS",
+	memory_b_inst.clock_enable_input_b = "BYPASS",
+	memory_b_inst.clock_enable_output_b = "BYPASS",
+	memory_b_inst.init_file = INIT_FILE,
+	memory_b_inst.intended_device_family = "Cyclone V",
+	memory_b_inst.lpm_type = "altsyncram",
+	memory_b_inst.numwords_a = 1024,
+	memory_b_inst.numwords_b = 1024,
+	memory_b_inst.operation_mode = "DUAL_PORT",
+	memory_b_inst.outdata_aclr_b = "NONE",
+	memory_b_inst.outdata_reg_b = "UNREGISTERED",
+	memory_b_inst.power_up_uninitialized = "FALSE",
+	memory_b_inst.ram_block_type = "M10K",
+	memory_b_inst.read_during_write_mode_mixed_ports = "OLD_DATA",
+	memory_b_inst.widthad_a = 10,
+	memory_b_inst.widthad_b = 10,
+	memory_b_inst.width_a = 8,
+	memory_b_inst.width_b = 8,
+	memory_b_inst.width_byteena_a = 1;
 
 // Dirty flag: latched by any successful sequential write from the I2C
 // path (mem_we). Userspace reads the flag via the bridge status word,
 // dumps NVRAM via the read sub-channel — which auto-clears dirty on
-// transaction end (host_clear_dirty pulse from the bridge). Reset
-// clears it so a fresh boot doesn't look dirty just because the .hex
-// baseline equals the eventual SD-saved file.
+// transaction end (host_clear_dirty pulse from the bridge).
 //
-// Phase 32.5 invariants:
-//   - host_we does NOT set dirty (loading from disk should not trigger
+// Invariants:
+//   - load_we does NOT set dirty (loading from disk must not trigger
 //     an immediate re-save of what we just loaded).
 //   - mem_we wins over host_clear_dirty on the same cycle: if BIOS
 //     writes during the dump, dirty stays set so the next poll re-saves.
+// `reset` removed from these always blocks: initial values cover FPGA
+// configuration; STOP/START bus-protocol recovery covers stuck-state
+// escape. Decoupling from `reset` (= ~cpu_rst | ~cpu_nrst_out) lets
+// load_we work regardless of CD32 CPU reset state.
 always @(posedge clk) begin
-	if (reset)                  nvram_dirty <= 1'b0;
-	else if (mem_we)            nvram_dirty <= 1'b1;
+	if (mem_we)                 nvram_dirty <= 1'b1;
 	else if (host_clear_dirty)  nvram_dirty <= 1'b0;
 end
 
@@ -194,18 +256,8 @@ always @(posedge clk) begin
 	prev_sda <= sda_in;
 	mem_we   <= 1'b0;            // single-cycle pulse; default off
 
-	if (reset) begin
-		state       <= ST_IDLE;
-		byte_phase  <= BYTE_DEVADDR;
-		bit_count   <= 4'd0;
-		shift_reg   <= 8'h0;
-		eeprom_addr <= {ADDR_W{1'b0}};
-		is_read     <= 1'b0;
-		dev_match   <= 1'b0;
-		sda_oe      <= 1'b0;
-	end
 	// STOP condition unconditionally returns to idle and releases SDA.
-	else if (stop_cond) begin
+	if (stop_cond) begin
 		state      <= ST_IDLE;
 		byte_phase <= BYTE_DEVADDR;
 		bit_count  <= 4'd0;

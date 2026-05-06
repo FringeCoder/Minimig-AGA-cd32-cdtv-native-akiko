@@ -267,17 +267,24 @@ wire        akiko_wr;
 wire        akiko_rd;
 wire        akiko_cs;
 wire        akiko_cs_sec; // M4 sub-channel selector
-wire        akiko_cs_nvr; // Phase 32: NVRAM save-dump sub-channel (io_din[6])
+wire        akiko_cs_nvr; // NVRAM save-dump sub-channel (io_din[6])
 wire        akiko_req;     // FROM fastchip TO hps_ext (cmd status bit)
 wire        akiko_sec_req; // FROM fastchip TO hps_ext (M4 sector status bit)
 wire        akiko_rx_busy; // FROM fastchip TO hps_ext (Phase 18: RX engine busy)
-wire        akiko_nvr_dirty; // FROM fastchip TO hps_ext (Phase 32: NVRAM dirty bit)
+wire        akiko_nvr_dirty; // FROM fastchip TO hps_ext (NVRAM dirty bit)
 
 // Akiko CPU-bus trace ring (debug). hps_ext drains via akiko_cs_trace sub-
 // channel; bytes flow fastchip -> hps_ext as akiko_trace_din.
 wire        akiko_cs_trace;
 wire        akiko_trace_rd;
 wire  [7:0] akiko_trace_din;
+
+// NVRAM load-from-disk wires. To be driven by hps_io.ioctl_download in
+// the implementation commit (canonical MiSTer save-load pattern). Stubbed
+// to constants for the cleanup commit so the tree compiles end-to-end.
+wire [9:0]  nvr_load_addr = 10'd0;
+wire [7:0]  nvr_load_din  =  8'h00;
+wire        nvr_load_we   =  1'b0;
 
 // Akiko chip-RAM master wires (M5). akiko's DMA engines emit single-byte
 // requests; chipdma_arb (instantiated below sdram_ctrl) muxes them onto
@@ -733,6 +740,11 @@ fastchip fastchip
 	.akiko_uio_sec_req   (akiko_sec_req   ),
 	.akiko_uio_rx_busy   (akiko_rx_busy   ),
 	.akiko_uio_nvr_dirty (akiko_nvr_dirty ),
+
+	// NVRAM load-from-disk (canonical hps_io.ioctl_download path).
+	.nvr_load_addr (nvr_load_addr),
+	.nvr_load_din  (nvr_load_din ),
+	.nvr_load_we   (nvr_load_we  ),
 
 	// Trace sub-channel (debug ring buffer of CPU bus accesses to akiko window).
 	.akiko_uio_cs_trace   (akiko_cs_trace  ),

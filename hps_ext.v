@@ -66,26 +66,45 @@ module hps_ext
 	//   no extra bits  -> cmd/result stream (M3)             0xF400
 	//   io_din[8]=1    -> sector data stream (M4)            0xF500
 	//   io_din[7]=1    -> bus trace ring (debug, drain-only) 0xF480
-	//   io_din[6]=1    -> NVRAM save-dump (Phase 32)         0xF440
-	//   io_din[5]=1    -> reserved for CDDA streaming (Phase 33) 0xF420
+	//   io_din[6]=1    -> NVRAM save-dump (read-only)        0xF440
 	// Trace is exclusive (overrides cs entirely). Sec and Nvr both ride
 	// alongside akiko_cs so the bridge can mux on the sub-channel cs flag.
+	//
+	// NVRAM LOAD (disk → BRAM) does NOT come through this UIO path. It uses
+	// the canonical hps_io.ioctl_download mechanism wired directly from
+	// Minimig.sv into akiko_nvram's load port (NVR_LOAD_INDEX). This bridge
+	// only handles the save-dump (BRAM → disk) read direction.
 	input      [15:0] akiko_din,
 	output reg [15:0] akiko_dout,
 	output reg        akiko_wr,
 	output reg        akiko_rd,
 	output reg        akiko_cs,
 	output reg        akiko_cs_sec,
-	output reg        akiko_cs_nvr,    // Phase 32: NVRAM save-dump sub-channel
+	output reg        akiko_cs_nvr,    // NVRAM save-dump sub-channel
 	input             akiko_req,
 	input             akiko_sec_req,
 	input             akiko_rx_busy,
-	input             akiko_nvr_dirty, // Phase 32: status word bit 7
+	input             akiko_nvr_dirty, // status word bit 7
 
 	input       [7:0] akiko_trace_din,
 	output reg        akiko_trace_rd,
 	output reg        akiko_cs_trace
 );
+
+localparam UIO_MOUSE     = 'h04;
+localparam UIO_KEYBOARD  = 'h05;
+localparam UIO_KBD_OSD   = 'h06;
+localparam UIO_GET_VMODE = 'h2C;
+localparam UIO_SET_VPOS  = 'h2D;
+
+localparam EXT_CMD_MIN  = UIO_GET_VMODE;
+localparam EXT_CMD_MAX  = UIO_SET_VPOS;
+localparam EXT_CMD_MIN2 = 'h61;
+localparam EXT_CMD_MAX2 = 'h63;
+
+reg [15:0] io_dout;
+reg        dout_en;
+reg  [4:0] byte_cnt;
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
 assign io_din = EXT_BUS[31:16];
@@ -94,22 +113,7 @@ assign io_strobe = EXT_BUS[33];
 assign io_uio = EXT_BUS[34];
 assign io_fpga = EXT_BUS[35];
 
-localparam EXT_CMD_MIN  = UIO_GET_VMODE;
-localparam EXT_CMD_MAX  = UIO_SET_VPOS;
-localparam EXT_CMD_MIN2 = 'h61;
-localparam EXT_CMD_MAX2 = 'h63;
-
-localparam UIO_MOUSE     = 'h04;
-localparam UIO_KEYBOARD  = 'h05;
-localparam UIO_KBD_OSD   = 'h06;
-localparam UIO_GET_VMODE = 'h2C;
-localparam UIO_SET_VPOS  = 'h2D;
-
-reg [15:0] io_dout;
-reg        dout_en;
-reg  [4:0] byte_cnt;
-
-always@(posedge clk_sys) begin
+always@(posedge clk_sys) begin : main_proc
 	reg [15:0] cmd;
 	reg ide_cs = 0;
 	reg cdda_cs = 0;
@@ -148,10 +152,10 @@ always@(posedge clk_sys) begin
 			cdda_cs      <= (io_din[15:9] == 7'b1111001);
 			// Trace sub-channel (io_din[7]=1) is exclusive: keep cs/cs_sec LOW so
 			// the M3/M4 bridge isn't fed during a debug drain.
-			akiko_cs       <= (io_din[15:9] == 7'b1111010) && !io_din[7];
-			akiko_cs_sec   <= (io_din[15:9] == 7'b1111010) && !io_din[7] && io_din[8];
-			akiko_cs_nvr   <= (io_din[15:9] == 7'b1111010) && !io_din[7] && io_din[6];
-			akiko_cs_trace <= (io_din[15:9] == 7'b1111010) &&  io_din[7];
+			akiko_cs        <= (io_din[15:9] == 7'b1111010) && !io_din[7];
+			akiko_cs_sec    <= (io_din[15:9] == 7'b1111010) && !io_din[7] && io_din[8];
+			akiko_cs_nvr    <= (io_din[15:9] == 7'b1111010) && !io_din[7] && io_din[6];
+			akiko_cs_trace  <= (io_din[15:9] == 7'b1111010) &&  io_din[7];
 		end
 
 		if(byte_cnt == 0) begin
@@ -162,13 +166,12 @@ always@(posedge clk_sys) begin
 				// bit [10] = akiko_sec_req (M4: PBX wants a sector pushed)
 				// bit  [9] = akiko_rx_busy (Phase 18: RX engine has pending response)
 				// bit  [8] = cdda_req (legacy stock-Minimig CDDA — dormant in NATIVE_CD32)
-				// bit  [7] = akiko_nvr_dirty (Phase 32: NVRAM written since last clear)
-				// bit  [6] = reserved (CDDA aud_ready, Phase 33)
+				// bit  [7] = akiko_nvr_dirty (NVRAM written since last clear)
 				io_dout <= {4'hE, akiko_req, akiko_sec_req, akiko_rx_busy, cdda_req, akiko_nvr_dirty, 1'b0, ide_req};
 			end
 		end else begin
 			case(cmd)
-			
+
 				UIO_MOUSE:
 					case(byte_cnt)
 						1: begin
@@ -180,7 +183,7 @@ always@(posedge clk_sys) begin
 								// second byte contains movement data
 								kbd_mouse_data <= io_din[7:0];
 								kbd_mouse_type <= 1;
-								kbd_mouse_level <= ~kbd_mouse_level; 
+								kbd_mouse_level <= ~kbd_mouse_level;
 							end
 						3: begin
 								// third byte contains the buttons
@@ -189,7 +192,7 @@ always@(posedge clk_sys) begin
 						4: begin
 								// wheel
 								kbd_mouse_data <= io_din[7:0];
-								kbd_mouse_level <= ~kbd_mouse_level; 
+								kbd_mouse_level <= ~kbd_mouse_level;
 							end
 					endcase
 
@@ -225,7 +228,7 @@ always@(posedge clk_sys) begin
 						3: svbl_t <= io_din[11:0];
 						4: svbl_b <= io_din[11:0];
 					endcase
-					
+
 				'h61: begin
 					if(byte_cnt >= 3) begin
 						cdda_wr  <= cdda_cs;

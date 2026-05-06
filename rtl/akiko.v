@@ -103,19 +103,24 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	// on this — matches WinUAE's cdrom_can_return_data() semantics.
 	output            hps_rx_busy,
 
-	// Phase 32: NVRAM save-dump port. Bridge drives hps_nvr_addr / pulses
-	// hps_nvr_clear_dirty; nvram returns hps_nvr_dout one clk later.
-	// hps_nvr_dirty flags any successful BIOS write to the EEPROM since the
-	// last clear-dirty pulse.
-	// Phase 32.5: hps_nvr_din / hps_nvr_we for the load-from-disk push.
-	// host_we writes BRAM but does NOT set dirty (loading saved state must
-	// not trigger an immediate re-save).
+	// NVRAM save-dump port. Bridge drives hps_nvr_addr (auto-incrementing
+	// read counter) and pulses hps_nvr_clear_dirty on read-burst end;
+	// nvram returns hps_nvr_dout one clk later. hps_nvr_dirty flags any
+	// successful BIOS write to the EEPROM since the last clear-dirty pulse.
 	input       [9:0] hps_nvr_addr,
-	input       [7:0] hps_nvr_din,
-	input             hps_nvr_we,
 	output      [7:0] hps_nvr_dout,
 	input             hps_nvr_clear_dirty,
-	output            hps_nvr_dirty
+	output            hps_nvr_dirty,
+
+	// NVRAM load-from-disk port. Driven by hps_io.ioctl_download via a
+	// gated signal at Minimig.sv level (NVR_LOAD_INDEX). Lives in HPS
+	// reset domain — fires before BIOS sees the I²C bus, so there's no
+	// contention between the load and BIOS-initiated I²C transactions.
+	// nvr_load_we does NOT set the dirty flag (loading saved state must
+	// not trigger an immediate re-save).
+	input       [9:0] nvr_load_addr,
+	input       [7:0] nvr_load_din,
+	input             nvr_load_we
 );
 
 // -----------------------------------------------------------------------
@@ -207,10 +212,17 @@ if (NATIVE_CD32) begin : g_cd
 	// Phase 13: real I2C slave EEPROM (1 KiB, 24LC08-equivalent) replaces
 	// the M1 stub. See akiko_nvram.v for protocol; bus model below for
 	// open-drain wiring.
+	//
+	// BIOS bit-bangs the bus through the $B80030 / $B80032 registers
+	// (nvram_io / nvram_dir). The slave only ever pulls SDA low for
+	// ACK / read-data; SCL is master-only. NVRAM LOAD from disk does NOT
+	// touch this bus — it goes through akiko_nvram's load_we port directly
+	// (driven by hps_io.ioctl_download from Minimig.sv).
 	wire       nvram_scl_master_drive = nvram_dir[7];
 	wire       nvram_sda_master_drive = nvram_dir[6];
 	wire       nvram_scl_bus = nvram_scl_master_drive ? nvram_io[7] : 1'b1;
-	wire       nvram_sda_master_value = nvram_sda_master_drive ? nvram_io[6] : 1'b1;
+	wire       nvram_sda_master_value =
+	               nvram_sda_master_drive ? nvram_io[6] : 1'b1;
 	wire       nvram_slave_sda_drive;
 	wire       nvram_sda_bus = nvram_sda_master_value & ~nvram_slave_sda_drive;
 
@@ -787,19 +799,25 @@ if (NATIVE_CD32) begin : g_cd
 	// persistence is a separate feature.
 	akiko_nvram nvram_inst (
 		.clk              (clk),
-		.reset            (reset),
+		// Slave I²C state machine uses initial-value powerup + bus-protocol
+		// STOP/START recovery; no async reset on the slave (decoupled from
+		// the chip-wide `reset` = ~cpu_rst | ~cpu_nrst_out so HPS-side
+		// load via load_we works regardless of CD32 CPU reset state).
+		.reset            (1'b0),
 		.scl_in           (nvram_scl_bus),
 		.sda_in           (nvram_sda_bus),
 		.sda_drive        (nvram_slave_sda_drive),
 
-		// Phase 32 / 32.5: HPS save-dump + load-back port wired through
-		// to the bridge.
+		// Save-dump read port (driven by akiko_hps_bridge's read counter).
 		.host_addr        (hps_nvr_addr),
-		.host_din         (hps_nvr_din),
-		.host_we          (hps_nvr_we),
 		.host_dout        (cd_hps_nvr_dout),
 		.host_clear_dirty (hps_nvr_clear_dirty),
-		.nvram_dirty      (cd_hps_nvr_dirty)
+		.nvram_dirty      (cd_hps_nvr_dirty),
+
+		// Load-from-disk write port (driven by hps_io.ioctl_download).
+		.load_addr        (nvr_load_addr),
+		.load_din         (nvr_load_din),
+		.load_we          (nvr_load_we)
 	);
 
 end else begin : g_stub
