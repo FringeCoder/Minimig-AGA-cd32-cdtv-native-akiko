@@ -54,6 +54,12 @@ logic       hps_sec_push = 0;
 logic [7:0] hps_sec_byte = 0;
 logic       hps_sec_done = 0;
 
+// M5+ fast sector path drivers (mimic hps_io.sv b_wr<<1 cascade)
+logic        hps_sec_dma_active = 0;
+logic  [7:0] hps_sec_dma_byte_d = 0;
+logic [13:0] hps_sec_dma_addr_d = 0;
+logic        hps_sec_dma_we_d   = 0;
+
 akiko #(.NATIVE_CD32(1)) u_dut (
 	.clk(clk), .reset(reset),
 	.cs(cs), .rd(rd), .wr(wr),
@@ -79,8 +85,10 @@ akiko #(.NATIVE_CD32(1)) u_dut (
 	.hps_nvr_addr(10'd0),
 	.hps_nvr_dout(), .hps_nvr_clear_dirty(1'b0), .hps_nvr_dirty(),
 	.nvr_load_addr(10'd0), .nvr_load_din(8'h00), .nvr_load_we(1'b0),
-	.hps_sec_dma_active(1'b0), .hps_sec_dma_byte(8'h00),
-	.hps_sec_dma_addr(14'd0), .hps_sec_dma_we(1'b0)
+	.hps_sec_dma_active(hps_sec_dma_active),
+	.hps_sec_dma_byte(hps_sec_dma_byte_d),
+	.hps_sec_dma_addr(hps_sec_dma_addr_d),
+	.hps_sec_dma_we(hps_sec_dma_we_d)
 );
 
 // -----------------------------------------------------------------------
@@ -208,6 +216,27 @@ task automatic push_sector(input [7:0] seed);
 	hps_sec_done <= 1'b1;
 	@(posedge clk);
 	hps_sec_done <= 1'b0;
+	@(posedge clk);
+endtask
+
+// M5+ fast path push: drives hps_sec_dma_* the same way hps_io.sv would
+// for a UIO_SECTOR_RD burst. Asserts active for the whole transfer,
+// pulses we per byte with addr advancing 0..2351. After the last byte
+// drops active so akiko.v sees the transfer complete.
+task automatic push_sector_dma(input [7:0] seed);
+	@(posedge clk);
+	hps_sec_dma_active <= 1'b1;
+	@(posedge clk);
+	for (int i = 0; i < 2352; i++) begin
+		hps_sec_dma_addr_d <= i[13:0];
+		hps_sec_dma_byte_d <= seed + i[7:0];
+		hps_sec_dma_we_d   <= 1'b1;
+		@(posedge clk);
+		hps_sec_dma_we_d   <= 1'b0;
+	end
+	hps_sec_dma_active <= 1'b0;
+	hps_sec_dma_addr_d <= 14'd0;
+	hps_sec_dma_byte_d <= 8'h00;
 	@(posedge clk);
 endtask
 
@@ -516,6 +545,25 @@ initial begin
 	check8("G.cmdlen_zero", 8'd0, {2'h0, u_dut.g_cd.cdrom_command_length});
 	check8("G.txinx_zero",  8'd0, u_dut.g_cd.cdcomtxinx);
 	check_slot("G.slot0", 'h10000, 8'hB0, 8'd0);
+
+	// ---------------------------------------------------------------------
+	// Test H: M5+ fast sector path (UIO_SECTOR_RD pipeline).
+	// Pushes a sector via push_sector_dma instead of push_sector and
+	// verifies the same engine end-state — sector_buffer correctly
+	// populated, sector_counter advanced, slot 0 of chip RAM updated.
+	// ---------------------------------------------------------------------
+	$display("--- Test H: fast sector DMA (push_sector_dma) ---");
+	// Reset PBX state for a clean run with seed 0xC0.
+	set_config(32'h0);                     // clear ENABLE
+	repeat(10) @(posedge clk);
+	set_config(CFG_ENABLE | CFG_PBX);      // re-enable; counter resets to 0
+	set_addressdata(24'h020000);
+	set_misc_base(24'h004000);
+	push_sector_dma(8'hC0);
+	write_pbx(16'h0001);
+	wait_sector_inc(8'd0, 20000, cyc);
+	$display("    H: sector_inc in %0d cycles", cyc);
+	check_slot("H.slot0", 'h20000, 8'hC0, 8'd0);
 
 	// =====================================================================
 	$display("------------------------------------");
