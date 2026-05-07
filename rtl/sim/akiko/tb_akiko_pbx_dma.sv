@@ -77,7 +77,10 @@ akiko #(.NATIVE_CD32(1)) u_dut (
 	.hps_rx_busy(),
 	// Phase 32 / 32.5: NVRAM port — bench doesn't exercise it.
 	.hps_nvr_addr(10'd0),
-	.hps_nvr_dout(), .hps_nvr_clear_dirty(1'b0), .hps_nvr_dirty()
+	.hps_nvr_dout(), .hps_nvr_clear_dirty(1'b0), .hps_nvr_dirty(),
+	.nvr_load_addr(10'd0), .nvr_load_din(8'h00), .nvr_load_we(1'b0),
+	.hps_sec_dma_active(1'b0), .hps_sec_dma_byte(8'h00),
+	.hps_sec_dma_addr(14'd0), .hps_sec_dma_we(1'b0)
 );
 
 // -----------------------------------------------------------------------

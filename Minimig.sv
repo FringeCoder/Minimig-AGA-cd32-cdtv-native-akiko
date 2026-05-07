@@ -220,10 +220,18 @@ wire [21:0] gamma_bus;
 
 wire  [7:0] uart_mode;
 
-// VDNUM=1: one virtual disk slot — slot 0 is the NVRAM .nvr file.
-// BLKSZ=3: 1024 bytes per LBA; with sd_blk_cnt_nvr[0]=0 (= 1 block) the
-// whole 1 KiB NVR transfers in a single LBA read.
-hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0), .VDNUM(1), .BLKSZ(3)) hps_io
+// VDNUM=2: slot 0 = NVRAM .nvr file (load via canonical SD-block path).
+//          slot 1 = akiko sector DMA target. Userspace sends UIO_SECTOR_RD |
+//                   (1<<8) followed by 2352 raw bytes; hps_io drives sd_ack[1]
+//                   high for the transfer and pulses sd_buff_wr per byte with
+//                   sd_buff_addr auto-incrementing 0..2351. akiko.v captures
+//                   into sector_buffer at full SPI rate (replaces the slow
+//                   per-byte SSPI_ACK path on UIO_DMA_WRITE).
+// BLKSZ=3: 1024 bytes per LBA. NVR fits in 1 block; akiko sector path
+//          ignores LBA (userspace addresses bytes via sd_buff_addr directly,
+//          but the protocol still requires BLKSZ — 1024 is fine because the
+//          sector path doesn't gate on LBA boundaries).
+hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0), .VDNUM(2), .BLKSZ(3)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS({HPS_BUS[48:42],ce_pix,HPS_BUS[40:0]}),
@@ -246,14 +254,14 @@ hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0), .VDNUM(1), .BLKSZ(3)) hps_io
 	.img_readonly(img_readonly),
 	.img_size(img_size),
 
-	.sd_lba(sd_lba_nvr),
-	.sd_blk_cnt(sd_blk_cnt_nvr),
-	.sd_rd(sd_rd_nvr),
-	.sd_wr(sd_wr_nvr),
+	.sd_lba(sd_lba),
+	.sd_blk_cnt(sd_blk_cnt),
+	.sd_rd(sd_rd),
+	.sd_wr(sd_wr),
 	.sd_ack(sd_ack),
 	.sd_buff_addr(sd_buff_addr),
 	.sd_buff_dout(sd_buff_dout),
-	.sd_buff_din(sd_buff_din_nvr),
+	.sd_buff_din(sd_buff_din),
 	.sd_buff_wr(sd_buff_wr),
 
 	.buttons(buttons),
@@ -313,21 +321,30 @@ wire  [7:0] akiko_trace_din;
 wire        img_mounted;
 wire        img_readonly;
 wire [63:0] img_size;
-wire [31:0] sd_lba_nvr   [0:0];
-wire  [5:0] sd_blk_cnt_nvr[0:0];
-wire        sd_ack;
+wire [31:0] sd_lba   [1:0];
+wire  [5:0] sd_blk_cnt[1:0];
+wire  [1:0] sd_ack;
 wire [13:0] sd_buff_addr;
 wire  [7:0] sd_buff_dout;
-wire  [7:0] sd_buff_din_nvr[0:0];
+wire  [7:0] sd_buff_din[1:0];
 wire        sd_buff_wr;
 
 reg         sd_rd_nvr;
 reg         sd_wr_nvr;        // unused for now (save still goes via UIO dump)
 reg         img_mounted_d;
 
-assign sd_lba_nvr[0]      = 32'd0;
-assign sd_blk_cnt_nvr[0]  = 6'd0;     // single 1024-byte block per load
-assign sd_buff_din_nvr[0] = 8'h00;    // save side not wired through this path
+// Slot 0 = NVR. Slot 1 = akiko sector DMA target — sd_rd/sd_wr stay 0
+// (userspace pushes UIO_SECTOR_RD on demand without going through the
+// menu-driven sd_rd/sd_wr handshake; hps_io still asserts sd_ack[1] on
+// receipt of the opcode, which is all the akiko path needs).
+wire  [1:0] sd_rd = {1'b0, sd_rd_nvr};
+wire  [1:0] sd_wr = {1'b0, sd_wr_nvr};
+assign sd_lba[0]      = 32'd0;
+assign sd_lba[1]      = 32'd0;        // unused: akiko addresses by sd_buff_addr
+assign sd_blk_cnt[0]  = 6'd0;         // single 1024-byte block per NVR load
+assign sd_blk_cnt[1]  = 6'd0;         // unused; tied off
+assign sd_buff_din[0] = 8'h00;        // NVR save not wired through this path
+assign sd_buff_din[1] = 8'h00;        // akiko slot is read-only from the host
 
 always @(posedge clk_sys) begin
 	img_mounted_d <= img_mounted;
@@ -339,17 +356,26 @@ always @(posedge clk_sys) begin
 	if (img_mounted && !img_mounted_d &&
 	    (img_size == 64'd1024) && !img_readonly) begin
 		sd_rd_nvr <= 1'b1;
-	end else if (sd_ack) begin
+	end else if (sd_ack[0]) begin
 		sd_rd_nvr <= 1'b0;
 	end
 	sd_wr_nvr <= 1'b0;
 end
 
-// Gate by sd_ack (HIGH for the whole transfer), NOT sd_rd_nvr (which
+// Gate by sd_ack[0] (HIGH for the whole NVR transfer), NOT sd_rd_nvr (which
 // drops one cycle after the transfer starts and would mask every byte).
 wire [9:0]  nvr_load_addr  = sd_buff_addr[9:0];
 wire [7:0]  nvr_load_din   = sd_buff_dout;
-wire        nvr_load_we    = sd_buff_wr & sd_ack;
+wire        nvr_load_we    = sd_buff_wr & sd_ack[0];
+
+// Akiko sector DMA path (slot 1). sd_ack[1] gates capture in akiko.v;
+// sd_buff_dout/_addr/_wr are shared with the NVR slot but the gate keeps
+// transfers exclusive (only one slot's sd_ack is HIGH at a time per the
+// hps_io.sv `'h0X17: sd_ack <= disk[VD:0]` assignment).
+wire        akiko_sec_dma_active = sd_ack[1];
+wire  [7:0] akiko_sec_dma_byte   = sd_buff_dout;
+wire [13:0] akiko_sec_dma_addr   = sd_buff_addr;
+wire        akiko_sec_dma_we     = sd_buff_wr;
 
 // Akiko chip-RAM master wires (M5). akiko's DMA engines emit single-byte
 // requests; chipdma_arb (instantiated below sdram_ctrl) muxes them onto
@@ -810,6 +836,12 @@ fastchip fastchip
 	.nvr_load_addr (nvr_load_addr),
 	.nvr_load_din  (nvr_load_din ),
 	.nvr_load_we   (nvr_load_we  ),
+
+	// M5+ fast sector DMA (canonical UIO_SECTOR_RD pipeline, slot 1).
+	.hps_sec_dma_active (akiko_sec_dma_active),
+	.hps_sec_dma_byte   (akiko_sec_dma_byte  ),
+	.hps_sec_dma_addr   (akiko_sec_dma_addr  ),
+	.hps_sec_dma_we     (akiko_sec_dma_we    ),
 
 	// Trace sub-channel (debug ring buffer of CPU bus accesses to akiko window).
 	.akiko_uio_cs_trace   (akiko_cs_trace  ),

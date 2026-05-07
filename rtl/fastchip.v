@@ -97,6 +97,14 @@ module fastchip
 	input   [7:0] nvr_load_din,
 	input         nvr_load_we,
 
+	// M5+ fast sector DMA path: bytes from hps_io's UIO_SECTOR_RD
+	// pipeline (sd_buff_*, gated by sd_ack[AKIKO_SEC_SLOT] in Minimig.sv).
+	// Pure pass-through to akiko module — fastchip just routes signals.
+	input         hps_sec_dma_active,
+	input   [7:0] hps_sec_dma_byte,
+	input  [13:0] hps_sec_dma_addr,
+	input         hps_sec_dma_we,
+
 	// Akiko CPU-bus trace ring (debug). Independent of M3/M4 bridge: hps_ext
 	// pulses akiko_uio_trace_rd to drain one byte at a time; trace_dout returns
 	// the next byte. 4 bytes per entry; byte 3 == 0 means ring empty.
@@ -179,7 +187,11 @@ akiko #(.NATIVE_CD32(NATIVE_CD32)) akiko
 	.hps_nvr_dirty(akiko_hps_nvr_dirty),
 	.nvr_load_addr(nvr_load_addr),
 	.nvr_load_din(nvr_load_din),
-	.nvr_load_we(nvr_load_we)
+	.nvr_load_we(nvr_load_we),
+	.hps_sec_dma_active(hps_sec_dma_active),
+	.hps_sec_dma_byte(hps_sec_dma_byte),
+	.hps_sec_dma_addr(hps_sec_dma_addr),
+	.hps_sec_dma_we(hps_sec_dma_we)
 );
 
 // CPU-bus trace ring: snapshots every CPU access in the akiko window

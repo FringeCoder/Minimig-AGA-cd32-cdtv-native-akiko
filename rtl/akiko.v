@@ -120,7 +120,22 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	// not trigger an immediate re-save).
 	input       [9:0] nvr_load_addr,
 	input       [7:0] nvr_load_din,
-	input             nvr_load_we
+	input             nvr_load_we,
+
+	// M5+ fast sector path via hps_io's UIO_SECTOR_RD pipeline.
+	// Coexists with hps_sec_push/byte/done (the slow per-byte SSPI_ACK
+	// path); userspace picks one per push. When userspace sends
+	// `spi_w(UIO_SECTOR_RD | (AKIKO_SEC_SLOT<<8))` followed by a 2352-byte
+	// fast block write, hps_io drives sd_ack[AKIKO_SEC_SLOT] high for the
+	// whole transfer and pulses sd_buff_wr per byte with sd_buff_addr
+	// auto-incrementing 0..2351. The pipeline absorbs back-to-back bytes
+	// at SPI clock without dropping (which the per-cs/sec_push path can't,
+	// see research/docs/known-issues-deferred.md "Per-sector SPI throughput
+	// vs WinUAE"). All four signals tied 0 leaves only the legacy path active.
+	input             hps_sec_dma_active,  // = sd_ack[AKIKO_SEC_SLOT]
+	input       [7:0] hps_sec_dma_byte,    // = sd_buff_dout
+	input      [13:0] hps_sec_dma_addr,    // = sd_buff_addr
+	input             hps_sec_dma_we       // = sd_buff_wr
 );
 
 // -----------------------------------------------------------------------
@@ -688,6 +703,20 @@ if (NATIVE_CD32) begin : g_cd
 			if (hps_sec_done) begin
 				if (sec_wr_ptr == 12'd2352) sector_ready <= 1'b1;
 				sec_wr_ptr <= 12'h0;
+			end
+
+			// M5+ fast sector path via UIO_SECTOR_RD pipeline. Bytes stream
+			// in directly addressed by sd_buff_addr (which hps_io resets to
+			// 0 at byte_cnt==0 and auto-increments via the b_wr<<1 cascade).
+			// Last byte (addr=2351) latches sector_ready; PBX state machine
+			// clears it on consume. Independent of the legacy path above —
+			// only one is active per transfer because they use different
+			// hps_io commands (0x17 vs 0x61), and the legacy path's gating
+			// signals (hps_sec_push) stay 0 during a SECTOR_RD transfer.
+			if (hps_sec_dma_active && hps_sec_dma_we && !sector_ready
+			    && hps_sec_dma_addr < 14'd2352) begin
+				sector_buffer[hps_sec_dma_addr[11:0]] <= hps_sec_dma_byte;
+				if (hps_sec_dma_addr == 14'd2351) sector_ready <= 1'b1;
 			end
 
 			// -----------------------------------------------------------------
