@@ -285,6 +285,18 @@ if (NATIVE_CD32) begin : g_cd
 	reg  [7:0] sector_buffer [2352];
 	reg [11:0] sec_wr_ptr;
 	reg        sector_ready;
+
+	// Muxed single write port into sector_buffer. Slow path (hps_sec_push)
+	// at sec_wr_ptr; fast path (UIO_SECTOR_RD) at sd_buff_addr. The two
+	// are protocol-exclusive (see write block below) so a simple priority
+	// mux is correct.
+	wire        sec_w_we   = hps_sec_dma_active
+	                          ? (hps_sec_dma_we && hps_sec_dma_addr < 14'd2352)
+	                          : (hps_sec_push  && sec_wr_ptr != 12'd2352);
+	wire [11:0] sec_w_addr = hps_sec_dma_active
+	                          ? hps_sec_dma_addr[11:0] : sec_wr_ptr;
+	wire  [7:0] sec_w_din  = hps_sec_dma_active
+	                          ? hps_sec_dma_byte : hps_sec_byte;
 	reg  [7:0] cdrom_sector_counter;
 	reg        pbx_busy;
 	reg  [1:0] pbx_state;
@@ -691,32 +703,31 @@ if (NATIVE_CD32) begin : g_cd
 			endcase
 
 			// -----------------------------------------------------------------
-			// HPS bridge: sector-data in (Main pushes 2352 raw bytes per
-			// sector). Bridge guarantees push and done don't overlap (done
-			// fires one cycle after deselect), so the simple pointer-vs-2352
-			// check below is race-free.
+			// HPS bridge: sector-data in. The two source paths (slow per-
+			// byte SSPI ACK pump and fast UIO_SECTOR_RD pipeline) share ONE
+			// write port into sector_buffer, expressed as a single
+			// `sector_buffer[addr] <= din` statement with addr/din muxed
+			// off hps_sec_dma_active. Two physical writers force Quartus to
+			// implement the 2352-byte array in ALMs (~5K ALMs of registers)
+			// instead of M10K. Paths are mutually exclusive at the protocol
+			// level: hps_sec_dma_active = sd_ack[1] is HIGH only while a
+			// SECTOR_RD is in flight, during which the slow-path's
+			// hps_sec_push stays LOW (different hps_io opcode 0x17 vs 0x61).
 			// -----------------------------------------------------------------
-			if (hps_sec_push && !sector_ready && sec_wr_ptr != 12'd2352) begin
-				sector_buffer[sec_wr_ptr] <= hps_sec_byte;
-				sec_wr_ptr <= sec_wr_ptr + 12'd1;
+			if (sec_w_we && !sector_ready) begin
+				sector_buffer[sec_w_addr] <= sec_w_din;
 			end
-			if (hps_sec_done) begin
-				if (sec_wr_ptr == 12'd2352) sector_ready <= 1'b1;
-				sec_wr_ptr <= 12'h0;
-			end
-
-			// M5+ fast sector path via UIO_SECTOR_RD pipeline. Bytes stream
-			// in directly addressed by sd_buff_addr (which hps_io resets to
-			// 0 at byte_cnt==0 and auto-increments via the b_wr<<1 cascade).
-			// Last byte (addr=2351) latches sector_ready; PBX state machine
-			// clears it on consume. Independent of the legacy path above —
-			// only one is active per transfer because they use different
-			// hps_io commands (0x17 vs 0x61), and the legacy path's gating
-			// signals (hps_sec_push) stay 0 during a SECTOR_RD transfer.
-			if (hps_sec_dma_active && hps_sec_dma_we && !sector_ready
-			    && hps_sec_dma_addr < 14'd2352) begin
-				sector_buffer[hps_sec_dma_addr[11:0]] <= hps_sec_dma_byte;
-				if (hps_sec_dma_addr == 14'd2351) sector_ready <= 1'b1;
+			if (hps_sec_dma_active) begin
+				if (hps_sec_dma_we && hps_sec_dma_addr == 14'd2351
+				    && !sector_ready) sector_ready <= 1'b1;
+			end else begin
+				if (hps_sec_push && !sector_ready && sec_wr_ptr != 12'd2352) begin
+					sec_wr_ptr <= sec_wr_ptr + 12'd1;
+				end
+				if (hps_sec_done) begin
+					if (sec_wr_ptr == 12'd2352) sector_ready <= 1'b1;
+					sec_wr_ptr <= 12'h0;
+				end
 			end
 
 			// -----------------------------------------------------------------
