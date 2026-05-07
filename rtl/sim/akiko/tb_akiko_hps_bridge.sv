@@ -105,7 +105,7 @@ akiko #(.NATIVE_CD32(1)) u_dut (
 	// Phase 18: rx_busy status output for the M3 HPS bridge.
 	.hps_rx_busy(),
 	// Phase 32 / 32.5: NVRAM port — bench doesn't exercise it.
-	.hps_nvr_addr(10'd0), .hps_nvr_din(8'h00), .hps_nvr_we(),
+	.hps_nvr_addr(10'd0),
 	.hps_nvr_dout(), .hps_nvr_clear_dirty(1'b0), .hps_nvr_dirty()
 );
 
@@ -121,9 +121,10 @@ akiko_hps_bridge u_bridge (
 	// M4 sec channel: tied off — bench drives uio_cs_sec=0 always.
 	.sec_req(1'b0), .sec_status(8'h00),
 	.sec_push(), .sec_byte(), .sec_done(),
-	// Phase 32 / 32.5: NVRAM channel — bench Test 9 drives uio_cs_nvr.
+	// Phase 32 / 32.5: NVRAM channel — bridge port is read-only for the
+	// host-readable save-dump path; nvr_din/nvr_we were removed when the
+	// inject path moved to a separate FSM (see akiko_nvram_inject.v).
 	.nvr_addr(nvr_addr_w), .nvr_dout(nvr_dout_drv),
-	.nvr_din(nvr_din_w),   .nvr_we(nvr_we_w),
 	.nvr_clear_dirty(nvr_clear_dirty_w), .nvr_done(nvr_done_w),
 	.nvr_dirty(nvr_dirty_drv), .nvr_dirty_out(),
 	// Phase 18: bench doesn't exercise rx_busy gating; tie input low,
