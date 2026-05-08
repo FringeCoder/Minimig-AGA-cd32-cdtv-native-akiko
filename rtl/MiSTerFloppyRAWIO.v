@@ -269,6 +269,9 @@ assign o_nWriteProtected = _o_nWriteProtected;
 assign o_nPin34 = _o_nPin34;
 assign o_nPin2 = _o_nPin2;
 
+wire [2:0]	liveSelectedDrive;
+assign liveSelectedDrive = _o_PinIBMDrive ?	((~i_nPin14)?3'd1:((~i_nPin12)?3'd2:3'd0)) : ((~i_nPin10)?3'd1:((~i_nPin12)?3'd2:((~i_nPin14)?3'd3:((~i_nPin6)?3'd4:3'd0))));
+
 									
 reg [2:0]   actualActiveDrive = 0;    // The drive that is currently selected on the expander
 reg [2:0]   selectedDriveRead = 0;    // The drive that *will* be selected after the next write to I2C
@@ -278,11 +281,9 @@ reg 			errorRetry = 0;			  // Allow one retry if an error occurs
 	
 			
 always@(posedge i_core_cpu_clk)begin
-	idealActiveDrive <= _o_PinIBMDrive ?	((~i_nPin14)?3'd1:((~i_nPin12)?3'd2:3'd0)) :
-									((~i_nPin10)?3'd1:((~i_nPin12)?3'd2:((~i_nPin14)?3'd3:((~i_nPin6)?3'd4:3'd0))));
+	idealActiveDrive <= liveSelectedDrive;
 	
-	case (_o_PinIBMDrive ?	((~i_nPin14)?3'd1:((~i_nPin12)?3'd2:3'd0)) :
-									((~i_nPin10)?3'd1:((~i_nPin12)?3'd2:((~i_nPin14)?3'd3:((~i_nPin6)?3'd4:3'd0)))))				
+	case (liveSelectedDrive)				
 		3'd0:  { _o_nTrk00, _o_nWriteProtected, _o_nPin34, _o_nPin2} <= 4'b1111;
 		3'd1:  { _o_nTrk00, _o_nWriteProtected, _o_nPin34, _o_nPin2} <= drive0Values;
 		3'd2:  { _o_nTrk00, _o_nWriteProtected, _o_nPin34, _o_nPin2} <= drive1Values;
