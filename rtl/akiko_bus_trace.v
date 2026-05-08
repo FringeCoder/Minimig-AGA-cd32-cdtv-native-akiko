@@ -1,18 +1,27 @@
-// Akiko bus trace — 128-deep ring buffer of CPU WRITE accesses to the Akiko
-// window at $B80000-$B800FF. Drained by Main_MiSTer via a new SPI sub-channel
+// Akiko bus trace — 128-deep ring buffer of CPU accesses to the Akiko window
+// at $B80000-$B800FF. Drained by Main_MiSTer via a new SPI sub-channel
 // (akiko_cs && io_din[7], i.e. UIO class 0xF400 with bit 7 set on byte 1).
 //
-// v27 change: capture writes only. Reads were drowning the ring at MHz rates
-// (BIOS polls INTREQ in a tight loop) and overwriting older write entries
-// before userspace could drain them at 60 Hz. Without read capture the ring
-// stays empty between BIOS bursts and reliably preserves every write since
-// boot, even if the userspace poller starts late.
+// v27: writes-only — reads were drowning the ring at MHz rates.
+// v28 (CR2/HQ2/Microcosm retry-storm diagnosis): re-introduce filtered reads.
+//   - Writes always captured (every cycle).
+//   - Reads captured only when ALL of:
+//       rd_filter_en        (build-time / runtime gate, expected to be 1)
+//       rd_arm              (one-shot pulse-extended window from akiko.v —
+//                            armed for ~22 ms after each cdcomtxcmp write,
+//                            so we capture the BIOS read traffic that
+//                            *follows* a CMD submission and ignore the
+//                            quiet-state INTREQ polling)
+//       rd_addr_interesting (control/status registers only — INTREQ, INTENA,
+//                            TX/RX index pair, PBX, CDFLAG)
+//   The else-if mux into the ring's single write port preserves Quartus
+//   M10K inference (one writer per cycle).
 //
 // One trace entry = 32 bits, drained as 4 bytes LSB-first:
-//   byte 0: addr[6:0] | 1 (bit 7 always set — kept for compat, marks "write")
+//   byte 0: {wr/rd, addr[6:0]}    (bit 7: 1 = write, 0 = read)
 //   byte 1: data[7:0]
 //   byte 2: data[15:8]
-//   byte 3: bit 0 = entry valid (0 = ring empty, ignore the rest)
+//   byte 3: 0xFF = entry valid, 0x00 = ring empty
 //
 // The valid bit lets userspace poll-read until it sees a zero and stop.
 
@@ -28,6 +37,10 @@ module akiko_bus_trace
 	input       [6:0] addr,          // addr[7:1]
 	input      [15:0] din,           // CPU -> Akiko (writes)
 	input      [15:0] dout,          // Akiko -> CPU (reads)
+
+	// v28 read-trace gates. rd_arm is pulsed by akiko.v on cdcomtxcmp writes.
+	input             rd_filter_en,  // 1 = capture filtered reads (else writes only)
+	input             rd_arm,        // 1 = inside post-CMD arm window
 
 	// UIO read port. uio_rd pulses pop one byte (4-byte entries auto-advance).
 	input             uio_cs_trace,  // akiko_cs && io_din[7] (new sub-channel)
@@ -58,6 +71,22 @@ reg sel_d, rd_d, wr_d;
 reg [6:0] addr_d;
 reg [15:0] din_d, dout_d;
 
+// v28 read-capture filter — narrow to control/status registers only so
+// the cycles armed by rd_arm don't bury the writes we still want.
+//   $04-$07 INTREQ        addr[6:1] = 6'b000010..6'b000011 (addr[6:1]==000010)
+//   $08-$0B INTENA        addr[6:1] = 6'b000100..6'b000101 (addr[6:1]==000100)
+//   $10-$1F TX/RX inx/cmp addr[6:3] = 4'b0010
+//   $20-$23 PBX           addr[6:1] = 6'b010000
+//   $24-$27 CDFLAG        addr[6:1] = 6'b010010
+wire rd_addr_interesting =
+       (addr_d[6:2] == 5'b00001)    // $04-$07 INTREQ
+    || (addr_d[6:2] == 5'b00010)    // $08-$0B INTENA
+    || (addr_d[6:3] == 4'b0010 )    // $10-$1F TX/RX inx/cmp
+    || (addr_d[6:1] == 6'b010000)   // $20-$21 PBX (high)
+    || (addr_d[6:1] == 6'b010001)   // $22-$23 PBX (low/unused)
+    || (addr_d[6:1] == 6'b010010)   // $24-$25 CDFLAG (high)
+    || (addr_d[6:1] == 6'b010011);  // $26-$27 CDFLAG (low)
+
 always @(posedge clk) begin
 	sel_d  <= sel;
 	rd_d   <= rd;
@@ -66,15 +95,19 @@ always @(posedge clk) begin
 	din_d  <= din;
 	if (sel) dout_d <= dout;  // sample-and-hold during the actual read
 
-	// Capture one entry per sel_akiko WRITE cycle (writes only — reads were
-	// flooding the ring; see header).
+	// Capture writes always; capture filtered reads only when armed.
+	// Mutual-exclusive `else if` keeps a single BRAM write port -> M10K stays.
 	// Byte order on drain (LSB first):
-	//   byte 0 = {1'b1, addr[6:0]}      (bit 7 always 1 = "write")
+	//   byte 0 = {wrnrd, addr[6:0]}     (bit 7: 1=write, 0=read)
 	//   byte 1 = data[7:0]
 	//   byte 2 = data[15:8]
 	//   byte 3 = 0xFF (valid) / 0x00 (ring empty)
 	if (sel_d && wr_d) begin
 		ring[wr_ptr] <= {8'hFF, din_d, 1'b1, addr_d};
+		wr_ptr       <= wr_ptr + 1'b1;
+	end else if (sel_d && rd_d && rd_filter_en && rd_arm
+	             && rd_addr_interesting) begin
+		ring[wr_ptr] <= {8'hFF, dout_d, 1'b0, addr_d};
 		wr_ptr       <= wr_ptr + 1'b1;
 	end
 
