@@ -124,8 +124,13 @@ reg _mtr123;
 reg _pendingmtr123;
 assign o_nMTR123 = _mtr123;
 reg[31:0] mtr123Counter;
+reg [1:0] step_prev;
+reg [1:0] nDiskChange_r;
+
+
+assign o_nDiskChange = o_PinIBMDrive ? ((~i_nDriveSelect0) ? nDiskChange_r[0] : (~i_nDriveSelect1) ? nDiskChange_r[1] : 1'b1) : o_nPin2;
 	
-assign o_nDiskChange =               o_PinIBMDrive ?      o_nPin34             :    o_nPin2            ;
+//assign o_nDiskChange =               o_PinIBMDrive ?      o_nPin34             :    o_nPin2            ;
 assign i_nPin14 = i_reset ? 1'b1 :  (o_PinIBMDrive ?      i_nDriveSelect0      :    i_nDriveSelect2   );
 assign i_nPin12 = i_reset ? 1'b1 :            i_nDriveSelect1;
 assign i_nPin10 = i_reset ? 1'b1 :  (o_PinIBMDrive ?      nDriveLatchedA       :    i_nDriveSelect0   );
@@ -133,7 +138,6 @@ assign i_nPin16 = i_reset ? 1'b1 :  (o_PinIBMDrive ?      nDriveLatchedB       :
 assign i_nPin6 =                     o_PinIBMDrive ?      1'b1                    :    i_nDriveSelect3   ;
 
 assign nActivityLED = AmigaMode ? nDriveLatchedA : i_nMotorEnable;
-
 		
 always@(posedge i_core_cpu_clk)begin
 	i_delaynDriveSelect0 <= i_nDriveSelect0;
@@ -153,6 +157,8 @@ always@(posedge i_core_cpu_clk)begin
 	end
 	
 	if (i_reset) begin
+		step_prev <= 2'b11;
+		nDiskChange_r <= 2'b11;
 		nDriveLatchedA <= 1;
 		nDriveLatchedB <= 1;
 		nDriveLatched2 <= 1;
@@ -190,6 +196,18 @@ always@(posedge i_core_cpu_clk)begin
 			end else begin
 				nDriveLatchedA <= i_nMotorEnable;
 				nDriveLatchedB <= i_nMotorEnable;
+			end
+			
+			// DiskChange on PC drive triggers on FALLING edge of STEP, on Amiga drives its on RISING edge
+			if (~i_nDriveSelect0) begin
+				step_prev[0] <= i_nStep;
+				if (~o_nPin34) nDiskChange_r[0] <= 0; else
+					if (~step_prev[0] & i_nStep) nDiskChange_r[0] <= 1;				
+			end
+			if (~i_nDriveSelect1) begin
+				step_prev[1] <= i_nStep;
+				if (~o_nPin34) nDiskChange_r[1] <= 0; else
+					if (~step_prev[1] & i_nStep) nDiskChange_r[1] <= 1;				
 			end
 			
 			// Ready is a little more complex as we have to simulate it.  Its HIGH until ready

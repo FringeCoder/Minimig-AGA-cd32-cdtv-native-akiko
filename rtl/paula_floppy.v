@@ -204,52 +204,35 @@ wire [15:0] ext_floppy_syncword;		// The Word Match Sync currently active (eg: 4
 assign sel = !_sel[0] ? 2'd0 : !_sel[1] ? 2'd1 : !_sel[2] ? 2'd2 : !_sel[3] ? 2'd3 : 2'd0;
 
 // floppy_ext_drive
-reg [3:0] _exsel;								// Selection status of external drives only (low is selected)
-reg _floppy_speed;							// For controlling the "Floppy Disk Turbo" so it can be turned off while real disks are accessed
-assign floppy_speed = _floppy_speed;	// Assignment 
+wire [3:0] _exsel;								// Selection status of external drives only (low is selected)
+wire     virtualFloppyMode;			 // Set to 1 means we're emulating a floppy drive at flux level
+wire     sel_external;			    // Set to 1 if a real drive is selected
+wire     flux_inuse;				    // Means the PLL is in use (real drive or flux data)
 
+assign _exsel[0] = (floppy_ext_drive[2:0]  == 3'd1) ? _sel[0] :
+                   (floppy_ext_drive[5:3]  == 3'd1) ? _sel[1] :
+                   (floppy_ext_drive[8:6]  == 3'd1) ? _sel[2] :
+                   (floppy_ext_drive[11:9] == 3'd1) ? _sel[3] : 1'b1;
 
-reg     virtualFloppyMode;			 // Set to 1 means we're emulating a floppy drive at flux level
-reg     sel_external;			    // Set to 1 if a real drive is selected
-reg     flux_inuse;				    // Means the PLL is in use (real drive or flux data)
+assign _exsel[1] = (floppy_ext_drive[2:0]  == 3'd2) ? _sel[0] :
+                   (floppy_ext_drive[5:3]  == 3'd2) ? _sel[1] :
+                   (floppy_ext_drive[8:6]  == 3'd2) ? _sel[2] :
+                   (floppy_ext_drive[11:9] == 3'd2) ? _sel[3] : 1'b1;
 
+assign _exsel[2] = (floppy_ext_drive[2:0]  == 3'd3) ? _sel[0] :
+                   (floppy_ext_drive[5:3]  == 3'd3) ? _sel[1] :
+                   (floppy_ext_drive[8:6]  == 3'd3) ? _sel[2] :
+                   (floppy_ext_drive[11:9] == 3'd3) ? _sel[3] : 1'b1;
 
-always @(*) begin
-	if (reset) begin
-		sel_external = 1'b0;
-		_exsel = 4'b1111;
-		flux_inuse = 1'b0;
-		virtualFloppyMode = 1'b0;
-	end else begin		
-		_exsel[0] = (floppy_ext_drive[2:0]   == 3'd1) ? _sel[0] : (
-		            (floppy_ext_drive[5:3]   == 3'd1) ? _sel[1] : (
-		            (floppy_ext_drive[8:6]   == 3'd1) ? _sel[2] : (
-		            (floppy_ext_drive[11:9]  == 3'd1) ? _sel[3] : 1'b1)));
-		
-		_exsel[1] = (floppy_ext_drive[2:0]   == 3'd2) ? _sel[0] : (
-		            (floppy_ext_drive[5:3]   == 3'd2) ? _sel[1] : (
-		            (floppy_ext_drive[8:6]   == 3'd2) ? _sel[2] : (
-		            (floppy_ext_drive[11:9]  == 3'd2) ? _sel[3] : 1'b1)));
-	
-		_exsel[2] = (floppy_ext_drive[2:0]   == 3'd3) ? _sel[0] : (
-		            (floppy_ext_drive[5:3]   == 3'd3) ? _sel[1] : (
-		            (floppy_ext_drive[8:6]   == 3'd3) ? _sel[2] : (
-		            (floppy_ext_drive[11:9]  == 3'd3) ? _sel[3] : 1'b1)));
+assign _exsel[3] = (floppy_ext_drive[2:0]  == 3'd4) ? _sel[0] :
+                   (floppy_ext_drive[5:3]  == 3'd4) ? _sel[1] :
+                   (floppy_ext_drive[8:6]  == 3'd4) ? _sel[2] :
+                   (floppy_ext_drive[11:9] == 3'd4) ? _sel[3] : 1'b1;
 
-		_exsel[3] = (floppy_ext_drive[2:0]   == 3'd4) ? _sel[0] : (
-		            (floppy_ext_drive[5:3]   == 3'd4) ? _sel[1] : (
-		            (floppy_ext_drive[8:6]   == 3'd4) ? _sel[2] : (
-		            (floppy_ext_drive[11:9]  == 3'd4) ? _sel[3] : 1'b1)));
-	
-		sel_external =  ((~_exsel[0]) | (~_exsel[1]) | (~_exsel[2]) | (~_exsel[3])) & enable_mister_floppy;
-		flux_inuse = sel_external | disk_fluxmode[sel];
-		virtualFloppyMode = disk_fluxmode[sel] & ~sel_external;
-	end	
-	_floppy_speed = (reset|~flux_inuse) ? floppy_speed_allowed : 1'b0;  // turn off high speed if external drives are in use
-end
-
-
-
+assign sel_external    = ((~_exsel[0]) | (~_exsel[1]) | (~_exsel[2]) | (~_exsel[3])) & enable_mister_floppy;
+assign flux_inuse      = sel_external | disk_fluxmode[sel];
+assign virtualFloppyMode = disk_fluxmode[sel] & ~sel_external;
+assign floppy_speed   = (reset | ~flux_inuse) ? floppy_speed_allowed : 1'b0;
 
 wire _virtReadData;
 wire virtualFluxDataRead;
