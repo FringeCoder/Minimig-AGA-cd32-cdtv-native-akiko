@@ -88,7 +88,13 @@ module hps_ext
 
 	input       [7:0] akiko_trace_din,
 	output reg        akiko_trace_rd,
-	output reg        akiko_cs_trace
+	output reg        akiko_cs_trace,
+
+	// Chipset bus trace sub-channel (UIO class 7'b1111011 = 0xF600).
+	// Drain-only, single byte per io_din[15:0]==0x62 read. 0x00 = ring empty.
+	input       [7:0] chipset_trace_din,
+	output reg        chipset_trace_rd,
+	output reg        chipset_cs_trace
 );
 
 localparam UIO_MOUSE     = 'h04;
@@ -124,6 +130,7 @@ always@(posedge clk_sys) begin : main_proc
 	cdda_wr <= 0;
 	{akiko_rd, akiko_wr} <= 0;
 	akiko_trace_rd <= 0;
+	chipset_trace_rd <= 0;
 	if((ide_rd | ide_wr) & ~&ide_addr[3:0]) ide_addr <= ide_addr + 1'd1;
 
 	if(~io_uio) begin
@@ -136,6 +143,7 @@ always@(posedge clk_sys) begin : main_proc
 		akiko_cs_sec <= 0;
 		akiko_cs_nvr <= 0;
 		akiko_cs_trace <= 0;
+		chipset_cs_trace <= 0;
 		if(cmd == 'h2D) sset <= 1;
 	end
 	else if(io_strobe) begin
@@ -156,6 +164,8 @@ always@(posedge clk_sys) begin : main_proc
 			akiko_cs_sec    <= (io_din[15:9] == 7'b1111010) && !io_din[7] && io_din[8];
 			akiko_cs_nvr    <= (io_din[15:9] == 7'b1111010) && !io_din[7] && io_din[6];
 			akiko_cs_trace  <= (io_din[15:9] == 7'b1111010) &&  io_din[7];
+			// Chipset bus trace — dedicated UIO class (drain-only, debug).
+			chipset_cs_trace <= (io_din[15:9] == 7'b1111011);
 		end
 
 		if(byte_cnt == 0) begin
@@ -249,6 +259,10 @@ always@(posedge clk_sys) begin : main_proc
 					if(byte_cnt >= 3 && akiko_cs_trace) begin
 						io_dout        <= {8'h00, akiko_trace_din};
 						akiko_trace_rd <= 1;
+					end
+					if(byte_cnt >= 3 && chipset_cs_trace) begin
+						io_dout          <= {8'h00, chipset_trace_din};
+						chipset_trace_rd <= 1;
 					end
 				end
 			endcase

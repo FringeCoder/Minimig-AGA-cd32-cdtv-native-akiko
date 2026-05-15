@@ -304,6 +304,13 @@ wire        akiko_cs_trace;
 wire        akiko_trace_rd;
 wire  [7:0] akiko_trace_din;
 
+// Chipset bus trace ring (debug, gfx-trio investigation). hps_ext drains
+// via chipset_cs_trace (UIO class 7'b1111011); bytes flow agnus → minimig
+// → here → hps_ext as chipset_trace_din.
+wire        chipset_cs_trace;
+wire        chipset_trace_rd;
+wire  [7:0] chipset_trace_din;
+
 // NVRAM load-from-disk via canonical SD-block path (the pattern SNES,
 // Saturn, GBA, NeoGeo, CDi all use). Userspace calls user_io_file_mount
 // with the .nvr path; hps_io fires img_mounted[0], we kick off a single
@@ -1012,7 +1019,14 @@ minimig minimig
 	.ide_write    (ide_wr           ),
 	.ide_writedata(ide_dout         ),
 	.ide_read     (ide_rd           ),
-	.ide_readdata (ide_c_readdata   )
+	.ide_readdata (ide_c_readdata   ),
+
+	// Chipset bus trace drain. hps_ext drives the cs/rd strobes from class
+	// 7'b1111011; agnus's trace ring drains a byte at a time into trace_din.
+	// With CHIPSET_TRACE=0 in agnus.v, uio_dout stays at 8'h00 (DCE).
+	.chipset_trace_uio_cs   (chipset_cs_trace ),
+	.chipset_trace_uio_rd   (chipset_trace_rd ),
+	.chipset_trace_uio_dout (chipset_trace_din)
 );
 
 // power led control

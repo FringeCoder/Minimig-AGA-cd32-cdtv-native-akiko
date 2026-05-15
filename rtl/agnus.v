@@ -95,8 +95,19 @@ module agnus
 	input         a1k,             // enable A1000 OCS features
 	input         ecs,             // enable ECS features
 	input         aga,             // enables AGA features
-	input         floppy_speed     // allocates refresh slots for disk DMA
+	input         floppy_speed,    // allocates refresh slots for disk DMA
+
+	// Chipset bus trace UIO drain port (active only when CHIPSET_TRACE=1).
+	// With CHIPSET_TRACE=0 the trace instance is generate-elided and uio_dout
+	// is tied to 0, so these wires DCE out of the final bitstream.
+	input             chipset_trace_uio_cs,
+	input             chipset_trace_uio_rd,
+	output      [7:0] chipset_trace_uio_dout
 );
+
+// Compile-time gate. 0 = production (bit-identical RBF, ring DCE'd).
+//                   1 = trace build (instantiate ring + UIO drain).
+localparam CHIPSET_TRACE = 0;
 
 //register names and adresses
 localparam DMACON  = 9'h096;
@@ -483,7 +494,48 @@ assign strhor_denise = hpos==(6*2-1) && (vpos > 8 || ecs) ? 1'b1 : 1'b0;
 assign strhor_paula = hpos==(6*2+1) ? 1'b1 : 1'b0; //hack
 
 //--------------------------------------------------------------------------------------
+// Chipset bus trace — see chipset-trace-plan.md.
+// Filter selects the bitplane display / copper register window. Same comb
+// expression in sim and hardware so the captured stream is identical.
 
+wire trace_is_target_reg =
+    (reg_address[8:1] >= 8'h70 && reg_address[8:1] <= 8'h7F) ||   // BPL*PT
+    (reg_address[8:1] >= 8'h80 && reg_address[8:1] <= 8'h86) ||   // BPLCON*, BPLxMOD
+    (reg_address[8:1] >= 8'h40 && reg_address[8:1] <= 8'h45) ||   // COP*LC, COPJMP*
+    (reg_address[8:1] == 8'h49) || (reg_address[8:1] == 8'h4A) || // DDFSTRT/STOP
+    (reg_address[8:1] >= 8'hA0 && reg_address[8:1] <= 8'hBF) ||   // SPR*POS/CTL/DATA/DATB
+    (reg_address[8:1] == 8'hFE);                                  // FMODE
+
+wire trace_cpu_write = cpu_custom & (hwr | lwr);
+wire trace_cop_write = dma_cop;
+wire trace_blt_write = dma_blt & dbwe;
+
+wire       trace_write_strobe = trace_is_target_reg & (trace_cpu_write | trace_cop_write | trace_blt_write);
+wire [2:0] trace_src          = trace_cop_write ? 3'b001
+                              : trace_blt_write ? 3'b010
+                                                : 3'b000;        // CPU
+
+generate
+if (CHIPSET_TRACE) begin : g_trace
+    chipset_bus_trace u_trace
+    (
+        .clk          (clk),
+        .reset        (reset),
+        .write_strobe (trace_write_strobe),
+        .reg_addr     (reg_address[8:1]),
+        .data         (data_in),
+        .src          (trace_src),
+        .vpos         (vpos),
+        .hpos         (hpos),
+        .dbwe         (dbwe),
+        .uio_cs_trace (chipset_trace_uio_cs),
+        .uio_rd       (chipset_trace_uio_rd),
+        .uio_dout     (chipset_trace_uio_dout)
+    );
+end else begin : g_no_trace
+    assign chipset_trace_uio_dout = 8'h00;
+end
+endgenerate
 
 endmodule
 

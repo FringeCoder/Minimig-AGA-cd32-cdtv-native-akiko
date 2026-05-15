@@ -263,7 +263,14 @@ module minimig
 	input         ide_write,
 	input  [15:0] ide_writedata,
 	input         ide_read,
-	output [15:0] ide_readdata
+	output [15:0] ide_readdata,
+
+	// Chipset bus trace drain (passes through to agnus). With agnus's
+	// CHIPSET_TRACE=0 the trace ring is generate-elided; uio_dout drives 0
+	// and the dead wires DCE out of the bitstream.
+	input         chipset_trace_uio_cs,
+	input         chipset_trace_uio_rd,
+	output  [7:0] chipset_trace_uio_dout
 );
 
 
@@ -469,7 +476,10 @@ agnus AGNUS1
 	.a1k(chipset_config[2]),
 	.ecs(|chipset_config[4:3]),
 	.aga(chipset_config[4]),
-	.floppy_speed(floppy_config[0])
+	.floppy_speed(floppy_config[0]),
+	.chipset_trace_uio_cs(chipset_trace_uio_cs),
+	.chipset_trace_uio_rd(chipset_trace_uio_rd),
+	.chipset_trace_uio_dout(chipset_trace_uio_dout)
 );
 
 //instantiate paula
