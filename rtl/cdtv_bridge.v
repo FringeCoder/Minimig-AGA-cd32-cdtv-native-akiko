@@ -267,8 +267,14 @@ wire sel_cmda_ob    = sel && (byte_off == 16'h00A0);                    // $A1 C
 wire sel_xt_a3_ob   = sel && (byte_off == 16'h00A2);                    // $A3 floor — spec 2.3
 wire sel_xt_a5_ob   = sel && (byte_off == 16'h00A4);                    // $A5
 wire sel_xt_a7_ob   = sel && (byte_off == 16'h00A6);                    // $A7
-wire in_tpi_range   = sel && (byte_off >= 16'h00B0) && (byte_off <= 16'h00BE); // even byte only
+wire in_tpi_range   = sel && (byte_off >= 16'h00B0) && (byte_off <= 16'h00BE);
 wire  [2:0] tpi_reg = byte_off[3:1];
+// 6525 TPI is wired to D[7:0] on real CDTV silicon (lower data lane); the
+// driver issues `.b` byte accesses at ODD addresses $B1/B3/B5/B7/B9/BB/BD/BF
+// via LDS. Word writes at $B0 still land here via hwr. Pick the lane based
+// on which strobe is asserted so both styles work — matches WinUAE
+// dmac_bget2/bput2's lane-agnostic dispatch.
+wire [7:0] tpi_data = hwr ? din[15:8] : din[7:0];
 wire sel_dma_start  = sel && (byte_off == 16'h00E0);                    // DMA START — spec 2.3
 wire sel_dma_stop   = sel && (byte_off == 16'h00E2);                    // DMA STOP
 wire sel_istr_clr   = sel && (byte_off == 16'h00E4);                    // ISTR CLEAR
@@ -503,38 +509,39 @@ always @(posedge clk) begin
 		end
 
 		// TPI register writes — spec section 3.8 RTL skeleton.
-		// TPI lives on EVEN byte offsets ($B0/$B2/.../$BE) — spec section 1.
-		// Word access at $B0 → hwr=$B0 (TPI reg 0), lwr=$B1 (ignored).
-		// Real TPI silicon ignores odd byte access (spec 1 "odd addresses
-		// inside the TPI range are ignored"); use hwr only.
-		// Data byte is din[15:8] (upper half of the word — even byte slot).
-		if (in_tpi_range && hwr) begin
+		// 6525 TPI is wired to D[7:0] (lower lane) on real CDTV; the driver
+		// uses `.b` byte writes at ODD addresses ($B1/B3/B5/B7/B9/BB/BD/BF)
+		// via LDS. Word writes at the even base ($B0) also reach us via
+		// hwr+lwr. Gate on either strobe and pick the data byte through
+		// `tpi_data` so the driver's LDS byte writes land — WinUAE's
+		// dmac_bput2 is lane-agnostic. 2026-05-21 byte-lane fix.
+		if (in_tpi_range && (hwr || lwr)) begin
 			case (tpi_reg)
-				3'd0: tp_a <= din[15:8];
+				3'd0: tp_a <= tpi_data;
 				3'd1: begin
-					tp_b <= din[15:8];
+					tp_b <= tpi_data;
 					// DAC volume serial — spec section 3.3
-					if (din[14] && !tp_b_prev_6)
-						dac_shift <= {din[13], dac_shift[11:1]};
-					if (din[15] && !tp_b_prev_7)
+					if (tpi_data[6] && !tp_b_prev_6)
+						dac_shift <= {tpi_data[5], dac_shift[11:1]};
+					if (tpi_data[7] && !tp_b_prev_7)
 						cd_volume <= dac_shift[9:0];
-					tp_b_prev_6 <= din[14];
-					tp_b_prev_7 <= din[15];
+					tp_b_prev_6 <= tpi_data[6];
+					tp_b_prev_7 <= tpi_data[7];
 				end
 				3'd2: begin
 					// Port C write — spec section 3.4 mode-1 ack semantic:
 					// "tp_ilatch &= 0xe0 | v" (write 0 to ack that source).
 					if (tp_cr[0])
-						tp_ilatch[4:0] <= tp_ilatch[4:0] & din[12:8];
+						tp_ilatch[4:0] <= tp_ilatch[4:0] & tpi_data[4:0];
 				end
-				3'd3: tp_ad <= din[15:8];
-				3'd4: tp_bd <= din[15:8];
+				3'd3: tp_ad <= tpi_data;
+				3'd4: tp_bd <= tpi_data;
 				3'd5: begin
-					if (tp_cr[0]) tp_imask <= din[12:8]; // spec 3.5
-					else          tp_cd    <= din[15:8];
+					if (tp_cr[0]) tp_imask <= tpi_data[4:0]; // spec 3.5
+					else          tp_cd    <= tpi_data;
 				end
-				3'd6: tp_cr  <= din[15:8];
-				3'd7: tp_air <= din[15:8];
+				3'd6: tp_cr  <= tpi_data;
+				3'd7: tp_air <= tpi_data;
 			endcase
 		end
 
@@ -676,7 +683,9 @@ end
 // lower bytes (write-only — read returns 0), CR-511 $A1, XT floor
 // $A3/$A5/$A7 (read 0xFF). AC ROM odd bytes are 0xFF per Z2 spec (the
 // autoconfig protocol leaves alternate bytes as the no-op fill — spec
-// section 2.2 "memset(dmacmemory, 0xff)").
+// section 2.2 "memset(dmacmemory, 0xff)"). TPI registers ($B1/B3/.../BF)
+// are wired to D[7:0] on real CDTV — driver reads them with `.b` at the
+// odd address via LDS, so mirror tpi_rd here too. 2026-05-21 byte-lane fix.
 always @* begin
 	rd_byte_ob = 8'h00;
 	if      (sel_ac_rom_w) rd_byte_ob = 8'hFF;
@@ -685,6 +694,7 @@ always @* begin
 	else if (sel_xtfloor)  rd_byte_ob = 8'hFF;
 	else if (sel_cmda_ob)  rd_byte_ob = cmd_out_empty ? last_out
 	                                                  : cmd_out_fifo[cmd_out_rd_p];
+	else if (in_tpi_range) rd_byte_ob = tpi_rd;
 end
 
 //----------------------------------------------------------------------------

@@ -561,22 +561,19 @@ always @(posedge clk) begin
 		// the DMAC card is alone in the chain — matches the WinUAE log
 		// "Card 01: CDTV DMAC" / end.
 		ac_toccata  <= cdtv_mode ? 1'b0 : 1'b1;
-		// 2026-05-21 M1 WORKAROUND (still in effect): forced low. Three
-		// probes tried, none unblocked the AC=cdtv_mode hang:
-		//   * TPI Port C mode-0 fix (kept — cleaned up splash glitch)
-		//   * NOP-out the 4 MOVECs in ext-ROM (wrong: real CDTV runs
-		//     them and traps via exec vector-4; do not retry)
-		//   * PREST → STCH chain fix (kept — WinUAE-parity improvement,
-		//     no functional change because PREST is never reached)
-		// The bright-white hang shape is unchanged from the original.
-		// cdtv.device InitResident hangs BEFORE writing CNTR=PREST.
-		// WinUAE log shows the post-AC probe phase is silent (no
-		// write_log calls between AC commit and "command register read
-		// while empty" idle); without bus-level trace we can't see
-		// which probe read returns the wrong value. Next required step
-		// is UIO trace drain for cdtv_trace.v.
-		// See research/docs/cdtv-post-ac-init-research-2026-05-21.md.
-		ac_cdtv     <= 1'b0;
+		// 2026-05-21: real AC commit re-enabled after the cdtv_bridge.v
+		// byte-lane fix. Root cause of the post-AC hang was that the
+		// 6525 TPI is wired to D[7:0] on real CDTV silicon — driver
+		// reads/writes TPI at ODD byte addresses ($B3/B5/...) via LDS,
+		// but the bridge was gating TPI writes on hwr only and placing
+		// tpi_rd on the upper read lane (rd_byte_eb). Driver's first
+		// STCH poll (`btst.b #2, $B5(a5)`) at $F05D90 in cdtv.device
+		// always read 0x00, so InitResident hung before any visible
+		// log activity. Found by static disasm of the ext-ROM
+		// InitResident path; see
+		// research/docs/cdtv-initresident-disasm-2026-05-21.md and
+		// research/docs/cdtv-post-ac-init-research-2026-05-21.md.
+		ac_cdtv     <= cdtv_mode;
 		cdtv_base   <= 8'hE9;       // WinUAE default fallback ($E90000)
 		z2ram_ena   <= 0;
 		z3ram_ena0  <= 0;
