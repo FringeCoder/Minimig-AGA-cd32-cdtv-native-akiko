@@ -561,19 +561,21 @@ always @(posedge clk) begin
 		// the DMAC card is alone in the chain — matches the WinUAE log
 		// "Card 01: CDTV DMAC" / end.
 		ac_toccata  <= cdtv_mode ? 1'b0 : 1'b1;
-		// 2026-05-21 M1 WORKAROUND (still in effect): forced low. Two
-		// targeted probes were tried after the bisection result; neither
-		// unblocked the post-AC cdtv.device init:
-		//   * TPI Port C mode-0 fix (cdtv_bridge.v get_tp_c parity with
-		//     WinUAE — kept regardless; it's a correctness improvement).
-		//   * NOP-out all four 68020+ MOVEC opcodes in the ext-ROM
-		//     (0x568/0x572 VBR+CACR setup, 0x8B7C/0x8B84 deeper CACR
-		//     I/O). Single $568 NOP changes the hang screen from bright
-		//     white to dark gray (= we reach a later state) but doesn't
-		//     hit splash; adding the other three does nothing further.
-		// Next required step is UIO trace drain for cdtv_trace.v so we
-		// can see which $E9xx access cdtv.device gets stuck on. Until
-		// then `ac_cdtv <= 1'b0` is the working M1 path.
+		// 2026-05-21 M1 WORKAROUND (still in effect): forced low. Three
+		// probes tried, none unblocked the AC=cdtv_mode hang:
+		//   * TPI Port C mode-0 fix (kept — cleaned up splash glitch)
+		//   * NOP-out the 4 MOVECs in ext-ROM (wrong: real CDTV runs
+		//     them and traps via exec vector-4; do not retry)
+		//   * PREST → STCH chain fix (kept — WinUAE-parity improvement,
+		//     no functional change because PREST is never reached)
+		// The bright-white hang shape is unchanged from the original.
+		// cdtv.device InitResident hangs BEFORE writing CNTR=PREST.
+		// WinUAE log shows the post-AC probe phase is silent (no
+		// write_log calls between AC commit and "command register read
+		// while empty" idle); without bus-level trace we can't see
+		// which probe read returns the wrong value. Next required step
+		// is UIO trace drain for cdtv_trace.v.
+		// See research/docs/cdtv-post-ac-init-research-2026-05-21.md.
 		ac_cdtv     <= 1'b0;
 		cdtv_base   <= 8'hE9;       // WinUAE default fallback ($E90000)
 		z2ram_ena   <= 0;

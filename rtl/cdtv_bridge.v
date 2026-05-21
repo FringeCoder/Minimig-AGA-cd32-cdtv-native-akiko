@@ -298,7 +298,13 @@ assign istr_rd      = istr | (istr_any_set ? (8'h01 << ISTR_INT_P_BIT) : 8'h00);
 // — spec contradiction #4. Both internal (cmd reply ready) and external
 // (userspace push) STEN pulses contribute.
 assign sten_any  = sten_pulse_ext | sten_pulse_int;
-assign tpi_edges = {sten_any, sten_any, stch_pulse, scor_pulse, sbcp_pulse};
+// PREST also pulses STCH internally — WinUAE `cdtv_reset_int()`
+// (cdtv.cpp:1305-1317) sets `stch=1` unconditionally when CNTR is
+// written with bit 6 set. Driver writes `CNTR = PREST | INTEN = 0x50`
+// to $E9xx43 and waits for INT2 on STCH. Without this OR-in, the
+// driver hangs in cdtv.device InitResident. See
+// research/docs/cdtv-post-ac-init-research-2026-05-21.md.
+assign tpi_edges = {sten_any, sten_any, stch_pulse | prst_pulse, scor_pulse, sbcp_pulse};
 assign masked_active = tp_ilatch[4:0] & tp_imask[4:0];
 
 assign cmd_in_empty  = (cmd_in_wr_p  == cmd_in_rd_p);
