@@ -431,7 +431,7 @@ always @(*) begin
 			// (= NOT 0x0) for serial/reserved bytes, set explicitly only where the
 			// underlying nibble is non-zero.
 			6'h03: autocfg_data = 4'b1100; // byte 0x06: NOT(0x03 lo nibble) = NOT 0x3 = 0xC (product number)
-			6'h04: autocfg_data = 4'b1011; // byte 0x08: NOT(0x40 hi nibble) = NOT 0x4 = 0xB (er_flags: CANT_SHUTUP)
+			6'h04: autocfg_data = 4'b1011; // byte 0x08: NOT(0x40 hi nibble) — CANT_SHUTUP
 			6'h09: autocfg_data = 4'b1101; // byte 0x12: NOT(0x02 lo nibble) = NOT 0x2 = 0xD (manuf hi)
 			6'h0B: autocfg_data = 4'b1101; // byte 0x16: NOT(0x02 lo nibble) = NOT 0x2 = 0xD (manuf lo)
 			default: autocfg_data = 4'b1111;
@@ -561,11 +561,19 @@ always @(posedge clk) begin
 		// the DMAC card is alone in the chain — matches the WinUAE log
 		// "Card 01: CDTV DMAC" / end.
 		ac_toccata  <= cdtv_mode ? 1'b0 : 1'b1;
-		// BISECTION 2026-05-20: ac_cdtv normally <= cdtv_mode. Force to 0
-		// to test whether the CDTV AC responder is what's blanking B_ksonly
-		// (CDTV mode ON, KS 1.3 only). If KS hand reappears, the AC ROM
-		// table is the bug; if still blank, the issue is elsewhere ($F00000
-		// mirror, bridge IRQ pulses, etc.).
+		// 2026-05-21 M1 WORKAROUND (still in effect): forced low. Two
+		// targeted probes were tried after the bisection result; neither
+		// unblocked the post-AC cdtv.device init:
+		//   * TPI Port C mode-0 fix (cdtv_bridge.v get_tp_c parity with
+		//     WinUAE — kept regardless; it's a correctness improvement).
+		//   * NOP-out all four 68020+ MOVEC opcodes in the ext-ROM
+		//     (0x568/0x572 VBR+CACR setup, 0x8B7C/0x8B84 deeper CACR
+		//     I/O). Single $568 NOP changes the hang screen from bright
+		//     white to dark gray (= we reach a later state) but doesn't
+		//     hit splash; adding the other three does nothing further.
+		// Next required step is UIO trace drain for cdtv_trace.v so we
+		// can see which $E9xx access cdtv.device gets stuck on. Until
+		// then `ac_cdtv <= 1'b0` is the working M1 path.
 		ac_cdtv     <= 1'b0;
 		cdtv_base   <= 8'hE9;       // WinUAE default fallback ($E90000)
 		z2ram_ena   <= 0;

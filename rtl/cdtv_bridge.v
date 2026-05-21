@@ -439,11 +439,21 @@ always @* begin
 		3'd1: tpi_rd = tp_b;
 		3'd2: begin
 			// Port C — spec section 3.4. Returns inverted-active mask of
-			// (ilatch | ilatch2) in mode 1; raw GPIO in mode 0.
+			// (ilatch | ilatch2) in mode 1; in mode 0 returns the inverted
+			// state of the live sbcp/scor/stch/sten input lines (WinUAE
+			// cdtv.cpp get_tp_c: `~sbcp | ~scor<<1 | ~stch<<2 | ~sten<<3
+			// | ~sten<<4`). At idle this reads 0x1F — cdtv.device polls
+			// $E900B4 on init and treats 0x00 as "all four sources active",
+			// which loops forever. Pre-2026-05-21 we returned tp_ilatch in
+			// mode 0 (=0 at reset) → post-AC hang root-cause candidate.
+			//   bit 0: ~sbcp  → ~sbcp_state (current subchannel byte pending)
+			//   bit 1: ~scor  → 1'b1       (no live SCOR source on M1)
+			//   bit 2: ~stch  → 1'b1       (no live STCH source on M1)
+			//   bit 3,4: ~sten→ cmd_out_empty (=1 = no reply byte pending)
 			if (tp_cr[0])
 				tpi_rd = {tp_ilatch[7:5], ~(tp_ilatch[4:0] | tp_ilatch2[4:0])};
 			else
-				tpi_rd = tp_ilatch;
+				tpi_rd = {3'h0, cmd_out_empty, cmd_out_empty, 1'b1, 1'b1, ~sbcp_state};
 		end
 		3'd3: tpi_rd = tp_ad;
 		3'd4: tpi_rd = tp_bd;
