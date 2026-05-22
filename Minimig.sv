@@ -311,6 +311,24 @@ wire        chipset_cs_trace;
 wire        chipset_trace_rd;
 wire  [7:0] chipset_trace_din;
 
+// CDTV HPS bridge wires (M2 phase-1a). Bound to hps_ext's cdtv_* ports
+// via wildcard instantiation. cmd byte-stream sub-channel only —
+// sector / status pulses come later phases.
+wire [15:0] cdtv_din;          // FROM cdtv_hps_bridge TO hps_ext
+wire [15:0] cdtv_dout;         // FROM hps_ext TO cdtv_hps_bridge
+wire        cdtv_wr;
+wire        cdtv_rd;
+wire        cdtv_cs;
+wire        cdtv_cs_sec;       // phase-1b sector-push sub-channel
+wire        cdtv_cs_stch;      // phase-1e STCH-inject sub-channel
+wire        cdtv_cs_trace;     // phase-1g trace-drain sub-channel
+wire        cdtv_stch_inject;  // 1-clk pulse from cdtv_hps_bridge -> minimig
+wire        cdtv_sec_byte_push_w; // 1-clk pulse per UIO sec byte
+wire  [7:0] cdtv_sec_byte_data_w;
+wire  [7:0] cdtv_trace_din;    // FROM cdtv_trace TO hps_ext (UIO drain byte)
+wire        cdtv_trace_rd;     // strobe from hps_ext -> cdtv_trace
+wire        cdtv_req;          // bit 6 of 0x63 status word
+
 // NVRAM load-from-disk via canonical SD-block path (the pattern SNES,
 // Saturn, GBA, NeoGeo, CDi all use). Userspace calls user_io_file_mount
 // with the .nvr path; hps_io fires img_mounted[0], we kick off a single
@@ -593,15 +611,48 @@ wire        cdtv_selack_w;
 wire  [5:0] cdtv_ac_rom_addr_w;
 wire  [7:0] cdtv_ac_rom_byte_w;
 
-// UIO / HPS-side ports — declared as wires but not yet wired to hps_ext.
-// Inputs default to 0 (no userspace activity); outputs are left dangling
-// pending the userspace bridge session.
+// UIO / HPS-side ports.
+// cmd_in_pending / cmd_in_byte come up from cdtv_bridge → cpu_wrapper.
+// The cdtv_hps_bridge (instantiated below) drives the *_to_bridge_w
+// signals that feed back down through cpu_wrapper into cdtv_bridge.
 wire        cdtv_cmd_in_pending_w;
 wire  [7:0] cdtv_cmd_in_byte_w;
+wire        cdtv_cmd_in_pop_w;
+wire        cdtv_cmd_out_push_w;
+wire  [7:0] cdtv_cmd_out_data_w;
 wire  [9:0] cdtv_cdda_volume_w;
 wire        cdtv_nvr_dirty_w;
 wire  [7:0] cdtv_nvr_save_dout_w;
-wire  [7:0] cdtv_trace_uio_dout_w;
+
+// CDTV chip-RAM master DMA wires (M2 phase-1b). cdtv_bridge → chipdma_arb.
+wire        cdtv_dma_req_w;
+wire        cdtv_dma_we_w;
+wire [23:0] cdtv_dma_baddr_w;
+wire  [7:0] cdtv_dma_wbyte_w;
+wire        cdtv_dma_ack_w;
+
+// CDTV HPS bridge — UIO byte-stream adapter for cdtv_bridge cmd channel.
+cdtv_hps_bridge cdtv_hps_bridge_inst
+(
+	.clk            (clk_sys                ),
+	.reset          (reset                  ),
+	.uio_cs         (cdtv_cs                ),
+	.uio_cs_sec     (cdtv_cs_sec            ),
+	.uio_cs_stch    (cdtv_cs_stch           ),
+	.uio_wr         (cdtv_wr                ),
+	.uio_rd         (cdtv_rd                ),
+	.uio_din        (cdtv_dout[7:0]         ),
+	.uio_dout       (cdtv_din               ),
+	.cmd_in_pending (cdtv_cmd_in_pending_w  ),
+	.cmd_in_byte    (cdtv_cmd_in_byte_w     ),
+	.cmd_in_pop     (cdtv_cmd_in_pop_w      ),
+	.cmd_out_push   (cdtv_cmd_out_push_w    ),
+	.cmd_out_data   (cdtv_cmd_out_data_w    ),
+	.sec_byte_push  (cdtv_sec_byte_push_w   ),
+	.sec_byte_data  (cdtv_sec_byte_data_w   ),
+	.stch_inject    (cdtv_stch_inject       ),
+	.req            (cdtv_req               )
+);
 
 cpu_wrapper cpu_wrapper
 (
@@ -730,6 +781,14 @@ chipdma_arb chipdma_arb
 	.akiko_dma_wbyte (akiko_dma_wbyte_w    ),
 	.akiko_dma_rbyte (akiko_dma_rbyte_w    ),
 	.akiko_dma_ack   (akiko_dma_ack_w      ),
+
+	// From / to cdtv bridge (M2 phase-1b sector DMA — chip-RAM writes).
+	.cdtv_dma_req    (cdtv_dma_req_w       ),
+	.cdtv_dma_we     (cdtv_dma_we_w        ),
+	.cdtv_dma_baddr  (cdtv_dma_baddr_w     ),
+	.cdtv_dma_wbyte  (cdtv_dma_wbyte_w     ),
+	.cdtv_dma_rbyte  (                     ),  // CDTV is write-only
+	.cdtv_dma_ack    (cdtv_dma_ack_w       ),
 
 	// To sdram_ctrl chipDMA port (drives the actual SDRAM access).
 	.chip_out_addr   (arb_chip_addr        ),
@@ -1040,21 +1099,30 @@ minimig minimig
 	.cdtv_ac_rom_addr    (cdtv_ac_rom_addr_w   ),
 	.cdtv_ac_rom_byte    (cdtv_ac_rom_byte_w   ),
 
-	// CDTV bridge — UIO / HPS-side ports. Tied off (0) for this RTL pass;
-	// userspace bridge is a follow-up session per spec scope.
-	.cdtv_cmd_in_pop     (1'b0                 ),
+	// CDTV bridge — UIO / HPS-side ports. cmd byte-stream wired via
+	// cdtv_hps_bridge_inst above (M2 phase-1a). Sector-push channel added
+	// in phase-1b alongside the chip-RAM master DMA path. Subq/status
+	// optional channels still tied off — those come in later phases.
+	.cdtv_cmd_in_pop     (cdtv_cmd_in_pop_w    ),
 	.cdtv_cmd_in_pending (cdtv_cmd_in_pending_w),
 	.cdtv_cmd_in_byte    (cdtv_cmd_in_byte_w   ),
-	.cdtv_cmd_out_push   (1'b0                 ),
-	.cdtv_cmd_out_data   (8'h00                ),
-	.cdtv_sec_byte_push  (1'b0                 ),
-	.cdtv_sec_byte_data  (8'h00                ),
+	.cdtv_cmd_out_push   (cdtv_cmd_out_push_w  ),
+	.cdtv_cmd_out_data   (cdtv_cmd_out_data_w  ),
+	.cdtv_sec_byte_push  (cdtv_sec_byte_push_w ),
+	.cdtv_sec_byte_data  (cdtv_sec_byte_data_w ),
 	.cdtv_subq_push      (1'b0                 ),
 	.cdtv_subq_byte      (8'h00                ),
-	.cdtv_stch_pulse     (1'b0                 ),
+	.cdtv_stch_pulse     (cdtv_stch_inject     ),
 	.cdtv_sten_pulse     (1'b0                 ),
 	.cdtv_scor_pulse     (1'b0                 ),
 	.cdtv_sbcp_pulse     (1'b0                 ),
+
+	// CDTV chip-RAM master DMA — bridge requests, chipdma_arb acks.
+	.cdtv_dma_req        (cdtv_dma_req_w       ),
+	.cdtv_dma_we         (cdtv_dma_we_w        ),
+	.cdtv_dma_baddr      (cdtv_dma_baddr_w     ),
+	.cdtv_dma_wbyte      (cdtv_dma_wbyte_w     ),
+	.cdtv_dma_ack        (cdtv_dma_ack_w       ),
 
 	.cdtv_nvr_load_addr  (14'h0                ),
 	.cdtv_nvr_load_din   (8'h0                 ),
@@ -1064,9 +1132,9 @@ minimig minimig
 	.cdtv_nvr_dirty      (cdtv_nvr_dirty_w     ),
 	.cdtv_nvr_clear_dirty(1'b0                 ),
 
-	.cdtv_trace_uio_cs   (1'b0                 ),
-	.cdtv_trace_uio_rd   (1'b0                 ),
-	.cdtv_trace_uio_dout (cdtv_trace_uio_dout_w),
+	.cdtv_trace_uio_cs   (cdtv_cs_trace        ),
+	.cdtv_trace_uio_rd   (cdtv_trace_rd        ),
+	.cdtv_trace_uio_dout (cdtv_trace_din       ),
 
 	.cdtv_cdda_volume    (cdtv_cdda_volume_w   ),
 

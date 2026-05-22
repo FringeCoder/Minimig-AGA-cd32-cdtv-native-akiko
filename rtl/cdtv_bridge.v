@@ -103,10 +103,9 @@ module cdtv_bridge
 	input       [7:0] cmd_out_data,
 
 	// Sector DMA data path — CR-511 READ ($02) commands stage a sector
-	// stream in userspace; bridge consumes bytes via sec_byte_push pulses
-	// and (in a future session) writes them to chip RAM at acr (spec
-	// section 4.4). For this RTL pass we provide the FIFO buffer + advance
-	// logic; the actual chip-RAM master is a stub.
+	// stream in userspace; bridge enqueues bytes into sec_fifo on
+	// sec_byte_push pulses and the drain FSM (section 4b) writes them to
+	// chip RAM at acr via chipdma_arb's cdtv master port (spec section 4.4).
 	input             sec_byte_push,
 	input       [7:0] sec_byte_data,
 
@@ -121,6 +120,20 @@ module cdtv_bridge
 	input             sten_pulse_ext, // additional source (e.g. user-side ready)
 	input             scor_pulse,
 	input             sbcp_pulse,
+
+	// Chip-RAM master to chipdma_arb (M2 phase-1b). Single-byte write
+	// protocol identical to akiko's port:
+	//   - assert cdtv_dma_req with we=1, baddr=acr[23:0], wbyte=sec_fifo head
+	//   - chipdma_arb pulses cdtv_dma_ack once it has written the byte
+	//   - bridge drops req, advances sec_rd_p, increments acr, decrements wtc,
+	//     waits one cycle, re-arms if wtc>0 and FIFO still has bytes.
+	// Completion (wtc==0 && sec_empty && dmac_dma) sets ISTR E_INT/INTS in
+	// the existing DMAC always block, raising INT2 via dmac_int2.
+	output            cdtv_dma_req,
+	output            cdtv_dma_we,
+	output     [23:0] cdtv_dma_baddr,
+	output      [7:0] cdtv_dma_wbyte,
+	input             cdtv_dma_ack,
 
 	// Trace output — every DMAC/TPI/CR-511 access, 64-bit entry, drained
 	// via cdtv_trace.v. We expose the strobes as separate one-shot wires
@@ -164,6 +177,41 @@ reg        fifo_touch;
 reg        dma_complete_pulse;
 reg        dma_complete_armed; // one-shot guard: fire dma_complete only once per DMA cycle
 
+// --- Sector drain FSM (M2 phase-1b chip-RAM master) ---
+// Sits between the sector staging FIFO and chipdma_arb. While dmac_dma is
+// active, wtc > 0, and the FIFO has bytes, the FSM emits TWO byte writes
+// per WTC tick (CDTV WTC is a 16-bit word counter — see spec section 2.3
+// and cdtv-bridge-spec.md:306 "reads wtc words from the CD into chipram
+// at acr, incrementing acr += 2 per tick until wtc == 0").
+//
+// Read pattern: single-port synchronous M10K. sec_fifo_q is the registered
+// read of sec_fifo[sec_rd_p]; advancing sec_rd_p takes ONE clk_sys cycle
+// for sec_fifo_q to reflect the new byte. The FSM inserts a 1-cycle WAIT_*
+// state between each rd_p advance and the next byte push. (The earlier
+// look-ahead read sec_fifo[sec_rd_p+1] forced a 2-read-port BRAM that
+// Quartus couldn't pack into M10K — the previous fit overflowed the
+// Cyclone V by 1500 LABs because the 8 KB FIFO landed in ALMs.)
+//
+//   IDLE     → if armed: state = WAIT_U
+//   WAIT_U   → state = PUSH_U          (1 cycle for sec_fifo_q to settle)
+//   PUSH_U   → drive baddr=acr+0, wbyte=sec_fifo_q, req=1
+//              on ack: sec_rd_p += 1 (drain_ack_pop), state = WAIT_L
+//   WAIT_L   → state = PUSH_L          (1 cycle for sec_fifo_q to settle)
+//   PUSH_L   → drive baddr=acr+1, wbyte=sec_fifo_q, req=1
+//              on ack: sec_rd_p += 1, acr += 2, wtc -= 1
+//                      (drain_ack_pop + drain_ack_word), state = IDLE
+// Completion (wtc == 0 && sec_empty) fires E_INT/INTS + INT2 in the
+// existing DMAC block.
+localparam [2:0] DRAIN_IDLE   = 3'd0;
+localparam [2:0] DRAIN_WAIT_U = 3'd1;
+localparam [2:0] DRAIN_PUSH_U = 3'd2;
+localparam [2:0] DRAIN_WAIT_L = 3'd3;
+localparam [2:0] DRAIN_PUSH_L = 3'd4;
+reg [2:0]  drain_state;
+reg [23:0] drain_baddr;
+reg  [7:0] drain_wbyte;
+reg        drain_req_r;
+
 // --- TPI (spec section 3) ---
 reg [7:0] tp_a;
 reg [7:0] tp_b;
@@ -192,6 +240,13 @@ reg  [7:0] tpi_rd;
 // the CPU (spec section 4.1: "STEN pulses on each byte ready").
 reg        sten_pulse_int;
 
+// Internal SCOR pulse — free-running ~50 Hz frame tick. See assign
+// tpi_edges comment below for the WinUAE behaviour we're mirroring.
+// 28.6875 MHz / 573750 = 50.0 Hz exactly.
+localparam [19:0] SCOR_PERIOD = 20'd573750;
+reg [19:0] scor_count;
+reg        scor_pulse_int;
+
 // --- CR-511 FIFO (spec section 4) ---
 reg [7:0] cmd_in_fifo  [0:31];
 reg [4:0] cmd_in_wr_p, cmd_in_rd_p;
@@ -202,8 +257,15 @@ reg [7:0] last_out;
 // Sector DMA staging buffer — spec section 4.4. 8 KB lets up to 4 cooked
 // sectors (4 × 2048) sit in-flight; READ ($02) typically streams them in
 // one at a time. Indexed with 13-bit pointers.
-reg [7:0] sec_fifo [0:8191];
+//
+// ramstyle forces Quartus to map this into M10K. Without the hint, the
+// asymmetric write/read access pattern dropped the array into ALMs and
+// blew the fit (5741 LABs requested, 4191 available on Cyclone V). The
+// drain FSM has been restructured to use a single registered read port
+// (sec_fifo_q below) so M10K inference is now legal.
+(* ramstyle = "M10K" *) reg [7:0] sec_fifo [0:8191];
 reg [12:0] sec_wr_p, sec_rd_p;
+reg  [7:0] sec_fifo_q;     // registered read of sec_fifo[sec_rd_p]
 
 // --- Trace output staging ---
 reg [7:0] trace_tag;
@@ -310,12 +372,27 @@ assign sten_any  = sten_pulse_ext | sten_pulse_int;
 // to $E9xx43 and waits for INT2 on STCH. Without this OR-in, the
 // driver hangs in cdtv.device InitResident. See
 // research/docs/cdtv-post-ac-init-research-2026-05-21.md.
-assign tpi_edges = {sten_any, sten_any, stch_pulse | prst_pulse, scor_pulse, sbcp_pulse};
+//
+// SCOR frame-tick generator (phase-1f). WinUAE `CDTV_hsync_handler`
+// (cdtv.cpp:1253-1258) fires SCOR every frame when media is present:
+// "frame interrupts happen all the time motor is running". CDTV BIOS
+// uses SCOR as its periodic heartbeat — without it the cd.device worker
+// task sits idle after the post-mount STATUS-poll burst. We don't have a
+// cd_media wire in the bridge, so generate free-running ~50 Hz pulses
+// from clk (28.6875 MHz / 573750 ≈ 50 Hz). BIOS only acts on SCOR after
+// it has enabled the TPI imask, so unconditional firing is safe before
+// init.
+assign tpi_edges = {sten_any, sten_any, stch_pulse | prst_pulse, scor_pulse | scor_pulse_int, sbcp_pulse};
 assign masked_active = tp_ilatch[4:0] & tp_imask[4:0];
 
 assign cmd_in_empty  = (cmd_in_wr_p  == cmd_in_rd_p);
 assign cmd_out_empty = (cmd_out_wr_p == cmd_out_rd_p);
 assign sec_empty     = (sec_wr_p     == sec_rd_p);
+
+// Modular FIFO occupancy. With 13-bit pointers and an 8192-deep ring the
+// natural 13-bit subtraction gives the correct fill count up to 8191. We
+// never push enough to wrap so a separate full-flag isn't needed.
+wire [12:0] sec_avail = sec_wr_p - sec_rd_p;
 
 // Spec section 6.1
 assign dmac_int2 = cntr[CNTR_INTEN_BIT] & (istr[ISTR_E_INT_BIT] | istr[ISTR_INTS_BIT]);
@@ -327,10 +404,34 @@ assign cdda_volume = cd_volume;
 assign cmd_in_pending = ~cmd_in_empty;
 assign cmd_in_byte    = cmd_in_fifo[cmd_in_rd_p];
 
+// Drain-FSM outputs to chipdma_arb. cdtv writes only — we is wired high.
+assign cdtv_dma_req   = drain_req_r;
+assign cdtv_dma_we    = 1'b1;
+assign cdtv_dma_baddr = drain_baddr;
+assign cdtv_dma_wbyte = drain_wbyte;
+
+// Drain ack pulses, split by which half of the word was just written. The
+// pop-byte pulse fires on every ack (we always pop the next byte after each
+// chip-RAM write); the word-complete pulse fires only on the LOW-byte ack
+// and triggers acr+=2 / wtc-=1.
+wire drain_ack_u    = (drain_state == DRAIN_PUSH_U) && cdtv_dma_ack;
+wire drain_ack_l    = (drain_state == DRAIN_PUSH_L) && cdtv_dma_ack;
+wire drain_ack_pop  = drain_ack_u | drain_ack_l;       // pop one byte from sec_fifo
+wire drain_ack_word = drain_ack_l;                     // word done — acr+=2, wtc-=1
+// Compatibility alias for any downstream reader expecting the old name.
+wire drain_ack_now  = drain_ack_pop;
+
 wire wr_any = hwr | lwr;
 assign any_access = sel && (rd || wr_any);
 assign trace_we   = any_access;
-assign trace_data = {32'h0, trace_tag, din[7:0], byte_off};
+// For writes: data the CPU sent (din[7:0]). For reads: the byte WE return
+// on the addressed lane (rd_byte_eb at even offset, rd_byte_ob at odd
+// offset). Without this, RD entries logged just the floating bus state
+// (0xff) and were useless for diagnosing what BIOS actually observed.
+assign trace_data = {32'h0, trace_tag,
+                     wr_any ? din[7:0]
+                            : (byte_off[0] ? rd_byte_ob : rd_byte_eb),
+                     byte_off};
 
 assign selack = sel;
 // Read mux assembles even-byte and odd-byte slots into a 16-bit word. The
@@ -339,9 +440,34 @@ assign selack = sel;
 // slots default to 0x00 per spec section 2.3.
 assign dout   = {rd_byte_eb, rd_byte_ob};
 
+// Free-running ~50 Hz SCOR pulse generator (phase-1f). See tpi_edges
+// comment for rationale.
+always @(posedge clk) begin
+	if (reset) begin
+		scor_count     <= 20'd0;
+		scor_pulse_int <= 1'b0;
+	end else begin
+		scor_pulse_int <= 1'b0;
+		if (scor_count == SCOR_PERIOD - 20'd1) begin
+			scor_count     <= 20'd0;
+			scor_pulse_int <= 1'b1;
+		end else begin
+			scor_count <= scor_count + 20'd1;
+		end
+	end
+end
+
 //----------------------------------------------------------------------------
 // 4. DMAC register file — spec section 2.3
 //----------------------------------------------------------------------------
+
+// ISTR read side-effect uses a falling-edge gate for the same reason
+// cmd_out_fifo does (see "Edge detection on bus strobes" comment below):
+// the clear must fire AFTER the CPU has latched the value, otherwise the
+// 4-cycle read window shows the post-clear value (bits [3:0] = 0) to the
+// CPU and BIOS can't tell which DMAC interrupt fired.
+reg sel_istr_ob_rd_d;
+wire istr_rd_falling = !(sel_istr_ob && rd) && sel_istr_ob_rd_d;
 
 always @(posedge clk) begin
 	if (reset) begin
@@ -356,11 +482,13 @@ always @(posedge clk) begin
 		fifo_touch         <= 1'b0;
 		dma_complete_pulse <= 1'b0;
 		dma_complete_armed <= 1'b0;
+		sel_istr_ob_rd_d   <= 1'b0;
 	end else begin
 		// Default pulse deasserts
 		prst_pulse         <= 1'b0;
 		fifo_touch         <= 1'b0;
 		dma_complete_pulse <= 1'b0;
+		sel_istr_ob_rd_d   <= sel_istr_ob && rd;
 
 		// $E90043 (CNTR) byte write — spec section 2.3 row 3.
 		// $43 is the odd byte of word $42; write strobe is lwr.
@@ -370,7 +498,9 @@ always @(posedge clk) begin
 		end
 
 		// $E90041 ISTR readback side-effect — spec section 2.3 row 2.
-		if (sel_istr_ob && rd) istr <= istr & 8'hF0;
+		// Falling-edge so the CPU latches istr WITH bits [3:0] still set;
+		// clear takes effect only after the read access ends.
+		if (istr_rd_falling) istr <= istr & 8'hF0;
 
 		// $E900E4 ISTR-clear-all — spec section 2.3. WinUAE doesn't gate on
 		// byte slot — write of any byte in $E4/$E5 word triggers full clear.
@@ -401,9 +531,12 @@ always @(posedge clk) begin
 
 		// DMA START / STOP — spec section 2.3 rows "DMA START" / "DMA STOP".
 		// Word access fires the strobe; either byte half is sufficient.
-		// Arm the completion one-shot on START — fires once per START/STOP
-		// cycle, then de-arms.
-		if (sel_dma_start && (hwr || lwr) && !dmac_dma) begin
+		// CDTV BIOS issues short multi-chunk DMAs per READ DATA (e.g. an
+		// 8-byte header DMA followed by a 504-byte body DMA), each with a
+		// fresh WTC/ACR/CNTR programming and a DMA_START. Each START must
+		// re-arm the completion one-shot — so the previous gate `!dmac_dma`
+		// is dropped (the prior chunk auto-cleared dmac_dma on wtc==0).
+		if (sel_dma_start && (hwr || lwr)) begin
 			dmac_dma           <= 1'b1;
 			dma_complete_armed <= 1'b1;
 		end
@@ -413,18 +546,100 @@ always @(posedge clk) begin
 			dma_complete_armed <= 1'b0;
 		end
 
+		// Per-word DMA bookkeeping (M2 phase-1b drain). The FSM emits two
+		// byte writes per WTC word; on the LOW-byte ack we advance acr by 2
+		// (next word's base) and decrement wtc by 1. NBA last-wins behavior
+		// versus CPU writes to $80-$87 above is acceptable: the BIOS leaves
+		// WTC/ACR untouched between DMA START and end-of-process IRQ.
+		if (drain_ack_word) begin
+			acr <= acr + 32'd2;
+			wtc <= wtc - 32'd1;
+		end
+
 		// DMA end-of-process IRQ — spec section 4.4 + section 6.1.
-		// Single-fire when the DMA worker drains (wtc=0 AND sec_empty AND
-		// DMA was armed). The armed flag prevents repeat firings while the
-		// CPU is still draining DMA state.
-		if (dmac_dma && dma_complete_armed && (wtc == 32'h0) && sec_empty) begin
+		// Single-fire when this DMA chunk's WTC reaches 0. Drop sec_empty
+		// from the gate: BIOS's READ DATA produces multi-chunk DMA, so
+		// sec_fifo carries leftover bytes between chunks (the next chunk's
+		// WTC/ACR programming consumes them). Also drop dmac_dma here so
+		// the next DMA_START re-arms cleanly; the drain FSM aborts itself
+		// on !dmac_dma which is fine because wtc has already hit 0.
+		if (dmac_dma && dma_complete_armed && (wtc == 32'h0)) begin
 			dma_complete_pulse <= 1'b1;
 			dma_complete_armed <= 1'b0;
+			dmac_dma           <= 1'b0;
 		end
 		if (dma_complete_pulse && cntr[CNTR_INTEN_BIT] && cntr[CNTR_TCEN_BIT]) begin
 			istr         <= istr | (8'h01 << ISTR_E_INT_BIT)
 			                     | (8'h01 << ISTR_INT_P_BIT);
 			dma_finished <= 1'b0;
+		end
+	end
+end
+
+//----------------------------------------------------------------------------
+// 4b. Sector drain FSM — pop bytes from sec_fifo, push to chipdma_arb master.
+//----------------------------------------------------------------------------
+
+// Registered M10K read. sec_fifo_q lags sec_rd_p by 1 clk_sys cycle, so
+// every rd_p advance has a 1-cycle WAIT_* state before the next byte push.
+always @(posedge clk) sec_fifo_q <= sec_fifo[sec_rd_p];
+
+always @(posedge clk) begin
+	if (reset) begin
+		drain_state <= DRAIN_IDLE;
+		drain_req_r <= 1'b0;
+		drain_baddr <= 24'h0;
+		drain_wbyte <= 8'h00;
+	end else begin
+		// DMA stop or peripheral reset aborts any in-flight request. A
+		// late ack arriving after dmac_dma drops will be ignored because
+		// drain_ack_pop/word require state == DRAIN_PUSH_*.
+		if (!dmac_dma || prst_pulse) begin
+			drain_state <= DRAIN_IDLE;
+			drain_req_r <= 1'b0;
+		end else begin
+			case (drain_state)
+				DRAIN_IDLE: begin
+					drain_req_r <= 1'b0;
+					// Arm a new word write only when DMA wants more words
+					// AND the FIFO has BOTH bytes of the next word ready.
+					// The 1-cycle WAIT_U gap lets sec_fifo_q catch up to
+					// sec_rd_p before PUSH_U latches drain_wbyte.
+					if ((wtc != 32'h0) && (sec_avail >= 13'd2)) begin
+						drain_state <= DRAIN_WAIT_U;
+					end
+				end
+				DRAIN_WAIT_U: begin
+					drain_state <= DRAIN_PUSH_U;
+				end
+				DRAIN_PUSH_U: begin
+					drain_baddr <= acr[23:0];          // upper byte at acr+0
+					drain_wbyte <= sec_fifo_q;
+					drain_req_r <= 1'b1;
+					if (cdtv_dma_ack) begin
+						// Upper byte committed. sec_rd_p advances via the
+						// FIFO block at this same edge; sec_fifo_q catches
+						// up one cycle later, in WAIT_L.
+						drain_req_r <= 1'b0;
+						drain_state <= DRAIN_WAIT_L;
+					end
+				end
+				DRAIN_WAIT_L: begin
+					drain_state <= DRAIN_PUSH_L;
+				end
+				DRAIN_PUSH_L: begin
+					drain_baddr <= acr[23:0] + 24'd1;  // lower byte at acr+1
+					drain_wbyte <= sec_fifo_q;
+					drain_req_r <= 1'b1;
+					if (cdtv_dma_ack) begin
+						// Word complete. acr += 2 / wtc -= 1 lands in the
+						// DMAC block on the drain_ack_word pulse.
+						drain_req_r <= 1'b0;
+						drain_state <= DRAIN_IDLE;
+					end
+				end
+				default: drain_state <= DRAIN_IDLE;
+			endcase
 		end
 	end
 end
@@ -475,6 +690,13 @@ always @* begin
 	endcase
 end
 
+// AIR read ack uses a falling-edge gate: clearing tp_air on the rising
+// edge of the 4-cycle read window makes the CPU latch 0x00 instead of
+// the priority value, and BIOS sees every TPI IRQ as spurious.
+wire   in_air_rd      = in_tpi_range && rd && (tpi_reg == 3'd7) && tp_cr[0];
+reg    in_air_rd_d;
+wire   air_rd_falling = !in_air_rd && in_air_rd_d;
+
 always @(posedge clk) begin
 	if (reset) begin
 		tp_a        <= 8'h00;
@@ -493,9 +715,11 @@ always @(posedge clk) begin
 		tp_b_prev_7 <= 1'b0;
 		subq_head   <= 8'h00;
 		sbcp_state  <= 1'b0;
+		in_air_rd_d <= 1'b0;
 	end else begin
 		// Accumulate IRQ edges — spec section 3.4.
 		tp_ilatch[4:0] <= tp_ilatch[4:0] | tpi_edges;
+		in_air_rd_d    <= in_air_rd;
 
 		// Subchannel byte arrival — spec section 3.2.
 		if (subq_push) begin
@@ -582,7 +806,9 @@ always @(posedge clk) begin
 		end
 
 		// AIR read = ACK (mode 1) — spec section 3.4.
-		if (in_tpi_range && rd && (tpi_reg == 3'd7) && tp_cr[0]) begin
+		// Falling-edge so the CPU latches the priority value (e.g. 0x02)
+		// rather than the post-clear 0x00. See in_air_rd / air_rd_falling.
+		if (air_rd_falling) begin
 			tp_ilatch[5] <= 1'b0;
 			tp_ilatch2   <= 8'h00;
 			tp_air       <= 8'h00;
@@ -594,6 +820,25 @@ end
 // 6. CR-511 command FIFO + sector buffer — spec section 4
 //----------------------------------------------------------------------------
 
+// Edge detection on bus strobes — `lwr`/`hwr`/`rd` are level-asserted by
+// the chip-bus wrapper for the full duration of an access (4+ clk cycles
+// on this rig), so naive `if (lwr) enqueue` writes the same byte once per
+// cycle. cmd_in_fifo (which has *additive* semantics — each write
+// advances wr_p) MUST gate on the rising edge, otherwise a single CPU
+// write to $A1 enqueues 4 copies and the BIOS sees 4 phantom STATUS
+// commands. CPU reads of $A1 (FIFO pop) have the same problem.
+//
+// Read pop uses FALLING edge: if we pop on the rising edge, rd_p advances
+// on cycle 2 of the 4-cycle window — and `rd_byte_ob = fifo[rd_p]` then
+// shows `fifo[rd_p+1]` for cycles 2-4. The CPU latches read data at the
+// END of the access window (AS-deasserts), so it would read the byte we
+// just *skipped* instead of the one we just popped. Popping on falling
+// edge keeps rd_p stable across the access window — CPU sees fifo[rd_p]
+// for all 4 cycles, then we advance rd_p after the CPU has latched.
+reg sel_cmda_ob_lwr_d, sel_cmda_ob_rd_d;
+wire cmda_wr_edge     =  (sel_cmda_ob && lwr) && !sel_cmda_ob_lwr_d;
+wire cmda_rd_falling  = !(sel_cmda_ob && rd ) &&  sel_cmda_ob_rd_d;
+
 always @(posedge clk) begin
 	if (reset) begin
 		cmd_in_wr_p    <= 5'h0;
@@ -604,8 +849,12 @@ always @(posedge clk) begin
 		sec_wr_p       <= 13'h0;
 		sec_rd_p       <= 13'h0;
 		sten_pulse_int <= 1'b0;
+		sel_cmda_ob_lwr_d <= 1'b0;
+		sel_cmda_ob_rd_d  <= 1'b0;
 	end else begin
 		sten_pulse_int <= 1'b0;
+		sel_cmda_ob_lwr_d <= sel_cmda_ob && lwr;
+		sel_cmda_ob_rd_d  <= sel_cmda_ob && rd;
 
 		// Peripheral reset (CNTR_PREST) — spec section 7.2. Stops DMA +
 		// flushes command rings. Does NOT touch TPI.
@@ -620,7 +869,8 @@ always @(posedge clk) begin
 
 		// CPU write to $A1 — spec section 4.1 step 1-2.
 		// $A1 is the odd-byte slot of word $A0; data in din[7:0], lwr strobe.
-		if (sel_cmda_ob && lwr) begin
+		// Edge-detect lwr so 4-cycle bus assertion doesn't enqueue 4 copies.
+		if (cmda_wr_edge) begin
 			cmd_in_fifo[cmd_in_wr_p] <= din[7:0];
 			cmd_in_wr_p              <= cmd_in_wr_p + 5'd1;
 		end
@@ -639,7 +889,10 @@ always @(posedge clk) begin
 
 		// CPU read of $A1 — spec section 4.1 step 5.
 		// Read returns the byte in the odd-half (din[7:0]) of word $A0.
-		if (sel_cmda_ob && rd) begin
+		// Pop on FALLING edge of (sel_cmda_ob && rd) so the bus shows
+		// fifo[rd_p] stably across the whole access window; rd_p only
+		// advances after the CPU has latched the data.
+		if (cmda_rd_falling) begin
 			if (!cmd_out_empty) begin
 				last_out     <= cmd_out_fifo[cmd_out_rd_p];
 				cmd_out_rd_p <= cmd_out_rd_p + 5'd1;
@@ -650,16 +903,24 @@ always @(posedge clk) begin
 		end
 
 		// Sector data ingress (userspace push) — spec section 4.4.
-		// TODO: chip-RAM master DMA. For this RTL pass we accept bytes
-		// into the staging FIFO. The actual chip-RAM write at `acr` is
-		// wired in a future session via chipdma_arb, similar to akiko's
-		// M5 path; for now the bytes accumulate and dma_complete_pulse
-		// (in the DMAC block) fires only after both wtc and the FIFO
-		// drain. wtc decrement waits for the same future session.
-		if (sec_byte_push && dmac_dma) begin
+		// Userspace streams CHD sector bytes via the new 0xF820 UIO sub-
+		// channel; each pulse enqueues into sec_fifo. The drain FSM in
+		// block 4b above pops from sec_rd_p and writes word-aligned bytes
+		// to chip RAM at acr via chipdma_arb's cdtv master port.
+		//
+		// No dmac_dma gate: BIOS re-arms DMA between every sector for a
+		// multi-sector READ DATA, briefly dropping dmac_dma low. If we
+		// gated push on dmac_dma, the bytes userspace streams during that
+		// gap would be silently dropped. The 8 KB FIFO absorbs the gap.
+		// Overflow protection: if FIFO is full (sec_avail == 13'h1FFF),
+		// stop accepting bytes rather than wrap and corrupt the read ptr.
+		if (sec_byte_push && (sec_avail != 13'h1FFF)) begin
 			sec_fifo[sec_wr_p] <= sec_byte_data;
 			sec_wr_p           <= sec_wr_p + 13'd1;
 		end
+
+		// Drain ack from chipdma_arb retires one byte — advance read ptr.
+		if (drain_ack_pop) sec_rd_p <= sec_rd_p + 13'd1;
 	end
 end
 

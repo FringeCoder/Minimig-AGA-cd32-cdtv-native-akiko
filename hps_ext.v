@@ -94,7 +94,31 @@ module hps_ext
 	// Drain-only, single byte per io_din[15:0]==0x62 read. 0x00 = ring empty.
 	input       [7:0] chipset_trace_din,
 	output reg        chipset_trace_rd,
-	output reg        chipset_cs_trace
+	output reg        chipset_cs_trace,
+
+	// CDTV bridge — UIO class 0xF800 = io_din[15:9] == 7'b1111100.
+	// Sub-channels share the class:
+	//   no extra bits  -> cmd byte stream (R/W cmd_in_fifo / cmd_out_fifo)  0xF800
+	//   io_din[5]=1    -> sector byte push (W-only; M2 phase-1b)            0xF820
+	//   io_din[6]=1    -> STCH inject (W-only; any write pulses stch)       0xF840
+	//   io_din[7]=1    -> trace ring drain (R-only)                         0xF880+
+	// Phase-1e adds the STCH sub-channel so userspace can fire the CDTV
+	// status-change interrupt on disc mount — the BIOS is event-driven and
+	// without this it never advances past the initial 0x81 STATUS poll.
+	// Phase-1b adds the sector-push sub-channel: userspace pushes raw CHD
+	// sector bytes via 0xF820 and the bridge's drain FSM writes them to
+	// chip RAM at acr via chipdma_arb's cdtv master port.
+	input      [15:0] cdtv_din,
+	output reg [15:0] cdtv_dout,
+	output reg        cdtv_wr,
+	output reg        cdtv_rd,
+	output reg        cdtv_cs,
+	output reg        cdtv_cs_sec,     // sector-push sub-channel (M2 phase-1b)
+	output reg        cdtv_cs_stch,    // STCH-inject sub-channel
+	output reg        cdtv_cs_trace,   // trace-drain sub-channel
+	input       [7:0] cdtv_trace_din,
+	output reg        cdtv_trace_rd,
+	input             cdtv_req         // bit 6 of status word
 );
 
 localparam UIO_MOUSE     = 'h04;
@@ -131,6 +155,8 @@ always@(posedge clk_sys) begin : main_proc
 	{akiko_rd, akiko_wr} <= 0;
 	akiko_trace_rd <= 0;
 	chipset_trace_rd <= 0;
+	{cdtv_rd, cdtv_wr} <= 0;
+	cdtv_trace_rd <= 0;
 	if((ide_rd | ide_wr) & ~&ide_addr[3:0]) ide_addr <= ide_addr + 1'd1;
 
 	if(~io_uio) begin
@@ -144,6 +170,10 @@ always@(posedge clk_sys) begin : main_proc
 		akiko_cs_nvr <= 0;
 		akiko_cs_trace <= 0;
 		chipset_cs_trace <= 0;
+		cdtv_cs <= 0;
+		cdtv_cs_sec <= 0;
+		cdtv_cs_stch <= 0;
+		cdtv_cs_trace <= 0;
 		if(cmd == 'h2D) sset <= 1;
 	end
 	else if(io_strobe) begin
@@ -154,6 +184,7 @@ always@(posedge clk_sys) begin : main_proc
 		ide_dout <= io_din;
 		cdda_dout <= io_din;
 		akiko_dout <= io_din;
+		cdtv_dout <= io_din;
 		if(byte_cnt == 1) begin
 			ide_addr     <= {io_din[8],io_din[3:0]};
 			ide_cs       <= (io_din[15:9] == 7'b1111000);
@@ -166,6 +197,15 @@ always@(posedge clk_sys) begin : main_proc
 			akiko_cs_trace  <= (io_din[15:9] == 7'b1111010) &&  io_din[7];
 			// Chipset bus trace — dedicated UIO class (drain-only, debug).
 			chipset_cs_trace <= (io_din[15:9] == 7'b1111011);
+			// CDTV bridge cmd byte stream — io_din[7]=0, io_din[6]=0, io_din[5]=0.
+			cdtv_cs          <= (io_din[15:9] == 7'b1111100) && !io_din[7] && !io_din[6] && !io_din[5];
+			// CDTV sector-push sub-channel — io_din[7]=0, io_din[6]=0, io_din[5]=1.
+			cdtv_cs_sec      <= (io_din[15:9] == 7'b1111100) && !io_din[7] && !io_din[6] &&  io_din[5];
+			// CDTV STCH inject sub-channel — io_din[7]=0, io_din[6]=1.
+			cdtv_cs_stch     <= (io_din[15:9] == 7'b1111100) && !io_din[7] &&  io_din[6];
+			// CDTV trace-ring drain sub-channel — io_din[7]=1 (mirrors
+			// akiko_cs_trace pattern). 9 bytes per entry, last byte 0x00 = ring empty.
+			cdtv_cs_trace    <= (io_din[15:9] == 7'b1111100) &&  io_din[7];
 		end
 
 		if(byte_cnt == 0) begin
@@ -177,7 +217,9 @@ always@(posedge clk_sys) begin : main_proc
 				// bit  [9] = akiko_rx_busy (Phase 18: RX engine has pending response)
 				// bit  [8] = cdda_req (legacy stock-Minimig CDDA — dormant in NATIVE_CD32)
 				// bit  [7] = akiko_nvr_dirty (NVRAM written since last clear)
-				io_dout <= {4'hE, akiko_req, akiko_sec_req, akiko_rx_busy, cdda_req, akiko_nvr_dirty, 1'b0, ide_req};
+				// bit  [6] = cdtv_req (CDTV cmd_in_fifo has data)
+				// bits [5:0] = ide_req
+				io_dout <= {4'hE, akiko_req, akiko_sec_req, akiko_rx_busy, cdda_req, akiko_nvr_dirty, cdtv_req, ide_req};
 			end
 		end else begin
 			case(cmd)
@@ -244,6 +286,12 @@ always@(posedge clk_sys) begin : main_proc
 						cdda_wr  <= cdda_cs;
 						ide_wr   <= ide_cs;
 						akiko_wr <= akiko_cs;
+						// cdtv_wr feeds the cmd-byte channel, the STCH-inject
+						// sub-channel, and the sector-push sub-channel.
+						// cdtv_hps_bridge gates its outputs with its own cs
+						// signals, so OR'ing here just routes the write strobe
+						// to whichever sub-channel is selected.
+						cdtv_wr  <= cdtv_cs | cdtv_cs_stch | cdtv_cs_sec;
 					end
 				end
 
@@ -263,6 +311,14 @@ always@(posedge clk_sys) begin : main_proc
 					if(byte_cnt >= 3 && chipset_cs_trace) begin
 						io_dout          <= {8'h00, chipset_trace_din};
 						chipset_trace_rd <= 1;
+					end
+					if(byte_cnt >= 3 && cdtv_cs) begin
+						io_dout <= cdtv_din;
+						cdtv_rd <= 1;
+					end
+					if(byte_cnt >= 3 && cdtv_cs_trace) begin
+						io_dout       <= {8'h00, cdtv_trace_din};
+						cdtv_trace_rd <= 1;
 					end
 				end
 			endcase

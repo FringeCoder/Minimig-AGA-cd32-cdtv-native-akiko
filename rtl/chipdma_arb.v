@@ -5,8 +5,13 @@
 // Sits between minimig.v's chipset DMA signals (Agnus / blitter / copper)
 // and sdram_ctrl's chipDMA port. Default forwards minimig's signals
 // through unchanged. When the chipset is not using a slot, the arbiter
-// claims it for akiko's single-byte master, runs one access, samples
-// chipRD when the read returns, and pulses akiko_dma_ack with the byte.
+// claims it for one of two single-byte masters:
+//   - akiko (CD32 native-Akiko PBX/DMA path) — same as v2
+//   - cdtv  (CDTV bridge sector DMA, M2 phase-1b)
+// Static priority: akiko > cdtv. CD32 and CDTV cores never coexist (the
+// chipset gate that enables akiko also disables cdtv_mode in cpu_wrapper),
+// so the static choice never actually arbitrates — it just keeps the
+// fallthrough deterministic.
 //
 // Clocking: this module runs on clk_sys (the 28.6 MHz Minimig system
 // clock, same domain as akiko). sdram_ctrl runs on clk_114 (4× faster).
@@ -64,6 +69,17 @@ module chipdma_arb
 	output      [7:0] akiko_dma_rbyte,
 	output            akiko_dma_ack,
 
+	// From cdtv bridge (single-byte master, M2 phase-1b sector DMA).
+	// Same protocol as akiko: req held until ack pulses. CDTV does writes
+	// only (sector bytes into chip RAM at `acr`), so rbyte is unused, but
+	// the port is symmetrical to keep the diff minimal.
+	input             cdtv_dma_req,
+	input             cdtv_dma_we,
+	input      [23:0] cdtv_dma_baddr,
+	input       [7:0] cdtv_dma_wbyte,
+	output      [7:0] cdtv_dma_rbyte,
+	output            cdtv_dma_ack,
+
 	// To sdram_ctrl chipDMA port
 	output     [24:1] chip_out_addr,
 	output            chip_out_l,
@@ -89,9 +105,15 @@ wire c_7m_rise = c_7m & ~c_7m_d;
 // fields (akiko_dma_baddr, _we, _wbyte) remain combinational into ak_*_w
 // so chip_out_addr/etc. still arrive at sdram_ctrl on the same edge.
 reg akiko_dma_req_q;
+reg cdtv_dma_req_q;
 always @(posedge clk) begin
-	if (reset) akiko_dma_req_q <= 1'b0;
-	else       akiko_dma_req_q <= akiko_dma_req;
+	if (reset) begin
+		akiko_dma_req_q <= 1'b0;
+		cdtv_dma_req_q  <= 1'b0;
+	end else begin
+		akiko_dma_req_q <= akiko_dma_req;
+		cdtv_dma_req_q  <= cdtv_dma_req;
+	end
 end
 
 // --- Slot timer: counts clk_sys cycles within the active akiko slot. ---
@@ -118,12 +140,23 @@ localparam [1:0]
 
 reg [1:0] state;
 
-// --- Output regs back to akiko ---
+// --- Output regs back to masters ---
 reg [7:0] ak_rbyte_r;
 reg       ak_ack_r;
+reg       cdtv_ack_r;
+
+// --- Which master is being serviced this slot? Latched at arm_now and
+//     held through S_DRIVE/S_ACK/S_COOLDOWN. Static priority akiko > cdtv:
+//     in practice the two never both request (different cores), so this
+//     just guarantees a deterministic pick if both were ever asserted
+//     simultaneously.
+reg active_is_cdtv;
 
 assign akiko_dma_rbyte = ak_rbyte_r;
 assign akiko_dma_ack   = ak_ack_r;
+// CDTV is write-only; rbyte tie-off keeps the port symmetrical.
+assign cdtv_dma_rbyte  = 8'h00;
+assign cdtv_dma_ack    = cdtv_ack_r;
 
 // --- Minimig idleness on this slot. Combinational from chip_in_dma /
 //     chip_in_rw (driven through gary from agnus's registered DMA
@@ -132,12 +165,22 @@ assign akiko_dma_ack   = ak_ack_r;
 wire minimig_idle = chip_in_dma & chip_in_rw;
 wire minimig_busy = ~minimig_idle;
 
+// --- pending_req: either master wants the bus. Selector picks akiko if
+//     both raise simultaneously (static priority).
+wire any_req       = akiko_dma_req_q | cdtv_dma_req_q;
+wire arming_is_cdtv = ~akiko_dma_req_q & cdtv_dma_req_q;
+
+// Live master-side inputs at the arming edge (combinational pick).
+wire        live_we     = arming_is_cdtv ? cdtv_dma_we    : akiko_dma_we;
+wire [23:0] live_baddr  = arming_is_cdtv ? cdtv_dma_baddr : akiko_dma_baddr;
+wire  [7:0] live_wbyte  = arming_is_cdtv ? cdtv_dma_wbyte : akiko_dma_wbyte;
+
 // --- arm_now: combinational claim at the c_7m_rise edge. Drives
 //     chip_out_dma=0 within the same clk_sys edge, in time for
 //     sdram_ctrl to see it ~8.7 ns later (the existing minimig path
 //     fits the same budget the same way). Gated by minimig_idle so we
 //     never preempt the chipset.
-wire arm_now = (state == S_IDLE) & c_7m_rise & minimig_idle & akiko_dma_req_q;
+wire arm_now = (state == S_IDLE) & c_7m_rise & minimig_idle & any_req;
 
 // --- arb_request: we want to be on the bus this cycle. Either we
 //     just armed combinationally, or we are mid-slot (S_DRIVE).
@@ -152,17 +195,17 @@ wire arb_request = arm_now | (state == S_DRIVE);
 wire arb_drive = arb_request & minimig_idle;
 
 // --- When arming, the latched ak_* registers are stale (they hold the
-//     PREVIOUS request). Use the live akiko_dma_* inputs combinationally
+//     PREVIOUS request). Use the live (akiko or cdtv) inputs combinationally
 //     for the arming cycle so chip_out_addr/etc. reach sdram_ctrl with
 //     the correct address on the very first cycle of the slot. After
 //     the arming edge, state==S_DRIVE and arm_now==0, so the registered
 //     ak_* values take over -- they were latched by the always block
 //     using the same NBA at the arming edge.
-wire [24:1] ak_addr_w    = arm_now ? {1'b0, akiko_dma_baddr[23:1]}      : ak_addr;
-wire        ak_l_w       = arm_now ? ~akiko_dma_baddr[0]                 : ak_l;
-wire        ak_u_w       = arm_now ?  akiko_dma_baddr[0]                 : ak_u;
-wire        ak_rw_w      = arm_now ? ~akiko_dma_we                       : ak_rw;
-wire [15:0] ak_wr_data_w = arm_now ? {akiko_dma_wbyte, akiko_dma_wbyte}  : ak_wr_data;
+wire [24:1] ak_addr_w    = arm_now ? {1'b0, live_baddr[23:1]}            : ak_addr;
+wire        ak_l_w       = arm_now ? ~live_baddr[0]                       : ak_l;
+wire        ak_u_w       = arm_now ?  live_baddr[0]                       : ak_u;
+wire        ak_rw_w      = arm_now ? ~live_we                             : ak_rw;
+wire [15:0] ak_wr_data_w = arm_now ? {live_wbyte, live_wbyte}             : ak_wr_data;
 
 assign chip_out_addr = arb_drive ? ak_addr_w    : chip_in_addr;
 assign chip_out_l    = arb_drive ? ak_l_w       : chip_in_l;
@@ -173,25 +216,29 @@ assign chip_out_wr   = arb_drive ? ak_wr_data_w : chip_in_wr;
 
 always @(posedge clk) begin
 	if (reset) begin
-		state      <= S_IDLE;
-		slot_cnt   <= 3'd0;
-		ak_ack_r   <= 1'b0;
-		ak_rbyte_r <= 8'h00;
+		state          <= S_IDLE;
+		slot_cnt       <= 3'd0;
+		ak_ack_r       <= 1'b0;
+		cdtv_ack_r     <= 1'b0;
+		ak_rbyte_r     <= 8'h00;
+		active_is_cdtv <= 1'b0;
 	end else begin
-		ak_ack_r <= 1'b0;  // ack defaults low; pulse in S_ACK
+		ak_ack_r   <= 1'b0;  // ack defaults low; pulse in S_ACK on owner only
+		cdtv_ack_r <= 1'b0;
 
 		case (state)
 		S_IDLE: begin
 			if (arm_now) begin
-				ak_addr    <= {1'b0, akiko_dma_baddr[23:1]};
-				ak_u       <= akiko_dma_baddr[0];
-				ak_l       <= ~akiko_dma_baddr[0];
-				ak_rw      <= ~akiko_dma_we;
-				ak_wr_data <= {akiko_dma_wbyte, akiko_dma_wbyte};
-				ak_we      <= akiko_dma_we;
-				ak_baddr0  <= akiko_dma_baddr[0];
-				slot_cnt   <= 3'd0;
-				state      <= S_DRIVE;
+				ak_addr        <= {1'b0, live_baddr[23:1]};
+				ak_u           <= live_baddr[0];
+				ak_l           <= ~live_baddr[0];
+				ak_rw          <= ~live_we;
+				ak_wr_data     <= {live_wbyte, live_wbyte};
+				ak_we          <= live_we;
+				ak_baddr0      <= live_baddr[0];
+				slot_cnt       <= 3'd0;
+				active_is_cdtv <= arming_is_cdtv;
+				state          <= S_DRIVE;
 			end
 		end
 
@@ -210,14 +257,16 @@ always @(posedge clk) begin
 		end
 
 		S_ACK: begin
-			ak_ack_r <= 1'b1;
-			state    <= S_COOLDOWN;
+			// Pulse ack only to the owner master.
+			if (active_is_cdtv) cdtv_ack_r <= 1'b1;
+			else                ak_ack_r   <= 1'b1;
+			state <= S_COOLDOWN;
 		end
 
 		S_COOLDOWN: begin
 			// Guarantee at least one cycle of !dma_ack between two
-			// successive akiko services so akiko.v's rx_inflight
-			// handshake (lines 522-528) sees the gap.
+			// successive master services so the master's handshake
+			// (e.g. akiko.v:522-528 rx_inflight) sees the gap.
 			state <= S_IDLE;
 		end
 		endcase

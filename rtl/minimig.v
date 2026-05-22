@@ -281,6 +281,15 @@ module minimig
 	input         cdtv_scor_pulse,
 	input         cdtv_sbcp_pulse,
 
+	// CDTV chip-RAM master DMA — M2 phase-1b. Routed to chipdma_arb's
+	// cdtv master port in Minimig.sv. Bridge drives req/we/baddr/wbyte;
+	// arbiter pulses ack once the byte has been written to chip RAM.
+	output        cdtv_dma_req,
+	output        cdtv_dma_we,
+	output [23:0] cdtv_dma_baddr,
+	output  [7:0] cdtv_dma_wbyte,
+	input         cdtv_dma_ack,
+
 	// CDTV NVRAM HPS ports — load via hps_io.ioctl_download (canonical),
 	// save via UIO drain (TBD).
 	input  [13:0] cdtv_nvr_load_addr,
@@ -1021,6 +1030,12 @@ cdtv_bridge cdtv_bridge_inst
 	.sten_pulse_ext  (cdtv_sten_pulse      ),
 	.scor_pulse      (cdtv_scor_pulse      ),
 	.sbcp_pulse      (cdtv_sbcp_pulse      ),
+
+	.cdtv_dma_req    (cdtv_dma_req         ),
+	.cdtv_dma_we     (cdtv_dma_we          ),
+	.cdtv_dma_baddr  (cdtv_dma_baddr       ),
+	.cdtv_dma_wbyte  (cdtv_dma_wbyte       ),
+	.cdtv_dma_ack    (cdtv_dma_ack         ),
 
 	.trace_we        (cdtv_trace_we        ),
 	.trace_data      (cdtv_trace_data      )
