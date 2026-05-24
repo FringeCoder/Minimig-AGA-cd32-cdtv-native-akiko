@@ -157,6 +157,36 @@ reg        ak_baddr0;   // byte selector for read demux
 reg        ak_is_ddr;
 reg [28:1] ak_ddr_addr;
 
+// --- Phase B v2: registered DDR3 bus driven from clk_sys to ddram_ctrl
+//     (clk_114). All six lines latched at arm_now and held until the
+//     synchronized ack returns. This makes the data lines stable for many
+//     clk_114 cycles before ddram_ctrl's sync_CS-rise edge — no need to
+//     close cross-domain timing on them; SDC false_path's them. dmaCS is
+//     the only signal that must be synchronized (2-FF chain inside
+//     ddram_ctrl).
+reg        dma_ddr_cs_r;
+reg [28:1] dma_ddr_addr_r;
+reg        dma_ddr_l_r;
+reg        dma_ddr_u_r;
+reg [15:0] dma_ddr_wr_r;
+
+// --- Phase B v2: 2-FF synchronizer on the LEVEL ddr_in_ack from
+//     ddram_ctrl (clk_114). ddr_in_ack goes high when DDR3 commits the
+//     write and stays high until we drop dma_ddr_cs_r — long enough that
+//     a 2-FF chain always catches the transition cleanly.
+reg ddr_in_ack_sync1;
+reg ddr_in_ack_sync2;
+always @(posedge clk) begin
+    if (reset) begin
+        ddr_in_ack_sync1 <= 1'b0;
+        ddr_in_ack_sync2 <= 1'b0;
+    end else begin
+        ddr_in_ack_sync1 <= ddr_in_ack;
+        ddr_in_ack_sync2 <= ddr_in_ack_sync1;
+    end
+end
+wire ddr_ack_safe = ddr_in_ack_sync2;
+
 // --- State ---
 localparam [1:0]
 	S_IDLE     = 2'd0,
@@ -266,13 +296,16 @@ memory_router u_router
 );
 
 // During arm_now use the live router output; after that, use registered.
+// is_ddr_now still needs the live path so the chip-vs-DDR mux below
+// switches in time for the SDRAM same-edge sample. arb_drive_ddr is
+// supplied by the registered dma_ddr_cs_r below (no clk_sys → SDRAM
+// timing dependency, so combinational is unnecessary).
 wire        is_ddr_now   = arm_now ? router_zram_sel : ak_is_ddr;
-wire [28:1] ddr_addr_w   = arm_now ? router_ramaddr  : ak_ddr_addr;
 
-// SDRAM (ram1) override only fires when the slot routes to ram1.
+// SDRAM (ram1) override only fires when the slot routes to ram1. This
+// path keeps the original combinational shape because sdram_ctrl samples
+// on the same clk_sys edge as arm_now (8.7 ns budget).
 wire arb_drive_chip = arb_drive & ~is_ddr_now;
-// DDR (ram2) override fires when the slot routes to ram2.
-wire arb_drive_ddr  = arb_drive &  is_ddr_now;
 
 assign chip_out_addr = arb_drive_chip ? ak_addr_w    : chip_in_addr;
 assign chip_out_l    = arb_drive_chip ? ak_l_w       : chip_in_l;
@@ -281,17 +314,16 @@ assign chip_out_rw   = arb_drive_chip ? ak_rw_w      : chip_in_rw;
 assign chip_out_dma  = arb_drive_chip ? 1'b0         : chip_in_dma;
 assign chip_out_wr   = arb_drive_chip ? ak_wr_data_w : chip_in_wr;
 
-// DDR DMA bus. ddr_out_cs is held high for the whole slot; ddram_ctrl
-// latches on the rising edge and pulses ddr_in_ack when the DDR3 commit
-// is taken. Bridge is write-only into Z2/Z3 today, so ddr_out_we is
-// always 1 here — if we ever need DDR reads from the bridge, we'd
-// extend ddram_ctrl's DMA port instead of touching this gate.
-assign ddr_out_cs   = arb_drive_ddr;
-assign ddr_out_addr = ddr_addr_w;
-assign ddr_out_l    = ak_l_w;
-assign ddr_out_u    = ak_u_w;
+// Phase B v2: DDR DMA bus is REGISTERED in chipdma_arb. Data lines stay
+// stable from arm_now until the synchronized ack returns and we drop CS,
+// so ddram_ctrl can sample them safely after its 2-FF dmaCS sync edge.
+// ddr_out_we is hard-wired 1 today (bridge writes only into Z2/Z3).
+assign ddr_out_cs   = dma_ddr_cs_r;
+assign ddr_out_addr = dma_ddr_addr_r;
+assign ddr_out_l    = dma_ddr_l_r;
+assign ddr_out_u    = dma_ddr_u_r;
 assign ddr_out_we   = 1'b1;
-assign ddr_out_wr   = ak_wr_data_w;
+assign ddr_out_wr   = dma_ddr_wr_r;
 
 always @(posedge clk) begin
 	if (reset) begin
@@ -302,6 +334,7 @@ always @(posedge clk) begin
 		ak_rbyte_r     <= 8'h00;
 		active_is_cdtv <= 1'b0;
 		ak_is_ddr      <= 1'b0;
+		dma_ddr_cs_r   <= 1'b0;
 	end else begin
 		ak_ack_r   <= 1'b0;  // ack defaults low; pulse in S_ACK on owner only
 		cdtv_ack_r <= 1'b0;
@@ -320,18 +353,29 @@ always @(posedge clk) begin
 				ak_ddr_addr    <= router_ramaddr;
 				slot_cnt       <= 3'd0;
 				active_is_cdtv <= arming_is_cdtv;
+				// Phase B v2: when this slot routes to DDR, latch the
+				// full DDR bus on the same arm_now edge. Data is held
+				// stable from here until S_ACK clears dma_ddr_cs_r.
+				if (router_zram_sel) begin
+					dma_ddr_cs_r   <= 1'b1;
+					dma_ddr_addr_r <= router_ramaddr;
+					dma_ddr_l_r    <= ~live_baddr[0];
+					dma_ddr_u_r    <=  live_baddr[0];
+					dma_ddr_wr_r   <= {live_wbyte, live_wbyte};
+				end
 				state          <= S_DRIVE;
 			end
 		end
 
 		S_DRIVE: begin
 			if (ak_is_ddr) begin
-				// Phase B: routing to ram2 (DDR3). ddr_out_cs is held
-				// high by combinational logic above; ddram_ctrl pulses
-				// ddr_in_ack when the DDR commit is taken. No slot_cnt
-				// timing — DDR has its own write FSM that pulses ack
-				// whenever DDRAM_BUSY allows.
-				if (ddr_in_ack) state <= S_ACK;
+				// Phase B v2: routing to ram2 (DDR3). dma_ddr_cs_r is
+				// REGISTERED high; ddram_ctrl synchronizes it through a
+				// 2-FF chain in the clk_114 domain, edge-detects the
+				// rise, and latches our (already-stable) data into its
+				// own write buffer. ddr_in_ack comes back as a level
+				// signal which we sample through ddr_in_ack_sync2.
+				if (ddr_ack_safe) state <= S_ACK;
 			end else begin
 				slot_cnt <= slot_cnt + 3'd1;
 				// Sample chipRD at slot_cnt==3 (4 clk_sys cycles after
@@ -351,13 +395,19 @@ always @(posedge clk) begin
 			// Pulse ack only to the owner master.
 			if (active_is_cdtv) cdtv_ack_r <= 1'b1;
 			else                ak_ack_r   <= 1'b1;
+			// Drop the registered CS — ddram_ctrl's dmaCS_sync chain
+			// will see the falling edge a few clk_114 cycles later and
+			// release dmaACK so the next request can latch.
+			dma_ddr_cs_r <= 1'b0;
 			state <= S_COOLDOWN;
 		end
 
 		S_COOLDOWN: begin
 			// Guarantee at least one cycle of !dma_ack between two
 			// successive master services so the master's handshake
-			// (e.g. akiko.v:522-528 rx_inflight) sees the gap.
+			// (e.g. akiko.v:522-528 rx_inflight) sees the gap. Also
+			// gives the dmaACK sync chain (in chipdma_arb) time to
+			// settle low before the next arm_now.
 			state <= S_IDLE;
 		end
 		endcase

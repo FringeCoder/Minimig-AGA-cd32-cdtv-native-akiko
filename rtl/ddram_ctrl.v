@@ -152,14 +152,37 @@ end
 assign ramready = cache_hit || write_ena;
 
 // -------------------------------------------------------------------------
-// Phase B: bridge DMA write buffer + ack handshake.
+// Phase B v2: bridge DMA write buffer + ack handshake with proper CDC.
 //
-// chipdma_arb asserts dmaCS for the duration of a write request and holds
-// dmaAddr/dmaWR/dmaL/dmaU stable. We latch into our own buffer, raise
-// dma_write_req for the DDR FSM, and pulse dmaACK when the DDR commit
-// happens. The cache snoop fires for one cycle on latch — cpu_cache_new
-// will update any cached line covering this address with the new data.
+// chipdma_arb runs on clk_sys (28.4 MHz); we run on sysclk = clk_114
+// (113.5 MHz). dmaCS / dmaAddr / dmaWR / dmaL / dmaU all come from
+// REGISTERED outputs in chipdma_arb that stay stable for the entire
+// request (arm_now → S_ACK). We synchronize dmaCS through a 2-FF chain,
+// detect the rising edge in our domain, and on that edge latch the data
+// (which has been valid for many sysclk cycles by then). SDC false_paths
+// the data lines so Quartus is free to place them wherever it wants.
+//
+// After committing the DDR write, dmaACK_r goes high and STAYS high
+// until chipdma_arb drops dmaCS — chipdma_arb's own 2-FF sync on dmaACK
+// gives it time to latch the level safely. We release dmaACK when our
+// synchronized view of dmaCS goes low.
 // -------------------------------------------------------------------------
+reg dmaCS_sync1;
+reg dmaCS_sync2;
+reg dmaCS_sync3;
+always @ (posedge sysclk) begin
+	if (~reset_n) begin
+		dmaCS_sync1 <= 0;
+		dmaCS_sync2 <= 0;
+		dmaCS_sync3 <= 0;
+	end else begin
+		dmaCS_sync1 <= dmaCS;
+		dmaCS_sync2 <= dmaCS_sync1;
+		dmaCS_sync3 <= dmaCS_sync2;
+	end
+end
+wire dmaCS_rise = dmaCS_sync2 & ~dmaCS_sync3;
+
 reg        dma_write_req;
 reg        dma_write_ack;
 reg [28:1] dmaWriteAddr;
@@ -176,28 +199,33 @@ always @ (posedge sysclk) begin
 		dma_write_req <= 0;
 		dmaACK_r      <= 0;
 	end else begin
-		// Latch a new request when bridge raises CS and we are idle.
-		if (dmaCS & dmaWE & ~dma_write_req & ~dmaACK_r) begin
+		// Latch a new request on the synchronized CS rising edge.
+		// Data has been stable in chipdma_arb's registers since arm_now,
+		// many sysclk cycles ago, so sampling here is safe regardless of
+		// where Quartus placed the data lines.
+		if (dmaCS_rise & dmaWE & ~dma_write_req & ~dmaACK_r) begin
 			dmaWriteAddr  <= dmaAddr;
 			dmaWriteDat   <= dmaWR;
 			dmaWriteBE    <= ~{dmaU, dmaL};
 			dma_write_req <= 1'b1;
 			// Snoop pulse — same data going to DDR. cpu_cache_new will
-			// update any cached line.
+			// update any cached line covering this address with the new
+			// value (write-through coherency).
 			dma_snoop_act <= 1'b1;
 			dma_snoop_adr <= dmaAddr;
 			dma_snoop_dat <= dmaWR;
 			dma_snoop_bs  <= ~{dmaU, dmaL};
 		end
 
-		// DDR FSM has committed the write — clear req, pulse ack to bridge.
+		// DDR FSM has committed the write — clear req, raise ack to bridge.
 		if (dma_write_ack) begin
 			dma_write_req <= 1'b0;
 			dmaACK_r      <= 1'b1;
 		end
 
-		// Bridge dropped CS — release ack so the next request can latch.
-		if (~dmaCS) dmaACK_r <= 1'b0;
+		// Bridge dropped its CS (seen via the sync chain) — release ack
+		// so the next request can latch on the next dmaCS_rise.
+		if (~dmaCS_sync2) dmaACK_r <= 1'b0;
 	end
 end
 
