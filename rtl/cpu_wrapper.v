@@ -175,8 +175,13 @@ memory_router u_memory_router
 // 2026-05-27 Z2-hang instrumentation. Captures the CPU view of every
 // fast-RAM access through memory_router, plus AC-done sentinels and
 // stall conditions. Userspace drains via UIO class 0xFA00.
-z2_trace u_z2_trace
-(
+//
+// Build-time gate: instantiated only when Z2_TRACE_BUILD is defined
+// (build_minimig.ps1 -Z2Trace). Release builds omit it entirely so the
+// 4 KB M10K ring + capture logic cost zero ALMs. CAPTURE_ENABLE then lets
+// an investigation build keep the ring but disable capture.
+`ifdef Z2_TRACE_BUILD
+z2_trace #(.CAPTURE_ENABLE(1)) u_z2_trace(
 	.clk           (clk           ),
 	.reset         (~reset        ),
 	.ramsel        (ramsel        ),
@@ -203,6 +208,9 @@ z2_trace u_z2_trace
 	.uio_rd        (z2_trace_rd   ),
 	.uio_dout      (z2_trace_dout )
 );
+`else
+assign z2_trace_dout = 8'h00;
+`endif
 
 // we route everything hrtmon related through cart.v (needs a couple of signals to
 // decide what to do, would not be good style to replicate that here).

@@ -22,8 +22,7 @@
 //   byte 6 : 0xA5  (sentinel for sanity)
 //   byte 7 : 0xFF if entry valid, 0x00 if ring empty (signals userspace to stop)
 
-module akiko_ddr_peek
-(
+module akiko_ddr_peek #(parameter CAPTURE_ENABLE = 1)(
 	input             clk,
 	input             reset,
 
@@ -59,7 +58,7 @@ wire dma_event = dma_cs & dma_we;
 always @(posedge clk) begin
 	dma_event_d <= dma_event;
 
-	if (dma_event & ~dma_event_d) begin
+	if (CAPTURE_ENABLE && (dma_event & ~dma_event_d)) begin
 		ring[wr_ptr] <= {2'b00, dma_u, dma_l, dma_addr, dma_wr};
 		wr_ptr       <= wr_ptr + 1'b1;
 	end

@@ -745,8 +745,9 @@ wire       akiko_cs_peek;
 wire       akiko_peek_rd;
 wire [7:0] akiko_peek_din;
 
-akiko_ddr_peek akiko_ddr_peek_inst
-(
+// Build-time gate (see cpu_wrapper.v z2_trace note). Z2_TRACE_BUILD only.
+`ifdef Z2_TRACE_BUILD
+akiko_ddr_peek #(.CAPTURE_ENABLE(1)) akiko_ddr_peek_inst(
 	.clk         (clk_sys        ),
 	.reset       (reset_d        ),
 	.dma_cs      (dma_ddr_cs_w   ),
@@ -759,6 +760,9 @@ akiko_ddr_peek akiko_ddr_peek_inst
 	.uio_rd      (akiko_peek_rd  ),
 	.uio_dout    (akiko_peek_din )
 );
+`else
+assign akiko_peek_din = 8'h00;
+`endif
 
 // Phase B: AC-state exported from cpu_wrapper, fanout to chipdma_arb's
 // memory_router so bridge DMA picks the same ram1-vs-ram2 routing the CPU
