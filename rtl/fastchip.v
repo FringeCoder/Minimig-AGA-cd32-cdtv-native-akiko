@@ -286,7 +286,11 @@ gayle gayle
 	.led(ide_led)
 );
 
-wire        sel_rtg = sel && (addr[23:12] == 'hB80);
+// RTG decode ($B80xxx) overlaps the Akiko window ($B800xx) and dout ORs
+// rtg_dout in (line 123), corrupting Akiko register reads — e.g. the ID at
+// $B80000 (0xC0CA) reads back as RTG garbage, breaking the CD32 BIOS poll.
+// Gate sel_rtg with !sel_akiko so Akiko owns $B800xx; RTG keeps $B801xx+.
+wire        sel_rtg = sel && !sel_akiko && (addr[23:12] == 'hB80);
 wire [15:0] rtg_dout;
 wire        rtg_ready;
 

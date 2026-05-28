@@ -20,6 +20,10 @@ module cpu_cache_new
   input             clk,            // clock
   input             rst,            // cache reset
   input       [3:0] cpu_cache_ctrl, // CPU cache control
+  // 2026-05-27 D-cache software toggle (TG68K CACR bit 8). Gates dtag
+  // matches independently of cpu_cache_ctrl[0]. Defaults '1' if upstream
+  // doesn't drive it, preserving current behavior. See module top doc.
+  input             dcache_sw_en,
   input             cache_inhibit,  // cache inhibit
 
   // cpu    
@@ -89,6 +93,9 @@ reg   [1:0] cc_clr_r;
 wire        cpu_cache_enable;
 wire        cpu_cache_clear;
 reg         cc_en;
+// 2026-05-27: cc_den gates D-cache hits + writes. = cc_en AND dcache_sw_en.
+// Sampled alongside cc_en so they update in lockstep at cache enable edges.
+reg         cc_den;
 reg         cc_clr;
 // cpu address
 wire  [1:0] cpu_adr_blk;
@@ -220,14 +227,16 @@ assign cpu_cache_clear  = cc_clr_r[0] && !cc_clr_r[1];
 always @ (posedge clk) begin
 	if (rst) begin
 		cc_en  <= 1'b0;
+		cc_den <= 1'b0;
 		//cc_fr  <= 1'b0;
 		cc_clr <= 1'b0;
 	end else if (!cpu_cs) begin
 		cc_en  <= cpu_cache_enable;
+		cc_den <= cpu_cache_enable & dcache_sw_en;
 		//cc_fr  <= cpu_cache_freeze;
 		cc_clr <= cpu_cache_clear;
 	end
-end 
+end
 
 // slice up cpu address
 assign cpu_adr_blk = cpu_adr[2:1];    // cache block address (inside cache row), 2 bits for 4x16 rows
@@ -292,8 +301,9 @@ always @ (posedge clk) begin
         cpu_sm_mem_dat_w <= cpu_dat_w;
         cpu_sm_iram0_we <= itag0_match && itag0_valid /*&& !cc_fr*/;
         cpu_sm_iram1_we <= itag1_match && itag1_valid /*&& !cc_fr*/;
-        cpu_sm_dram0_we <= dtag0_match && dtag0_valid /*&& !cc_fr*/;
-        cpu_sm_dram1_we <= dtag1_match && dtag1_valid /*&& !cc_fr*/;
+        // 2026-05-27: skip D-cache writes when SW has disabled D-cache.
+        cpu_sm_dram0_we <= dtag0_match && dtag0_valid && cc_den /*&& !cc_fr*/;
+        cpu_sm_dram1_we <= dtag1_match && dtag1_valid && cc_den /*&& !cc_fr*/;
         cpu_sm_state <= CPU_SM_WB;
         wb_en <= 1'b1;
         if (!cpu_cs) cpu_sm_state <= CPU_SM_IDLE;
@@ -318,15 +328,15 @@ always @ (posedge clk) begin
           cpu_sm_itag_we <= 1'b1;
           cpu_sm_tag_dat_w <= {1'b1, itram_cpu_dat_r[38:0]};
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cc_en && dtag0_match && dtag0_valid) begin
-          // data is already in data cache way 0
+        end else if (cc_den && dtag0_match && dtag0_valid) begin
+          // data is already in data cache way 0 (gated by D-cache SW enable)
           cpu_dat_r <= ddram0_cpu_dat_r;
           cpu_ack <= 1'b1;
           cpu_sm_dtag_we <= 1'b1;
           cpu_sm_tag_dat_w <= {1'b0, dtram_cpu_dat_r[38:0]};
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cc_en && dtag1_match && dtag1_valid) begin
-          // data is already in data cache way 1
+        end else if (cc_den && dtag1_match && dtag1_valid) begin
+          // data is already in data cache way 1 (gated by D-cache SW enable)
           cpu_dat_r <= ddram1_cpu_dat_r;
           cpu_ack <= 1'b1;
           cpu_sm_dtag_we <= 1'b1;
@@ -351,10 +361,11 @@ always @ (posedge clk) begin
           // read data to cpu
           cpu_dat_r <= sdr_dat_r;
           cpu_ack <= 1'b1;
-          if (cache_inhibit) begin
-            // don't update cache if caching is inhibited
+          if (cache_inhibit || (!cpu_ir && !cc_den)) begin
+            // don't update cache if caching is inhibited; also bypass
+            // D-cache fill when SW has disabled D-cache (2026-05-27).
             cpu_sm_state <= CPU_SM_FILLW;
-          end else begin      
+          end else begin
             // update tag ram
             if (cpu_ir) begin
               if (itag_lru) begin
@@ -498,11 +509,13 @@ always @ (posedge clk) begin
 		end
       SDR_SM_SNOOP : begin
         // update if a matching address is in cache
+        // 2026-05-27: gate D-cache snoop writes with cc_den so a disabled
+        // D-cache stays cold (no stale lines to flush when re-enabled).
         sdr_sm_mem_dat_w <= snoop_dat_w;
         sdr_sm_iram0_we <= sdr_itag0_match && sdr_itag0_valid;
         sdr_sm_iram1_we <= sdr_itag1_match && sdr_itag1_valid;
-        sdr_sm_dram0_we <= sdr_dtag0_match && sdr_dtag0_valid;
-        sdr_sm_dram1_we <= sdr_dtag1_match && sdr_dtag1_valid;
+        sdr_sm_dram0_we <= sdr_dtag0_match && sdr_dtag0_valid && cc_den;
+        sdr_sm_dram1_we <= sdr_dtag1_match && sdr_dtag1_valid && cc_den;
         sdr_sm_state <= SDR_SM_IDLE;
       end
     endcase

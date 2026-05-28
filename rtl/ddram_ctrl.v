@@ -29,6 +29,9 @@ module ddram_ctrl
 	input             cache_rst,
 	input             cache_inhibit,
 	input       [3:0] cpu_cache_ctrl,
+	// 2026-05-27 D-cache software toggle: gates dtag matches independently
+	// of cpu_cache_ctrl[0]. See cpu_cache_new.cc_den.
+	input             dcache_sw_en,
 
 	// DDR3    
 	output            DDRAM_CLK,
@@ -53,17 +56,22 @@ module ddram_ctrl
 	input             ramshared,
 	output            ramready,
 
-	// Phase B: bridge (Akiko / CDTV) DMA write port. Single-byte writes
-	// arrive as 16-bit word + UDS/LDS so the same address mapping the CPU
-	// uses (in cpu_wrapper.v) routes them to the right DDR3 row. dmaCS
-	// is held high until dmaACK pulses; one write per CS edge.
-	// dmaWE is hardwired 1 today (bridge is write-only into Z2/Z3).
+	// Phase B: bridge (Akiko / CDTV) DMA port. Single-byte transfers arrive
+	// as 16-bit word + UDS/LDS so the same address mapping the CPU uses
+	// (in cpu_wrapper.v) routes them to the right DDR3 row. dmaCS is held
+	// high until dmaACK pulses; one transfer per CS edge.
+	// 2026-05-27 z2-read-fix: dmaWE is no longer hardwired 1 at chipdma_arb.
+	// dmaWE=1 → write (PBX sector data into Z2/Z3); dmaWE=0 → read
+	// (Akiko TX command fetch from Z2/Z3, returned via dmaRD). Without the
+	// read path the CD32 BIOS hangs when it allocates the Akiko CMD block
+	// in Z2 (largest free pool) — TX reads silently dropped.
 	input      [28:1] dmaAddr,
 	input             dmaCS,
 	input             dmaWE,
 	input             dmaL,
 	input             dmaU,
 	input      [15:0] dmaWR,
+	output reg [15:0] dmaRD,
 	output            dmaACK
 );
 
@@ -88,6 +96,7 @@ cpu_cache_new cpu_cache
 	.clk              (sysclk),                 // clock
 	.rst              (~reset_n | ~cache_rst),  // cache reset
 	.cpu_cache_ctrl   (cpu_cache_ctrl),         // CPU cache control
+	.dcache_sw_en     (dcache_sw_en),           // D-cache software toggle
 	.cache_inhibit    (cache_inhibit | ramshared), // cache inhibit
 	.cpu_cs           (ramsel),                 // cpu activity
 	.cpu_adr          (cpuAddr),                // cpu address
@@ -190,6 +199,16 @@ reg [15:0] dmaWriteDat;
 reg  [1:0] dmaWriteBE;
 reg        dmaACK_r;
 
+// 2026-05-27 z2-read-fix: bridge READ request bookkeeping. Mirrors
+// dma_write_req/_ack but with no snoop pulse (reads don't change cache
+// contents). The captured 16-bit word at dma_read_done time is registered
+// in dmaRD and returned to chipdma_arb.
+reg        dma_read_req;
+reg        dma_read_ack;
+reg [28:1] dmaReadAddr;
+reg  [1:0] dmaReadBA;       // word selector inside the 64-bit DDR beat
+reg        dma_read_in_flight; // 1 = DDR read issued, waiting for DOUT_READY
+
 assign dmaACK = dmaACK_r;
 
 always @ (posedge sysclk) begin
@@ -197,30 +216,45 @@ always @ (posedge sysclk) begin
 
 	if (~reset_n) begin
 		dma_write_req <= 0;
+		dma_read_req  <= 0;
 		dmaACK_r      <= 0;
 	end else begin
 		// Latch a new request on the synchronized CS rising edge.
 		// Data has been stable in chipdma_arb's registers since arm_now,
 		// many sysclk cycles ago, so sampling here is safe regardless of
 		// where Quartus placed the data lines.
-		if (dmaCS_rise & dmaWE & ~dma_write_req & ~dmaACK_r) begin
+		// 2026-05-27 z2-read-fix: split write vs read paths on the same
+		// latching edge. dmaWE is the latched (and stable) WE bit.
+		if (dmaCS_rise & ~dma_write_req & ~dma_read_req & ~dmaACK_r) begin
+			if (dmaWE) begin
 			dmaWriteAddr  <= dmaAddr;
 			dmaWriteDat   <= dmaWR;
 			dmaWriteBE    <= ~{dmaU, dmaL};
 			dma_write_req <= 1'b1;
-			// Snoop pulse — same data going to DDR. cpu_cache_new will
-			// update any cached line covering this address with the new
-			// value (write-through coherency).
+				// Snoop pulse — same data going to DDR. cpu_cache_new
+				// will update any cached line covering this address
+				// with the new value (write-through coherency).
 			dma_snoop_act <= 1'b1;
 			dma_snoop_adr <= dmaAddr;
 			dma_snoop_dat <= dmaWR;
 			dma_snoop_bs  <= ~{dmaU, dmaL};
+			end else begin
+				dmaReadAddr  <= dmaAddr;
+				dma_read_req <= 1'b1;
+			end
 		end
 
 		// DDR FSM has committed the write — clear req, raise ack to bridge.
 		if (dma_write_ack) begin
 			dma_write_req <= 1'b0;
 			dmaACK_r      <= 1'b1;
+		end
+
+		// DDR FSM has captured the read word into dmaRD — clear req,
+		// raise ack to bridge so chipdma_arb's S_DRIVE samples dmaRD.
+		if (dma_read_ack) begin
+			dma_read_req <= 1'b0;
+			dmaACK_r     <= 1'b1;
 		end
 
 		// Bridge dropped its CS (seen via the sync chain) — release ack
@@ -252,6 +286,8 @@ always @ (posedge sysclk) begin
 		state         <= 0;
 		write_ack     <= 0;
 		dma_write_ack <= 0;
+		dma_read_ack       <= 0;
+		dma_read_in_flight <= 0;
 	end
 	else begin
 		case(state)
@@ -267,6 +303,19 @@ always @ (posedge sysclk) begin
 						DDRAM_DIN     <= {dmaWriteDat,dmaWriteDat,dmaWriteDat,dmaWriteDat};
 						DDRAM_WE      <= 1;
 						dma_write_ack <= 1;
+					end
+					// 2026-05-27 z2-read-fix: bridge DMA read shares the
+					// state-1 read-return shape used by CPU cache fills.
+					// Priority below dma_write so a write already in flight
+					// completes first; above CPU write/cache to keep bridge
+					// latency low (BIOS waits synchronously for this).
+					else if(~dma_read_ack & dma_read_req & ~dma_read_in_flight) begin
+						DDRAM_ADDR         <= {3'b001, dmaReadAddr[28:3]};
+						DDRAM_BE           <= 8'hFF;
+						DDRAM_RD           <= 1;
+						dmaReadBA          <= dmaReadAddr[2:1];
+						dma_read_in_flight <= 1;
+						state              <= 1;
 					end
 					else if(~write_ack & write_req) begin
 						DDRAM_ADDR <= {3'b001, writeAddr[28:3]};
@@ -285,11 +334,22 @@ always @ (posedge sysclk) begin
 					end
 				end
 			1: if(~DDRAM_BUSY & DDRAM_DOUT_READY) begin
+					// 2026-05-27 z2-read-fix: distinguish bridge-DMA read
+					// (single 16-bit word, no cache_fill) from CPU cache
+					// fill (4-beat burst into cpu_cache_new). dma_read_in_flight
+					// was set at state-0 issue time for DMA reads.
+					if (dma_read_in_flight) begin
+						dmaRD              <= DDRAM_DOUT[{dmaReadBA, 4'b0000} +:16];
+						dma_read_ack       <= 1;
+						dma_read_in_flight <= 0;
+						state              <= 0;
+					end else begin
 					ddr_data      <= DDRAM_DOUT[{ba, 4'b0000} +:16];
 					dout          <= DDRAM_DOUT;
 					cache_fill    <= 1;
 					ba            <= ba + 1'd1;
 					state         <= state + 1'd1;
+				end
 				end
 			2,3: begin
 					cache_fill    <= 1;
@@ -304,6 +364,7 @@ always @ (posedge sysclk) begin
 
 		if(~write_req) write_ack <= 0;
 		if(~dma_write_req) dma_write_ack <= 0;
+		if(~dma_read_req)  dma_read_ack  <= 0;
 	end
 end
 

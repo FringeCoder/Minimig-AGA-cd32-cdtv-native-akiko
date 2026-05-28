@@ -718,7 +718,46 @@ cpu_wrapper cpu_wrapper
 	.z3ram_base0_out (z3ram_base0_w   ),
 	.z3ram_ena0_out  (z3ram_ena0_w    ),
 	.z3ram_base1_out (z3ram_base1_w   ),
-	.z3ram_ena1_out  (z3ram_ena1_w    )
+	.z3ram_ena1_out  (z3ram_ena1_w    ),
+	// 2026-05-27 D-cache software toggle from TG68K CACR bit 8.
+	.dcache_sw_en    (dcache_sw_en_w  ),
+
+	// 2026-05-27 Z2-hang trace ring drain. Wires connect via hps_ext's
+	// .* implicit port: z2_cs_trace, z2_trace_rd, z2_trace_din.
+	.z2_trace_cs     (z2_cs_trace     ),
+	.z2_trace_rd     (z2_trace_rd     ),
+	.z2_trace_dout   (z2_trace_din    )
+);
+
+wire dcache_sw_en_w;
+
+// 2026-05-27 Z2-hang trace ring drain wiring (UIO class 0xFA00).
+// hps_ext.v drives z2_cs_trace + z2_trace_rd (output reg), reads
+// z2_trace_din (input [7:0]). cpu_wrapper.v drives the byte stream.
+wire       z2_cs_trace;
+wire       z2_trace_rd;
+wire [7:0] z2_trace_din;
+
+// 2026-05-28 DDR peek sub-channel (UIO class 0xF420, io_din[5]=1 in 0xF400
+// class). Wired into hps_ext via .* -- names must match akiko_cs_peek /
+// akiko_peek_rd / akiko_peek_din. Snoops bridge writes to ram2.
+wire       akiko_cs_peek;
+wire       akiko_peek_rd;
+wire [7:0] akiko_peek_din;
+
+akiko_ddr_peek akiko_ddr_peek_inst
+(
+	.clk         (clk_sys        ),
+	.reset       (reset_d        ),
+	.dma_cs      (dma_ddr_cs_w   ),
+	.dma_we      (dma_ddr_we_w   ),
+	.dma_addr    (dma_ddr_addr_w ),
+	.dma_l       (dma_ddr_l_w    ),
+	.dma_u       (dma_ddr_u_w    ),
+	.dma_wr      (dma_ddr_wr_w   ),
+	.uio_cs_peek (akiko_cs_peek  ),
+	.uio_rd      (akiko_peek_rd  ),
+	.uio_dout    (akiko_peek_din )
 );
 
 // Phase B: AC-state exported from cpu_wrapper, fanout to chipdma_arb's
@@ -740,6 +779,11 @@ wire        dma_ddr_we_w;
 wire        dma_ddr_cs_w;
 wire [15:0] dma_ddr_wr_w;
 wire        dma_ddr_ack_w;
+// 2026-05-27 z2-read-fix: bridge DMA read return path. ddram_ctrl latches
+// the 16-bit word into dma_ddr_rd_w at the same instant it raises
+// dma_ddr_ack_w on a read; chipdma_arb's S_DRIVE samples it under
+// ddr_ack_safe (2-FF sync ensures data has stabilized).
+wire [15:0] dma_ddr_rd_w;
 
 wire [15:0] ram_dout1;
 wire        ram_ready1;
@@ -752,6 +796,7 @@ sdram_ctrl ram1
 
 	.cache_rst    (cpu_rst         ),
 	.cpu_cache_ctrl(cpu_cacr       ),
+	.dcache_sw_en (dcache_sw_en_w  ),
 
 	.sd_data      (SDRAM_DQ        ),
 	.sd_addr      (SDRAM_A         ),
@@ -841,7 +886,8 @@ chipdma_arb chipdma_arb
 	.ddr_out_we      (dma_ddr_we_w         ),
 	.ddr_out_cs      (dma_ddr_cs_w         ),
 	.ddr_out_wr      (dma_ddr_wr_w         ),
-	.ddr_in_ack      (dma_ddr_ack_w        )
+	.ddr_in_ack      (dma_ddr_ack_w        ),
+	.ddr_in_rd       (dma_ddr_rd_w         )
 );
 
 wire [15:0] ram_dout2;
@@ -855,6 +901,7 @@ ddram_ctrl ram2
 
 	.cache_rst    (cpu_rst         ),
 	.cpu_cache_ctrl(cpu_cacr       ),
+	.dcache_sw_en (dcache_sw_en_w  ),
 
 	.DDRAM_CLK    (DDRAM_CLK       ),
 	.DDRAM_BUSY   (DDRAM_BUSY      ),
@@ -877,13 +924,16 @@ ddram_ctrl ram2
 	.ramshared    (ramshared       ),
 	.ramready     (ram_ready2      ),
 
-	// Phase B: bridge (Akiko/CDTV) DMA write port — see chipdma_arb.
+	// Phase B: bridge (Akiko/CDTV) DMA port — see chipdma_arb.
+	// 2026-05-27 z2-read-fix: dmaRD carries the read-return word so the
+	// bridge can satisfy Akiko's TX command fetches from Z2/Z3.
 	.dmaAddr      (dma_ddr_addr_w  ),
 	.dmaCS        (dma_ddr_cs_w    ),
 	.dmaWE        (dma_ddr_we_w    ),
 	.dmaL         (dma_ddr_l_w     ),
 	.dmaU         (dma_ddr_u_w     ),
 	.dmaWR        (dma_ddr_wr_w    ),
+	.dmaRD        (dma_ddr_rd_w    ),
 	.dmaACK       (dma_ddr_ack_w   )
 );
 

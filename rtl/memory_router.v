@@ -97,8 +97,16 @@ assign sel_chipram   = !cpu_addr[31:21] && cchip;
 // minimig_sram_bridge.v. All Zorro RAM goes to DDR3.
 // -------------------------------------------------------------------------
 
-assign ramaddr[28]    = sel_zram & ~sel_z3ram0;
-assign ramaddr[27]    = sel_zram & (~sel_z3ram1 | cpu_addr[27]);
+// 2026-05-27 Z2 fix (codex review). Original mapping put Z2 in DDR3 bank
+// ramaddr[28:26]=110, which Z3_1 (256MB base=1) only reaches at offsets
+// $18000000-$1BFFFFFF — i.e. never touched during a typical KS boot that
+// allocates from the front of Z3_1. Bank 110 has not been validated in
+// practice and Z2 boots hang there. Remap Z2 into bank 100 (the low
+// quadrant of Z3_1, proven good by every mem=0x83 boot). Z2 and Z3 configs
+// are mutually exclusive in fastramcfg, so the new aliased mapping is
+// safe — only one of them is ever live at runtime.
+assign ramaddr[28]    = sel_z2ram | sel_z3ram1;
+assign ramaddr[27]    = sel_z3ram0 | (sel_z3ram1 & cpu_addr[27]);
 assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23] : (sel_rtg ? 4'b1110 : {4{sel_dd}});
 assign ramaddr[22:19] = {4{sel_dd}} | cpu_addr[22:19];
 assign ramaddr[18]    =    sel_dd   | (sel_kicklower & bootrom) | cpu_addr[18];

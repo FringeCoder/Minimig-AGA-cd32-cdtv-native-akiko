@@ -107,7 +107,13 @@ module chipdma_arb
 	output            ddr_out_we,
 	output            ddr_out_cs,
 	output     [15:0] ddr_out_wr,
-	input             ddr_in_ack
+	input             ddr_in_ack,
+	// Read return path. ddr_in_rd is the 16-bit word captured by ddram_ctrl
+	// at the same time it raises ddr_in_ack on a read. Data is stable for
+	// many sysclks before the level-ack arrives, so the 2-FF ack sync is
+	// sufficient — no separate CDC needed on the data lines (SDC false_paths
+	// them like the write data lines).
+	input      [15:0] ddr_in_rd
 );
 
 // --- c_7m rising-edge detector (slot boundary) ---
@@ -169,6 +175,13 @@ reg [28:1] dma_ddr_addr_r;
 reg        dma_ddr_l_r;
 reg        dma_ddr_u_r;
 reg [15:0] dma_ddr_wr_r;
+// 2026-05-27 (z2 read fix): latched WE replaces the prior `ddr_out_we = 1'b1`
+// hardcoding so the bridge can do BOTH reads (Akiko TX command fetch, dma_we=0
+// from akiko.v:819 when only tx_busy is set) AND writes (PBX sector data,
+// dma_we=1). Without this, Z2-allocated CMD blocks were unreachable and the
+// CD32 BIOS hung at $9FFC00 waiting for a TX read that the bridge silently
+// dropped.
+reg        dma_ddr_we_r;
 
 // --- Phase B v2: 2-FF synchronizer on the LEVEL ddr_in_ack from
 //     ddram_ctrl (clk_114). ddr_in_ack goes high when DDR3 commits the
@@ -322,7 +335,7 @@ assign ddr_out_cs   = dma_ddr_cs_r;
 assign ddr_out_addr = dma_ddr_addr_r;
 assign ddr_out_l    = dma_ddr_l_r;
 assign ddr_out_u    = dma_ddr_u_r;
-assign ddr_out_we   = 1'b1;
+assign ddr_out_we   = dma_ddr_we_r;
 assign ddr_out_wr   = dma_ddr_wr_r;
 
 always @(posedge clk) begin
@@ -335,6 +348,7 @@ always @(posedge clk) begin
 		active_is_cdtv <= 1'b0;
 		ak_is_ddr      <= 1'b0;
 		dma_ddr_cs_r   <= 1'b0;
+		dma_ddr_we_r   <= 1'b1;  // safe default — bridge was write-only before this fix
 	end else begin
 		ak_ack_r   <= 1'b0;  // ack defaults low; pulse in S_ACK on owner only
 		cdtv_ack_r <= 1'b0;
@@ -362,6 +376,10 @@ always @(posedge clk) begin
 					dma_ddr_l_r    <= ~live_baddr[0];
 					dma_ddr_u_r    <=  live_baddr[0];
 					dma_ddr_wr_r   <= {live_wbyte, live_wbyte};
+					// 2026-05-27 z2-read-fix: latch the real WE so ddram_ctrl
+					// can route this transaction as either a write (PBX) or
+					// a read (TX command fetch).
+					dma_ddr_we_r   <= live_we;
 				end
 				state          <= S_DRIVE;
 			end
@@ -375,7 +393,19 @@ always @(posedge clk) begin
 				// rise, and latches our (already-stable) data into its
 				// own write buffer. ddr_in_ack comes back as a level
 				// signal which we sample through ddr_in_ack_sync2.
-				if (ddr_ack_safe) state <= S_ACK;
+				if (ddr_ack_safe) begin
+					// 2026-05-27 z2-read-fix: on a TX (read) the
+					// captured 16-bit word is in ddr_in_rd, latched
+					// by ddram_ctrl's read FSM at the same instant
+					// ddr_in_ack rises. Demux to the byte the master
+					// asked for, same convention as the chip-RAM
+					// path below (ak_baddr0=0 → upper byte).
+					if (!ak_we) begin
+						ak_rbyte_r <= ak_baddr0 ? ddr_in_rd[7:0]
+						                        : ddr_in_rd[15:8];
+					end
+					state <= S_ACK;
+				end
 			end else begin
 				slot_cnt <= slot_cnt + 3'd1;
 				// Sample chipRD at slot_cnt==3 (4 clk_sys cycles after
@@ -408,6 +438,23 @@ always @(posedge clk) begin
 			// (e.g. akiko.v:522-528 rx_inflight) sees the gap. Also
 			// gives the dmaACK sync chain (in chipdma_arb) time to
 			// settle low before the next arm_now.
+			//
+			// 2026-05-28 Z2 dropped-byte fix: for DDR (ram2) slots, also
+			// hold here until ddr_ack_safe has fully DEASSERTED before
+			// returning to S_IDLE. ddr_in_ack is a LEVEL from ddram_ctrl
+			// that stays high until it sees our dmaCS drop (through its own
+			// 2-FF sync); ddr_ack_safe is a further 2-FF sync of that. With
+			// only a 1-cycle cooldown, a tightly-spaced next byte re-arms
+			// dma_ddr_cs_r and re-enters S_DRIVE while ddr_ack_safe is still
+			// HIGH from the previous byte, so we (a) trust a stale ack and
+			// jump to S_ACK without the new byte being committed, and (b)
+			// ddram_ctrl's dmaACK_r is still high when our new dmaCS rise
+			// arrives, so its latch gate (dmaCS_rise & ~dmaACK_r) blocks and
+			// the write is dropped. Waiting for ddr_ack_safe low closes both
+			// halves: it guarantees ddram_ctrl's dmaACK_r is low (>=2 clk_sys
+			// old) before we raise the next CS. Chip (ram1) slots are
+			// unaffected (~ak_is_ddr keeps the original 1-cycle path).
+			if (~ak_is_ddr | ~ddr_ack_safe)
 			state <= S_IDLE;
 		end
 		endcase

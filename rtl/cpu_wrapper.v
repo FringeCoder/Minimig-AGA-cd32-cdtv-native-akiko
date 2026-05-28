@@ -103,8 +103,24 @@ module cpu_wrapper
 	output      [4:0] z3ram_base0_out,
 	output            z3ram_ena0_out,
 	output      [3:0] z3ram_base1_out,
-	output            z3ram_ena1_out
+	output            z3ram_ena1_out,
+
+	// 2026-05-27 D-cache software toggle: '1' = D-cache enabled, '0' = off.
+	// Sourced from TG68K CACR bit 8 (real 030 spec). Defaults '1' until SW
+	// claims ownership via any MOVEC CACR write. See cpu_cache_new cc_den.
+	output            dcache_sw_en,
+
+	// 2026-05-27 Z2-hang trace ring drain. UIO class 7'b1111101 (0xFA00).
+	// 16 bytes per entry; userspace reads bytes contiguously, ring empty
+	// returns 0x00. See rtl/z2_trace.v header for entry format and
+	// trigger conditions. Optional; tie cs/rd to 0 to disable drain.
+	input             z2_trace_cs,
+	input             z2_trace_rd,
+	output      [7:0] z2_trace_dout
 );
+
+wire dcache_sw_en_p;
+assign dcache_sw_en = cpucfg[1] ? dcache_sw_en_p : 1'b1;
 
 assign z2ram_ena_out   = z2ram_ena;
 assign z3ram_base0_out = z3ram_base0;
@@ -154,6 +170,38 @@ memory_router u_memory_router
 	.sel_rtg       (sel_rtg       ),
 	.ramaddr       (ramaddr       ),
 	.zram_sel      (              )  // unused at CPU side; Minimig.sv recomputes per port
+);
+
+// 2026-05-27 Z2-hang instrumentation. Captures the CPU view of every
+// fast-RAM access through memory_router, plus AC-done sentinels and
+// stall conditions. Userspace drains via UIO class 0xFA00.
+z2_trace u_z2_trace
+(
+	.clk           (clk           ),
+	.reset         (~reset        ),
+	.ramsel        (ramsel        ),
+	.ramready      (ramready      ),
+	.cpu_addr      (cpu_addr      ),
+	.ramaddr       (ramaddr       ),
+	.ramdat        (ramdat        ),
+	.wr            (wr            ),
+	.uds_in        (uds_in        ),
+	.lds_in        (lds_in        ),
+	.cpustate      (cpustate      ),
+	.cchip         (cchip         ),
+	.ckick         (ckick         ),
+	.sel_z2ram     (sel_z2ram     ),
+	.sel_z3ram0    (sel_z3ram0    ),
+	.sel_z3ram1    (sel_z3ram1    ),
+	.sel_kickram   (sel_kickram   ),
+	.sel_kicklower (sel_kicklower ),
+	.sel_chipram   (sel_chipram   ),
+	.sel_dd        (sel_dd        ),
+	.sel_rtg       (sel_rtg       ),
+	.z2ram_ena     (z2ram_ena     ),
+	.uio_cs_trace  (z2_trace_cs   ),
+	.uio_rd        (z2_trace_rd   ),
+	.uio_dout      (z2_trace_dout )
 );
 
 // we route everything hrtmon related through cart.v (needs a couple of signals to
@@ -270,6 +318,10 @@ cpu_inst_p
   .cpu(cpucfg),
   .busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
   .cacr_out(cacr_p),
+  // 2026-05-27 D-cache software toggle: bit 8 of CACR (real 030 spec).
+  // d_cache_out is '1' by default and tracks the latched MOVEC CACR write
+  // thereafter — see TG68KdotC_Kernel.vhd CACR_DC / CACR_DC_owned regs.
+  .d_cache_out(dcache_sw_en_p),
   .vbr_out(vbr_p)
 );
 
@@ -459,20 +511,34 @@ always @(*) begin
 		endcase
 	end
 	// Zorro II RAM (Up to 8 meg at 0x200000). It has a fixed base, so it must be first in the chain.
+	// 2026-05-27 CD32+Z2 fix: match WinUAE fastmem PIC bytes exactly so the CD32 BIOS
+	// links Z2 into the system memory free list. Previously the PIC advertised
+	// pid=0x00 (invalid per Z2 spec) and manuf=0x139c; CD32 BIOS rejected the card,
+	// AllocMem fell back to chip RAM, and the CD command buffer landed at $1FE400
+	// (top of chip) instead of Z2 $2xxxxx. WinUAE reference (CD32-Z2-test.uae log):
+	//   Card 01: 'Z2 Fast RAM'  e0.51.00.00.07.db.00.00.00.01.00.00.00.00.00.00
+	//   MID 2011 (07db) PID 81 (51) SER 00000001
+	// Stored as Z2-inverted nibbles for offsets >= $04.
 	else if (~ac_memcard[2] && ac_memcard[1:0]) begin
 		case (chip_addr[6:1])
-			6'b000000: autocfg_data = 4'b1110;	// Zorro-II card, add mem, no ROM
-			6'b000001:
+			6'b000000: autocfg_data = 4'b1110;	// type byte $00 hi = 0xE (Z2 + add_mem, not-inverted)
+			6'b000001:                                  // type byte $00 lo = size code (not-inverted)
 				case (ac_memcard[1:0])
 							1: autocfg_data = 4'b0110; // 2MB
 							2: autocfg_data = 4'b0111; // 4MB
 					default: autocfg_data = 4'b0000; // 8MB
 				endcase
-			6'b001000: autocfg_data = 4'b1110;	// Manufacturer ID: 0x139c
-			6'b001001: autocfg_data = 4'b1100;
-			6'b001010: autocfg_data = 4'b0110;
-			6'b001011: autocfg_data = 4'b0011;
-			6'b010011: autocfg_data = 4'b1110; //serial=1
+			// Product number 0x51 (~0x5=0xA, ~0x1=0xE)
+			6'b000010: autocfg_data = 4'b1010;
+			6'b000011: autocfg_data = 4'b1110;
+			// Flags 0x00 — default 0xF/0xF reconstructs to inverted 0x00 ✓ (no override needed)
+			// Manuf ID 0x07DB: byte 4 = 0x07 (~0x0=0xF,~0x7=0x8), byte 5 = 0xDB (~0xD=0x2,~0xB=0x4)
+			6'b001000: autocfg_data = 4'b1111; // manuf hi hi (default 0xF == ~0x0, redundant but explicit)
+			6'b001001: autocfg_data = 4'b1000; // manuf hi lo
+			6'b001010: autocfg_data = 4'b0010; // manuf lo hi
+			6'b001011: autocfg_data = 4'b0100; // manuf lo lo
+			// Serial = 0x00000001 (only LSB nibble set), other serial bytes default 0
+			6'b010011: autocfg_data = 4'b1110; // serial[3] lo = ~0x1 = 0xE
 			  default:;
 		endcase
 	end
