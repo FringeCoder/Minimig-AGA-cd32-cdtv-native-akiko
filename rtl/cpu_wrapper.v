@@ -377,7 +377,7 @@ fx68k cpu_inst_o
 
 wire cpu_req = (cpustate != 1);
 
-wire cchip = turbochip_d & (!cpustate | (dcache_d & (cpustate != 2'd3)));  // Variant R: writes bypass turbo (direct chip bus), reads stay cached
+wire cchip = turbochip_d & (!cpustate | dcache_d);  // D-cache-ON writes stay on the fast turbo-chip path; sdram_ctrl store-to-load forwarding (not Variant R) closes the posted-write vs chip-read coherency hole
 wire ckick = turbokick_d & (!cpustate | dcache_d);
 
 reg turbochip_d;
