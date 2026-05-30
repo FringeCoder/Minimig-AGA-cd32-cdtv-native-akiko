@@ -808,7 +808,13 @@ always @(posedge clk) begin
 		// AIR read = ACK (mode 1) — spec section 3.4.
 		// Falling-edge so the CPU latches the priority value (e.g. 0x02)
 		// rather than the post-clear 0x00. See in_air_rd / air_rd_falling.
-		if (air_rd_falling) begin
+		// Gate the ACK-clear on an in-service IRQ. Without this, a polling
+		// AIR read (tp_ilatch[5]==0) whose falling edge coincides with a
+		// same-cycle priority-encoder raise clobbers the raise (last NBA wins),
+		// silently dropping a sparse STCH. Gating on tp_ilatch[5] makes the
+		// clear mutually exclusive with the encoder (which requires !ilatch[5]).
+		// Sim: tb_cdtv_tpi_stch scenario C. 2026-05-30.
+		if (air_rd_falling && tp_ilatch[5]) begin
 			tp_ilatch[5] <= 1'b0;
 			tp_ilatch2   <= 8'h00;
 			tp_air       <= 8'h00;
