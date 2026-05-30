@@ -59,6 +59,7 @@ module akiko_hps_bridge
 	input             uio_cs,        // akiko_cs (any 0xF400 transaction)
 	input             uio_cs_sec,    // sec sub-channel (io_din[8] from byte_cnt==1)
 	input             uio_cs_nvr,    // NVRAM save-dump sub-channel (io_din[6])
+	input             uio_cs_subcode,// subcode push sub-channel (io_din[4], 0xF410)
 	input             uio_wr,        // pulse: Main wrote one data byte
 	input             uio_rd,        // pulse: Main read one data byte
 	input       [7:0] uio_din,
@@ -79,6 +80,11 @@ module akiko_hps_bridge
 	output            sec_push,
 	output      [7:0] sec_byte,
 	output            sec_done,
+
+	// Akiko subcode push port (W-only; 96 bytes/frame during CDDA play)
+	output            subcode_push,
+	output      [7:0] subcode_byte,
+	output            subcode_done,
 
 	// NVRAM save-dump port. Bridge drives nvr_addr (auto-incrementing read
 	// counter) into akiko_nvram, reads back nvr_dout (1-cycle BRAM latency),
@@ -104,6 +110,7 @@ module akiko_hps_bridge
 reg cs_d;
 reg cs_sec_d;
 reg cs_nvr_d;
+reg cs_subcode_d;
 reg saw_read;
 reg saw_write;
 
@@ -114,14 +121,15 @@ reg saw_write;
 // nvr_dout is valid by the time it's needed.
 reg [9:0] nvr_addr_cnt;
 
-// cmd-channel sub-selector: only true when neither extra cs is set.
-wire cs_cmd = uio_cs & ~uio_cs_sec & ~uio_cs_nvr;
+// cmd-channel sub-selector: only true when no extra cs is set.
+wire cs_cmd = uio_cs & ~uio_cs_sec & ~uio_cs_nvr & ~uio_cs_subcode;
 
 always @(posedge clk) begin
 	if (reset) begin
 		cs_d         <= 1'b0;
 		cs_sec_d     <= 1'b0;
 		cs_nvr_d     <= 1'b0;
+		cs_subcode_d <= 1'b0;
 		saw_read     <= 1'b0;
 		saw_write    <= 1'b0;
 		nvr_addr_cnt <= 10'd0;
@@ -129,6 +137,7 @@ always @(posedge clk) begin
 		cs_d         <= uio_cs;
 		cs_sec_d     <= uio_cs_sec;
 		cs_nvr_d     <= uio_cs_nvr;
+		cs_subcode_d <= uio_cs_subcode;
 		if (!uio_cs) begin
 			saw_read  <= 1'b0;
 			saw_write <= 1'b0;
@@ -160,6 +169,10 @@ assign result_byte     = uio_din;
 assign sec_push        = uio_wr & uio_cs &  uio_cs_sec;
 assign sec_byte        = uio_din;
 
+assign subcode_push    = uio_wr & uio_cs &  uio_cs_subcode;
+assign subcode_byte    = uio_din;
+assign subcode_done    = xfer_end &              cs_subcode_d;
+
 assign nvr_addr        = nvr_addr_cnt;
 assign nvr_clear_dirty = xfer_end & saw_read & cs_nvr_d;
 
@@ -171,8 +184,8 @@ assign uio_dout        = uio_cs_nvr ? nvr_dout    :
 
 // done pulses fire on transaction end, routed by the sub-channel the
 // transaction ran on (captured in cs_*_d the cycle before the drop).
-assign cmd_done        = xfer_end & saw_read  & ~cs_sec_d & ~cs_nvr_d;
-assign result_done     = xfer_end & saw_write & ~cs_sec_d & ~cs_nvr_d;
+assign cmd_done        = xfer_end & saw_read  & ~cs_sec_d & ~cs_nvr_d & ~cs_subcode_d;
+assign result_done     = xfer_end & saw_write & ~cs_sec_d & ~cs_nvr_d & ~cs_subcode_d;
 assign sec_done        = xfer_end &              cs_sec_d;
 assign nvr_done        = xfer_end &              cs_nvr_d;
 

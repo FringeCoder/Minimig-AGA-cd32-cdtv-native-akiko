@@ -293,6 +293,7 @@ wire        akiko_rd;
 wire        akiko_cs;
 wire        akiko_cs_sec; // M4 sub-channel selector
 wire        akiko_cs_nvr; // NVRAM save-dump sub-channel (io_din[6])
+wire        akiko_cs_subcode; // subcode push sub-channel (io_din[4], 0xF410)
 wire        akiko_req;     // FROM fastchip TO hps_ext (cmd status bit)
 wire        akiko_sec_req; // FROM fastchip TO hps_ext (M4 sector status bit)
 wire        akiko_rx_busy; // FROM fastchip TO hps_ext (Phase 18: RX engine busy)
@@ -1024,6 +1025,7 @@ fastchip fastchip
 	.akiko_uio_cs        (akiko_cs        ),
 	.akiko_uio_cs_sec    (akiko_cs_sec    ),
 	.akiko_uio_cs_nvr    (akiko_cs_nvr    ),
+	.akiko_uio_cs_subcode(akiko_cs_subcode),
 	.akiko_uio_wr        (akiko_wr        ),
 	.akiko_uio_rd        (akiko_rd        ),
 	.akiko_uio_din       (akiko_dout      ),

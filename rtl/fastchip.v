@@ -80,6 +80,7 @@ module fastchip
 	input         akiko_uio_cs,
 	input         akiko_uio_cs_sec, // M4 sub-channel (io_din[8] from byte_cnt==1)
 	input         akiko_uio_cs_nvr, // NVRAM save-dump sub-channel (io_din[6])
+	input         akiko_uio_cs_subcode, // subcode push sub-channel (io_din[4])
 	input         akiko_uio_wr,
 	input         akiko_uio_rd,
 	input  [15:0] akiko_uio_din,    // = hps_ext.akiko_dout
@@ -137,6 +138,9 @@ wire  [7:0] akiko_hps_sec_status;
 wire        akiko_hps_sec_push;
 wire  [7:0] akiko_hps_sec_byte;
 wire        akiko_hps_sec_done;
+wire        akiko_hps_subcode_push;
+wire  [7:0] akiko_hps_subcode_byte;
+wire        akiko_hps_subcode_done;
 wire        akiko_hps_rx_busy;
 wire  [7:0] akiko_uio_dout_byte;
 
@@ -191,7 +195,10 @@ akiko #(.NATIVE_CD32(NATIVE_CD32)) akiko
 	.hps_sec_dma_active(hps_sec_dma_active),
 	.hps_sec_dma_byte(hps_sec_dma_byte),
 	.hps_sec_dma_addr(hps_sec_dma_addr),
-	.hps_sec_dma_we(hps_sec_dma_we)
+	.hps_sec_dma_we(hps_sec_dma_we),
+	.hps_subcode_push(akiko_hps_subcode_push),
+	.hps_subcode_byte(akiko_hps_subcode_byte),
+	.hps_subcode_done(akiko_hps_subcode_done)
 );
 
 // CPU-bus trace ring: snapshots every CPU access in the akiko window
@@ -221,6 +228,7 @@ akiko_hps_bridge akiko_hps_bridge
 	.uio_cs(akiko_uio_cs),
 	.uio_cs_sec(akiko_uio_cs_sec),
 	.uio_cs_nvr(akiko_uio_cs_nvr),
+	.uio_cs_subcode(akiko_uio_cs_subcode),
 	.uio_wr(akiko_uio_wr),
 	.uio_rd(akiko_uio_rd),
 	.uio_din(akiko_uio_din[7:0]),
@@ -237,6 +245,9 @@ akiko_hps_bridge akiko_hps_bridge
 	.sec_push(akiko_hps_sec_push),
 	.sec_byte(akiko_hps_sec_byte),
 	.sec_done(akiko_hps_sec_done),
+	.subcode_push(akiko_hps_subcode_push),
+	.subcode_byte(akiko_hps_subcode_byte),
+	.subcode_done(akiko_hps_subcode_done),
 	.nvr_addr(akiko_hps_nvr_addr),
 	.nvr_dout(akiko_hps_nvr_dout),
 	.nvr_clear_dirty(akiko_hps_nvr_clear_dirty),

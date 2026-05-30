@@ -81,6 +81,7 @@ module hps_ext
 	output reg        akiko_cs,
 	output reg        akiko_cs_sec,
 	output reg        akiko_cs_nvr,    // NVRAM save-dump sub-channel
+	output reg        akiko_cs_subcode,// subcode push sub-channel (io_din[4], 0xF410)
 	input             akiko_req,
 	input             akiko_sec_req,
 	input             akiko_rx_busy,
@@ -184,6 +185,7 @@ always@(posedge clk_sys) begin : main_proc
 		akiko_cs <= 0;
 		akiko_cs_sec <= 0;
 		akiko_cs_nvr <= 0;
+		akiko_cs_subcode <= 0;
 		akiko_cs_trace <= 0;
 		akiko_cs_peek <= 0;
 		chipset_cs_trace <= 0;
@@ -213,6 +215,7 @@ always@(posedge clk_sys) begin : main_proc
 			akiko_cs        <= (io_din[15:9] == 7'b1111010) && !io_din[7] && !io_din[5];
 			akiko_cs_sec    <= (io_din[15:9] == 7'b1111010) && !io_din[7] && !io_din[5] && io_din[8];
 			akiko_cs_nvr    <= (io_din[15:9] == 7'b1111010) && !io_din[7] && !io_din[5] && io_din[6];
+			akiko_cs_subcode<= (io_din[15:9] == 7'b1111010) && !io_din[7] && !io_din[5] && io_din[4];
 			akiko_cs_trace  <= (io_din[15:9] == 7'b1111010) &&  io_din[7];
 			akiko_cs_peek   <= (io_din[15:9] == 7'b1111010) && !io_din[7] && io_din[5];
 			// Chipset bus trace — dedicated UIO class (drain-only, debug).
