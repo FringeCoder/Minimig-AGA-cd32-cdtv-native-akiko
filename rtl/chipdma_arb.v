@@ -328,7 +328,26 @@ wire        is_ddr_now   = arm_now ? router_zram_sel : ak_is_ddr;
 // SDRAM (ram1) override only fires when the slot routes to ram1. This
 // path keeps the original combinational shape because sdram_ctrl samples
 // on the same clk_sys edge as arm_now (8.7 ns budget).
-wire arb_drive_chip = arb_drive & ~is_ddr_now;
+//
+// 2026-06-03 in-flight bleed fix (companion to prevent-steal). HW-VALIDATED:
+// Universe D-Cache-OFF rate test on a freshly-rebooted rig = 6/8 clean, 0/8
+// garble (vs prevent-steal baseline 4/8 with 4/8 GARBLE). This gate ELIMINATES
+// the OFF garble/corruption mode; the residual 2/8 is a separate black boot-hang.
+//
+// A chip slot occupies one c_7m period = 4 clk_sys. The arb arms on the
+// c_7m_rise of slot N (override needed for sdram_ctrl's state-0 sample of
+// slot N) and stays in S_DRIVE counting slot_cnt 0..3. slot_cnt==3 lands on
+// the NEXT c_7m_rise (slot N+1's sdram state-0). With the override still
+// asserted there, sdram_ctrl latches ak_addr into slot N+1 TOO, stealing it
+// from a CPU chip read that prevent-steal's arm_now mask never guards (the
+// arb is mid-S_DRIVE, not arming). Deassert the chip override at slot_cnt==3
+// so it cannot bleed into the next slot. The DMA's own read byte is captured
+// from chip_in_rd (sdram's chipRD output, set at slot N state 9) and its
+// write was committed from latched datawr at slot N state 0, so neither is
+// affected by dropping the *address* override here. Codex-confirmed safe;
+// DDR path unaffected (~is_ddr_now, slot_cnt stays 0 for DDR).
+wire chip_slot_window = ~((state == S_DRIVE) & (slot_cnt == 3'd3));
+wire arb_drive_chip = arb_drive & ~is_ddr_now & chip_slot_window;
 
 assign chip_out_addr = arb_drive_chip ? ak_addr_w    : chip_in_addr;
 assign chip_out_l    = arb_drive_chip ? ak_l_w       : chip_in_l;
