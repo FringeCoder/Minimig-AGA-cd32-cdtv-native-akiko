@@ -422,6 +422,7 @@ wire        arb_chip_u;
 wire        arb_chip_rw;
 wire        arb_chip_dma;
 wire [15:0] arb_chip_wr;
+wire        cpu_chip_slot_req;  // prevent-the-steal: CPU owns an SRAM chip slot (minimig→chipdma_arb)
 
 wire [35:0] EXT_BUS;
 hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata));
@@ -876,6 +877,7 @@ chipdma_arb chipdma_arb
 	.chip_out_dma    (arb_chip_dma         ),
 	.chip_out_wr     (arb_chip_wr          ),
 	.chip_in_rd      (ramdata_in           ),
+	.cpu_chip_slot_req(cpu_chip_slot_req   ),  // prevent-the-steal: don't preempt CPU chip slot
 
 	// Phase B: AC-state inputs (memory_router decode) + DDR (ram2) write
 	// bus when the bridge address falls in a Zorro fast-RAM window.
@@ -1269,7 +1271,8 @@ minimig minimig
 	// With CHIPSET_TRACE=0 in agnus.v, uio_dout stays at 8'h00 (DCE).
 	.chipset_trace_uio_cs   (chipset_cs_trace ),
 	.chipset_trace_uio_rd   (chipset_trace_rd ),
-	.chipset_trace_uio_dout (chipset_trace_din)
+	.chipset_trace_uio_dout (chipset_trace_din),
+	.cpu_chip_slot_req      (cpu_chip_slot_req) // prevent-the-steal → chipdma_arb
 );
 
 // power led control

@@ -90,6 +90,13 @@ module chipdma_arb
 	output     [15:0] chip_out_wr,
 	input      [15:0] chip_in_rd,
 
+	// 2026-06-02 prevent-the-steal: CPU-owns-chip-slot intent from minimig
+	// (~dbr & ~_cpu_as & |bank), phase-stable at c_7m_rise. Masks arm_now so the
+	// arbiter never preempts the slot the cacheless CPU is mid-reading in OFF mode
+	// (the shared untagged chipRD steal-race). Makes the arb strictly more
+	// conservative -> cannot introduce a new collision.
+	input             cpu_chip_slot_req,
+
 	// Phase B: AC-config state + DDR3 (ram2) DMA write port. When the
 	// active master's address falls in a Zorro fast-RAM window the slot
 	// routes to ddr_out_* instead of chip_out_*. memory_router does the
@@ -249,7 +256,10 @@ wire  [7:0] live_wbyte  = arming_is_cdtv ? cdtv_dma_wbyte : akiko_dma_wbyte;
 //     sdram_ctrl to see it ~8.7 ns later (the existing minimig path
 //     fits the same budget the same way). Gated by minimig_idle so we
 //     never preempt the chipset.
-wire arm_now = (state == S_IDLE) & c_7m_rise & minimig_idle & any_req;
+// 2026-06-02 prevent-the-steal: also block arming when the CPU owns an
+// SRAM-backed chip slot (cpu_chip_slot_req), which minimig_idle's cck-phase
+// strobes miss at this c_7m_rise instant. Stops the OFF chipRD steal-race.
+wire arm_now = (state == S_IDLE) & c_7m_rise & minimig_idle & ~cpu_chip_slot_req & any_req;
 
 // --- arb_request: we want to be on the bus this cycle. Either we
 //     just armed combinationally, or we are mid-slot (S_DRIVE).

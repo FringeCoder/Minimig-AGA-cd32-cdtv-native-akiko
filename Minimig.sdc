@@ -4,6 +4,19 @@ derive_clock_uncertainty
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -setup 2
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -hold 1
 
+# 2026-06-02: cpu_wrapper address-remap regs OUTSIDE cpu_inst* (turbokick_d,
+# nmi_addr[*], etc) also feed sd_addr at slot start, with the IDENTICAL 28->114
+# MHz slot-capture timing as cpu_inst* (sdram_ctrl captures chip/cpu addr at
+# state 0 = 2 clk_114 cycles after the clk_28 launch). The cpu_inst*-scoped
+# relaxation above and the emu|minimig|* relaxation below both miss them
+# (cpu_wrapper is a sibling of minimig, not under it), so turbokick_d/nmi_addr
+# -> ram1|sd_addr was analyzed single-cycle and swung to -3.3 ns on unlucky
+# placement (benign-but-pessimistic: prod ships at -0.7 and works). Same setup-2
+# safety argument as cpu_inst* (NOT >=3). Removes the placement roulette so the
+# fit is deterministically shippable.
+set_multicycle_path -from {emu|cpu_wrapper|*} -to {emu|ram1|*} -setup 2
+set_multicycle_path -from {emu|cpu_wrapper|*} -to {emu|ram1|*} -hold 1
+
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -setup 2
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -hold 1
 set_multicycle_path -from {emu|minimig|*} -to {emu|ram1|*} -setup 2

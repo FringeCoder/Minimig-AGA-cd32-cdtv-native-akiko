@@ -330,7 +330,12 @@ module minimig
 	// and the dead wires DCE out of the bitstream.
 	input         chipset_trace_uio_cs,
 	input         chipset_trace_uio_rd,
-	output  [7:0] chipset_trace_uio_dout
+	output  [7:0] chipset_trace_uio_dout,
+
+	// 2026-06-02 prevent-the-steal (OFF chipRD steal-race): CPU-owns-an-SRAM-slot
+	// intent, phase-stable at c_7m_rise. chipdma_arb masks its arm with this so it
+	// never preempts the chip slot the cacheless CPU is about to read in OFF mode.
+	output        cpu_chip_slot_req
 );
 
 
@@ -467,6 +472,14 @@ wire        gayle_irq;			//interrupt request
 wire        gayle_nrdy;       // HDD fifo is not ready for reading
 
 wire	[7:0] bank;					//memory bank select
+
+// 2026-06-02 prevent-the-steal (OFF chipRD read race): assert when the CPU owns
+// the bus (~dbr) and is running an address cycle (~_cpu_as) into an SRAM-backed
+// bank (|bank). Phase-stable across the c_7m_rise arming instant, unlike the
+// cck-phase _ram_oe/_ram_we the arbiter currently keys on (minimig_idle). The arb
+// masks arm_now with this so it never steals the slot the cacheless CPU is about
+// to read in D-Cache-OFF mode, where the read uses the shared untagged chipRD.
+assign cpu_chip_slot_req = ~dbr & ~_cpu_as & (|bank);
 
 // host interface
 wire        host_cs;
