@@ -421,7 +421,9 @@ wire        arb_chip_l;
 wire        arb_chip_u;
 wire        arb_chip_rw;
 wire        arb_chip_dma;
+wire        arb_chip_dma_slot;  // Fix B: stolen-slot tag chipdma_arb->sdram_ctrl
 wire [15:0] arb_chip_wr;
+wire [15:0] chipRD_dma;         // Fix B: private DMA read-return register
 wire        cpu_chip_slot_req;  // prevent-the-steal: CPU owns an SRAM chip slot (minimig→chipdma_arb)
 
 wire [35:0] EXT_BUS;
@@ -830,7 +832,9 @@ sdram_ctrl ram1
 	.chipL        (arb_chip_l      ),
 	.chipRW       (arb_chip_rw     ),
 	.chipDMA      (arb_chip_dma    ),
+	.chip_dma_slot(arb_chip_dma_slot), // Fix B: stolen-slot tag from chipdma_arb
 	.chipRD       (ramdata_in      ),
+	.chipRD_dma   (chipRD_dma      ), // Fix B: private DMA read-return register
 	.chip48       (chip48          )
 );
 
@@ -876,7 +880,9 @@ chipdma_arb chipdma_arb
 	.chip_out_rw     (arb_chip_rw          ),
 	.chip_out_dma    (arb_chip_dma         ),
 	.chip_out_wr     (arb_chip_wr          ),
-	.chip_in_rd      (ramdata_in           ),
+	.chip_dma_slot   (arb_chip_dma_slot    ),  // Fix B: stolen-slot tag -> sdram_ctrl
+	.chip_in_rd      (ramdata_in           ),  // CPU-visible chipRD (unused by arb now)
+	.chip_in_rd_dma  (chipRD_dma           ),  // Fix B: arb samples DMA byte from here
 	.cpu_chip_slot_req(cpu_chip_slot_req   ),  // prevent-the-steal: don't preempt CPU chip slot
 
 	// Phase B: AC-state inputs (memory_router decode) + DDR (ram2) write

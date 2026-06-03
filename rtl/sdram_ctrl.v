@@ -57,8 +57,15 @@ module sdram_ctrl
 	input             chipU,
 	input             chipRW,
 	input             chipDMA,
+	// Fix B (2026-06-04): combinational tag from chipdma_arb = "this CHIP slot
+	// was stolen for an Akiko/CDTV master, NOT a CPU/Agnus chipset access".
+	// Valid at the state-0 RAS sample point (same budget as chipDMA/chipAddr).
+	input             chip_dma_slot,
 	input      [15:0] chipWR,
 	output reg [15:0] chipRD,
+	// Fix B: private read-return register for DMA-stolen chip slots. Keeps the
+	// CPU-visible chipRD untouched by Akiko/CDTV reads (the OFF-read steal).
+	output reg [15:0] chipRD_dma,
 	output     [47:0] chip48,
 	// cpu
 	input      [24:1] cpuAddr,
@@ -194,17 +201,27 @@ assign ramready = cache_rd_ack || write_ena;
 //// chip line read ////
 reg [15:0] chip48_1, chip48_2, chip48_3;
 
+// Fix B: latched once per slot at state-0 (see state machine), tells the
+// state-9 read latch whether this CHIP slot belongs to a DMA master.
+reg slot_is_dma;
+
 always @ (posedge sysclk) begin
 	reg [15:0] sdata_chip;
 
 	sdata_chip <= sdata_reg;
 	if(slot_type == CHIP) begin
-		case(sdram_state)
-			 9: chipRD   <= sdata_chip;
-			11: chip48_1 <= sdata_chip;
-			13: chip48_2 <= sdata_chip;
-			15: chip48_3 <= sdata_chip;
-		endcase
+		if(slot_is_dma) begin
+			// DMA-stolen slot: park the read word in the private register so
+			// the CPU-visible chipRD / chip48 line is never disturbed.
+			if(sdram_state == 9) chipRD_dma <= sdata_chip;
+		end else begin
+			case(sdram_state)
+				 9: chipRD   <= sdata_chip;
+				11: chip48_1 <= sdata_chip;
+				13: chip48_2 <= sdata_chip;
+				15: chip48_3 <= sdata_chip;
+			endcase
+		end
 	end
 end
 
@@ -314,6 +331,7 @@ always @ (posedge sysclk) begin
 				// (this includes anything on the "motherboard" - chip RAM, slow RAM and Kickstart, turbo modes notwithstanding)
 				if(~chipDMA | ~chipRW) begin
 					slot_type    <= CHIP;
+					slot_is_dma  <= chip_dma_slot;  // Fix B: tag DMA-stolen slots
 					{sd_ba,sd_addr,casaddr[8:0]} <= chipAddr;
 					sd_ras       <= 0;
 					cas_dqm      <= {chipU,chipL};

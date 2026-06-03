@@ -88,7 +88,18 @@ module chipdma_arb
 	output            chip_out_rw,
 	output            chip_out_dma,
 	output     [15:0] chip_out_wr,
-	input      [15:0] chip_in_rd,
+	input      [15:0] chip_in_rd,      // CPU-visible chipRD (no longer sampled here)
+	// Fix B (2026-06-04): "this slot is a DMA-master steal" tag for sdram_ctrl.
+	// Combinational, same shape/timing as chip_out_dma so sdram_ctrl latches it
+	// at its state-0 RAS sample point. Lets sdram_ctrl divert the stolen slot's
+	// read word to a private register and keep the CPU's chipRD intact. Composes
+	// with the bleed fix: chip_dma_slot follows the (bleed-gated) arb_drive_chip,
+	// so the slot_cnt==3 slot handed back to the CPU is tagged non-DMA correctly.
+	output            chip_dma_slot,
+	// Fix B: private read-return for arb-stolen slots (sdram_ctrl.chipRD_dma).
+	// The arb samples ITS DMA byte from here, so a CD-DMA read never reads (nor
+	// needs) the CPU-visible chipRD.
+	input      [15:0] chip_in_rd_dma,
 
 	// 2026-06-02 prevent-the-steal: CPU-owns-chip-slot intent from minimig
 	// (~dbr & ~_cpu_as & |bank), phase-stable at c_7m_rise. Masks arm_now so the
@@ -355,6 +366,7 @@ assign chip_out_u    = arb_drive_chip ? ak_u_w       : chip_in_u;
 assign chip_out_rw   = arb_drive_chip ? ak_rw_w      : chip_in_rw;
 assign chip_out_dma  = arb_drive_chip ? 1'b0         : chip_in_dma;
 assign chip_out_wr   = arb_drive_chip ? ak_wr_data_w : chip_in_wr;
+assign chip_dma_slot = arb_drive_chip;  // Fix B: tag the stolen slot (bleed-gated)
 
 // Phase B v2: DDR DMA bus is REGISTERED in chipdma_arb. Data lines stay
 // stable from arm_now until the synchronized ack returns and we drop CS,
@@ -442,8 +454,10 @@ always @(posedge clk) begin
 				// sdram_ctrl's state-9 chipRD update).
 				if (slot_cnt == 3'd3) begin
 					if (!ak_we) begin
-						ak_rbyte_r <= ak_baddr0 ? chip_in_rd[7:0]
-						                        : chip_in_rd[15:8];
+						// Fix B: read the byte from the PRIVATE DMA register, not the
+						// CPU-visible chipRD (which is now off-limits to DMA slots).
+						ak_rbyte_r <= ak_baddr0 ? chip_in_rd_dma[7:0]
+						                        : chip_in_rd_dma[15:8];
 					end
 					state <= S_ACK;
 				end
