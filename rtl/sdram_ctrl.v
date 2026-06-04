@@ -61,11 +61,22 @@ module sdram_ctrl
 	// was stolen for an Akiko/CDTV master, NOT a CPU/Agnus chipset access".
 	// Valid at the state-0 RAS sample point (same budget as chipDMA/chipAddr).
 	input             chip_dma_slot,
+	// Fix D (2026-06-04): combinational tag = "this CHIP slot is the CPU's own
+	// chip/slow/kick read" (= minimig cpu_chip_slot_req, ~dbr & ~_cpu_as & |bank),
+	// valid at the state-0 RAS sample point like chipDMA/chipAddr.
+	input             cpu_chip_slot,
 	input      [15:0] chipWR,
 	output reg [15:0] chipRD,
 	// Fix B: private read-return register for DMA-stolen chip slots. Keeps the
 	// CPU-visible chipRD untouched by Akiko/CDTV reads (the OFF-read steal).
 	output reg [15:0] chipRD_dma,
+	// Fix D: private read-return register for the CPU's own chip reads. In
+	// D-Cache-OFF the CPU latches chip RAM via the shared public chipRD, which a
+	// later Agnus/chipset CHIP slot can overwrite before the CPU consumes it.
+	// This copy is written ONLY at the CPU's own state-9 and never by Agnus, so
+	// the CPU read is isolated. Routed to the CPU read mux (RAM1.ramdata_in when
+	// dbr==0) in minimig.v; public chipRD/chip48 stay for the chipset.
+	output reg [15:0] chipRD_cpu,
 	output     [47:0] chip48,
 	// cpu
 	input      [24:1] cpuAddr,
@@ -204,6 +215,9 @@ reg [15:0] chip48_1, chip48_2, chip48_3;
 // Fix B: latched once per slot at state-0 (see state machine), tells the
 // state-9 read latch whether this CHIP slot belongs to a DMA master.
 reg slot_is_dma;
+// Fix D: latched once per slot at state-0, tells the state-9 read latch whether
+// this CHIP slot is the CPU's own chip read (→ also park it in chipRD_cpu).
+reg slot_is_cpu;
 
 always @ (posedge sysclk) begin
 	reg [15:0] sdata_chip;
@@ -216,7 +230,12 @@ always @ (posedge sysclk) begin
 			if(sdram_state == 9) chipRD_dma <= sdata_chip;
 		end else begin
 			case(sdram_state)
-				 9: chipRD   <= sdata_chip;
+				 9: begin
+				      chipRD <= sdata_chip;
+				      // Fix D: mirror the CPU's own read into a private register
+				      // that no later Agnus/chipset CHIP slot can clobber.
+				      if(slot_is_cpu) chipRD_cpu <= sdata_chip;
+				    end
 				11: chip48_1 <= sdata_chip;
 				13: chip48_2 <= sdata_chip;
 				15: chip48_3 <= sdata_chip;
@@ -332,6 +351,7 @@ always @ (posedge sysclk) begin
 				if(~chipDMA | ~chipRW) begin
 					slot_type    <= CHIP;
 					slot_is_dma  <= chip_dma_slot;  // Fix B: tag DMA-stolen slots
+					slot_is_cpu  <= cpu_chip_slot & chipRW;  // Fix D: CPU-owned chip READS only (chipRW=1); writes mustn't park garbage in chipRD_cpu
 					{sd_ba,sd_addr,casaddr[8:0]} <= chipAddr;
 					sd_ras       <= 0;
 					cas_dqm      <= {chipU,chipL};

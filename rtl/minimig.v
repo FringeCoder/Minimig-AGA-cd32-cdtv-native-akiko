@@ -166,6 +166,12 @@ module minimig
 	//sram pins
 	output [15:0] ram_data,    // sram data bus
 	input  [15:0] ramdata_in,  // sram data bus in
+	// Fix D (2026-06-04): CPU-private chip-read return register from sdram_ctrl.
+	// In D-Cache-OFF the CPU latches chip RAM via the shared public chipRD which
+	// a later Agnus/chipset CHIP slot can overwrite mid-flight. RAM1.ramdata_in
+	// uses this isolated copy when the CPU owns the bus (dbr==0); chipset DMA
+	// reads (dbr==1) keep the public ramdata_in.
+	input  [15:0] chipRD_cpu,  // CPU-private chip read data (OFF anti-clobber)
 	output [23:1] ram_address, // sram address bus
 	output 	     _ram_bhe,    // sram upper byte select
 	output 	     _ram_ble,    // sram lower byte select
@@ -828,8 +834,12 @@ minimig_sram_bridge RAM1
 	._we(_ram_we),
 	._oe(_ram_oe),
 	.address(ram_address),
-	.data(ram_data),	
-	.ramdata_in(ramdata_in)	
+	.data(ram_data),
+	// Fix D: when the CPU owns the bus (dbr==0) source the CPU-private,
+	// clobber-isolated chip read; chipset DMA (dbr==1) keeps public ramdata_in.
+	// sram_bridge read path is combinational so dbr is correctly aligned with
+	// whose access is returning this cycle.
+	.ramdata_in(dbr ? ramdata_in : chipRD_cpu)
 );
 
 cart CART1
