@@ -424,8 +424,7 @@ wire        arb_chip_dma;
 wire        arb_chip_dma_slot;  // Fix B: stolen-slot tag chipdma_arb->sdram_ctrl
 wire [15:0] arb_chip_wr;
 wire [15:0] chipRD_dma;         // Fix B: private DMA read-return register
-wire [15:0] chipRD_cpu;         // Fix D: CPU-private chip read-return register (sdram_ctrl→minimig)
-wire        cpu_chip_slot_req;  // prevent-the-steal: CPU owns an SRAM chip slot (minimig→chipdma_arb + sdram_ctrl)
+wire        cpu_chip_slot_req;  // prevent-the-steal: CPU owns an SRAM chip slot (minimig→chipdma_arb)
 
 wire [35:0] EXT_BUS;
 hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata));
@@ -834,10 +833,8 @@ sdram_ctrl ram1
 	.chipRW       (arb_chip_rw     ),
 	.chipDMA      (arb_chip_dma    ),
 	.chip_dma_slot(arb_chip_dma_slot), // Fix B: stolen-slot tag from chipdma_arb
-	.cpu_chip_slot(cpu_chip_slot_req), // Fix D: CPU-owned chip-read tag
 	.chipRD       (ramdata_in      ),
 	.chipRD_dma   (chipRD_dma      ), // Fix B: private DMA read-return register
-	.chipRD_cpu   (chipRD_cpu      ), // Fix D: CPU-private chip read-return register
 	.chip48       (chip48          )
 );
 
@@ -1129,7 +1126,6 @@ minimig minimig
 	//sram pins
 	.ram_data     (ram_data         ), // SRAM data bus
 	.ramdata_in   (ramdata_in       ), // SRAM data bus in
-	.chipRD_cpu   (chipRD_cpu       ), // Fix D: CPU-private chip read (OFF anti-clobber)
 	.ram_address  (ram_address      ), // SRAM address bus
 	._ram_bhe     (_ram_bhe         ), // SRAM upper byte select
 	._ram_ble     (_ram_ble         ), // SRAM lower byte select
