@@ -314,6 +314,17 @@ if (NATIVE_CD32) begin : g_cd
 	reg  [3:0] pbx_seccnt;       // selected slot (0..15)
 	reg [11:0] pbx_byte_idx;     // 0..2351 in DATA, 0..145 in ZERO
 
+	// 2026-06-05 residual fix: STICKY ship-invalidation. A PBX ship in flight
+	// (or starting this cycle) when a new READ DATA fires (CDFLAG_ENABLE 0->1)
+	// belongs to the PREVIOUS read; its PBX_FIN must NOT bump cdrom_sector_counter
+	// (the new read already reset it to 0 — bumping = off-by-one recurrence).
+	// pbx_ship_invalid is SET on any enable_rising while the ship is live and
+	// CLEARED only when a fresh ship starts without a concurrent enable_rising.
+	// A sticky set bit is idempotent under N rapid back-to-back READ DATA pulses,
+	// unlike a toggle-gen which aliases back to "valid" after an even number of
+	// rises (Codex review d, 2026-06-05).
+	reg        pbx_ship_invalid;
+
 	// Subcode streaming (WinUAE akiko.cpp:1486-1509). subbuf holds one 96-byte
 	// INTERLEAVED P-W subchannel block pushed by Main during CDDA play; the DMA
 	// FSM writes it to (addressmisc|0x100)+offset, appends a 0xffff0000 marker,
@@ -456,15 +467,44 @@ if (NATIVE_CD32) begin : g_cd
 		end
 	endfunction
 
-	// sec_req: high when PBX wants a sector but the staging buffer is empty.
-	// Drops as soon as Main commits a sector (sector_ready -> 1). Rises again
-	// after PBX_FIN clears sector_ready, if more pbx slots remain.
+	// sec_req: high when PBX wants a sector AND the single staging buffer is
+	// truly writable. Drops as soon as Main commits a sector (sector_ready->1)
+	// and stays low while the PBX engine is consuming the buffer (pbx_busy).
+	//
+	// 2026-06-05 residual fix: the !pbx_busy term serializes the single-buffer
+	// producer (HPS fast-fill) against the consumer (PBX ship). The off-by-one
+	// ENABLE-clear can leave sector_ready=0 while pbx_busy=1; without this term
+	// the bridge would push a new sector into the buffer PBX is still reading
+	// (tear), or push into a buffer whose sector_ready re-asserts from a racing
+	// byte-2351 commit (total drop -> fill=0 -> stale-sector ship -> wild seek).
+	// In normal operation sector_ready is already high throughout a ship, so
+	// this only closes the sector_ready=0 && pbx_busy=1 window the ENABLE-clear
+	// opened; no throughput change for CF / single-read games.
 	wire sec_req_w =  cdrom_flags[CDFLAG_ENABLE_BIT]
 	               && cdrom_flags[CDFLAG_PBX_BIT]
 	               && (cdrom_pbx != 16'h0)
-	               && !sector_ready;
+	               && !sector_ready
+	               && !pbx_busy;
 
 	wire write = wr & cs;
+
+	// CDFLAG_ENABLE 0->1 this cycle = a new READ DATA "generation". CONFIG-high
+	// reg ($24-$27, addr 5'b10010); ENABLE is bit 26, in the upper byte, so it
+	// arrives on uds via din[10]. Combinational so it can give the restart
+	// priority over same-cycle PBX_FIN counter-bump and byte-2351 sector_ready
+	// set inside the clocked block below (later NBAs win, so the restart guards
+	// those two lower-priority writes with !enable_rising).
+	wire enable_rising = write && (addr == 5'b10010) && uds && din[10]
+	                  && !cdrom_flags[CDFLAG_ENABLE_BIT];
+
+	// A PBX ship is STARTING this cycle (PBX_IDLE picks up a staged sector) —
+	// mirror of the PBX_IDLE->PBX_DATA guard. Used by the sticky-invalidation
+	// logic so a ship begun the SAME cycle a new READ DATA fires is marked stale.
+	wire pbx_starting = (pbx_state == PBX_IDLE)
+	                 && cdrom_flags[CDFLAG_ENABLE_BIT]
+	                 && cdrom_flags[CDFLAG_PBX_BIT]
+	                 && (cdrom_pbx != 16'h0)
+	                 && sector_ready && !subcode_busy;
 
 	always @(posedge clk) begin
 		if (reset) begin
@@ -510,6 +550,7 @@ if (NATIVE_CD32) begin : g_cd
 			pbx_state            <= PBX_IDLE;
 			pbx_seccnt           <= 4'h0;
 			pbx_byte_idx         <= 12'h0;
+			pbx_ship_invalid     <= 1'b0;
 		end else begin
 			// 3-tick post-write delay decay (akiko.cpp:1949,1954)
 			if (tx_dma_delay != 2'd0) tx_dma_delay <= tx_dma_delay - 2'd1;
@@ -631,6 +672,21 @@ if (NATIVE_CD32) begin : g_cd
 						cdrom_sector_counter <= 8'h0;
 						sector_ready         <= 1'b0;
 						sec_wr_ptr           <= 12'h0;
+						// 2026-06-05 residual fix: a new READ DATA invalidates any
+						// PBX ship still in flight from the PREVIOUS read so its
+						// PBX_FIN cannot bump the counter we just reset to 0 (off-
+						// by-one recurrence). The actual SET of pbx_ship_invalid is
+						// done in one place after the PBX case (so it also covers a
+						// ship STARTING this same cycle and wins same-cycle conflicts
+						// against the fresh-ship clear). We do NOT abort the ship —
+						// letting it finish its DMA avoids dropping dma_req mid-
+						// handshake (cd_dma_req held until dma_ack, akiko.v:1052); it
+						// delivers the old read's data to the old buffer, only the
+						// counter (which belongs to the NEW read) is protected. The
+						// bridge meanwhile waits on sec_req's !pbx_busy term, so it
+						// can't push into the buffer the stale ship is still reading.
+						// When PBX is already IDLE (validated off-by-one case) this
+						// is a pure no-op.
 					end
 					if (!new_flags[CDFLAG_PBX_BIT]) cdrom_pbx <= 16'h0;
 				end
@@ -785,12 +841,37 @@ if (NATIVE_CD32) begin : g_cd
 				PBX_FIN: begin
 					cdrom_pbx[pbx_seccnt] <= 1'b0;
 					cdrom_intreq          <= cdrom_intreq | CDINT_PBX;
-					cdrom_sector_counter  <= cdrom_sector_counter + 8'd1;
+					// Advance the counter ONLY for a ship not invalidated by an
+					// intervening READ DATA. Two cases are suppressed:
+					//   pbx_ship_invalid: a prior-cycle enable_rising marked this
+					//     ship stale (it began under the previous read; ENABLE 0->1
+					//     already reset the counter to 0) — bumping now would make
+					//     the new read's first fetch base+1 (off-by-one recurrence).
+					//   enable_rising: a new read starts THIS same cycle; its
+					//     cfg_high counter<=0 (textually earlier) would otherwise
+					//     lose the NBA race to this +1. !enable_rising lets it stand.
+					if (!pbx_ship_invalid && !enable_rising)
+						cdrom_sector_counter <= cdrom_sector_counter + 8'd1;
 					sector_ready          <= 1'b0;
 					pbx_busy              <= 1'b0;
 					pbx_state             <= PBX_IDLE;
 				end
 			endcase
+
+			// 2026-06-05 residual fix: centralized sticky ship-invalidation.
+			// Placed AFTER the PBX case so it wins same-cycle NBA conflicts
+			// against the fresh-ship clear and also covers a ship STARTING this
+			// cycle (pbx_starting). A ship that is live (in flight OR starting)
+			// when a new READ DATA fires belongs to the PREVIOUS read -> mark it
+			// invalid; the SET is sticky and idempotent under repeated rapid
+			// rises (the toggle-gen this replaced aliased back to "valid" after
+			// an even number of rises — Codex review d). A fresh ship starting
+			// with no concurrent enable_rising belongs to the current read ->
+			// clear (valid). Otherwise hold the sticky value.
+			if (enable_rising && (pbx_busy || pbx_starting))
+				pbx_ship_invalid <= 1'b1;
+			else if (pbx_starting)
+				pbx_ship_invalid <= 1'b0;
 
 			// -----------------------------------------------------------------
 			// HPS bridge: sector-data in. The two source paths (slow per-
@@ -807,15 +888,29 @@ if (NATIVE_CD32) begin : g_cd
 			if (sec_w_we && !sector_ready) begin
 				sector_buffer[sec_w_addr] <= sec_w_din;
 			end
+
+			// 2026-06-05 residual fix: guard the sector_ready SET with
+			// !enable_rising. A fast-fill byte-2351 that lands in the same cycle
+			// as a new READ DATA (ENABLE 0->1) must NOT re-assert sector_ready
+			// after the restart cleared it — that race is exactly what let the
+			// bridge push a full sector into an already-"full" buffer (every
+			// byte gated off, fill=0) and ship a stale sector. The fill belongs
+			// to the OLD read and is discarded; the new read re-fetches base+0.
 			if (hps_sec_dma_active) begin
 				if (hps_sec_dma_we && hps_sec_dma_addr == 14'd2351
-				    && !sector_ready) sector_ready <= 1'b1;
+				    && !sector_ready && !enable_rising) sector_ready <= 1'b1;
 			end else begin
-				if (hps_sec_push && !sector_ready && sec_wr_ptr != 12'd2352) begin
+				// !enable_rising: a new READ DATA resets sec_wr_ptr<=0 in the
+				// cfg_high block (textually earlier); without this guard a same-
+				// cycle slow-path increment would win the NBA and leave the ptr
+				// at 1 after a restart (Codex recheck, 2026-06-05). Fast path is
+				// the norm for CD32; this hardens the dormant SSPI slow path.
+				if (hps_sec_push && !sector_ready && sec_wr_ptr != 12'd2352
+				    && !enable_rising) begin
 					sec_wr_ptr <= sec_wr_ptr + 12'd1;
 				end
 				if (hps_sec_done) begin
-					if (sec_wr_ptr == 12'd2352) sector_ready <= 1'b1;
+					if (sec_wr_ptr == 12'd2352 && !enable_rising) sector_ready <= 1'b1;
 					sec_wr_ptr <= 12'h0;
 				end
 			end
