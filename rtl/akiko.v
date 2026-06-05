@@ -422,9 +422,24 @@ if (NATIVE_CD32) begin : g_cd
 		if (reset) pbx_addr <= 24'h0;
 		else       pbx_addr <= pbx_addr_c;
 	end
+	// Deep Core garble root-cause fix (2026-06-05): sector_buffer was read
+	// COMBINATIONALLY here (sector_buffer[pbx_byte_idx]), which forces Quartus
+	// to map the 2352-byte array into ~5K ALM registers behind a 2352-way async
+	// read mux + 2352-way write decode — a timing-marginal structure that
+	// intermittently mis-fills/mis-reads under back-to-back fast UIO_SECTOR_RD
+	// block writes (A/B-proven: fast push 100% garble vs slow per-byte push
+	// 25%; D-Cache + PBX-write fixes both falsified → the corruption is born in
+	// the fast FILL of this array). Registering the read makes the array infer
+	// robust M10K block RAM (synchronous read) and incidentally aligns the read
+	// latency with the already-registered pbx_addr. The 1-cycle latency is
+	// invisible: pbx_byte_idx is stable between dma_acks and chipdma_arb samples
+	// pbx_addr/pbx_wbyte on c_7m_rise ≥3 clk_sys cycles after the byte
+	// transition (the same argument that makes pbx_addr's registration safe).
+	reg  [7:0] sector_rd_q;
+	always @(posedge clk) sector_rd_q <= sector_buffer[pbx_byte_idx];
 	wire [7:0]  sector_byte_at_idx = (pbx_byte_idx <  12'd3   ) ? 8'h00 :
 	                                 (pbx_byte_idx == 12'd3   ) ? (cdrom_sector_counter & 8'h1f) :
-	                                 (pbx_byte_idx <  12'd2352) ? sector_buffer[pbx_byte_idx] :
+	                                 (pbx_byte_idx <  12'd2352) ? sector_rd_q :
 	                                                              8'h00;
 	wire [7:0]  pbx_wbyte = (pbx_state == PBX_DATA) ? sector_byte_at_idx : 8'h00;
 
@@ -595,9 +610,27 @@ if (NATIVE_CD32) begin : g_cd
 					cdrom_flags <= new_flags;
 					// CDFLAG_ENABLE 0->1: reset sector_counter and clear OVERFLOW
 					// (akiko.cpp:1973-1976).
+					//
+					// 2026-06-05 Deep Core off-by-one fix: ALSO drop any stale
+					// staged sector (sector_ready) and reset the slow-path write
+					// pointer. Each READ DATA toggles ENABLE 0->1, resetting the
+					// counter to 0. If a sector staged by the PREVIOUS read is
+					// still pending (sector_ready=1) when the new read begins, the
+					// PBX engine ships THAT stale sector tagged counter&0x1f=0 and
+					// PBX_FIN advances the counter to 1 — so the new read's first
+					// real fetch is base+1, not base (HW-confirmed: read#2 start=21
+					// delivered lba=22). The BIOS then parses a sector-shifted
+					// ISO9660 directory and walks a garbage extent. WinUAE starts
+					// each read fresh; clearing sector_ready here matches that so
+					// the counter=0 fetch (base+0) ships first, tagged 0 — aligning
+					// both the data AND the BIOS's per-slot ordering tag. CF (one
+					// long streaming read) is unaffected: a single ENABLE 0->1 at
+					// boot with an already-empty buffer.
 					if (new_flags[CDFLAG_ENABLE_BIT] && !cdrom_flags[CDFLAG_ENABLE_BIT]) begin
 						cdrom_intreq         <= cdrom_intreq & ~CDINT_OVERFLOW;
 						cdrom_sector_counter <= 8'h0;
+						sector_ready         <= 1'b0;
+						sec_wr_ptr           <= 12'h0;
 					end
 					if (!new_flags[CDFLAG_PBX_BIT]) cdrom_pbx <= 16'h0;
 				end
