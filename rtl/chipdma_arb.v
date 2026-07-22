@@ -68,6 +68,11 @@ module chipdma_arb
 	input       [7:0] akiko_dma_wbyte,
 	output      [7:0] akiko_dma_rbyte,
 	output            akiko_dma_ack,
+	// 2026-06-05 owner-freeze: one-clk_sys pulse on the arming edge when this
+	// slot services akiko. akiko latches which sub-engine it is servicing here
+	// so the matching dma_ack is credited to the right engine (closes the
+	// cross-engine ack-ownership race; see akiko.v dma_arm).
+	output            akiko_arm,
 
 	// From cdtv bridge (single-byte master, M2 phase-1b sector DMA).
 	// Same protocol as akiko: req held until ack pulses. CDTV does writes
@@ -254,6 +259,10 @@ wire arm_now = (state == S_IDLE) & c_7m_rise & minimig_idle & any_req;
 // --- arb_request: we want to be on the bus this cycle. Either we
 //     just armed combinationally, or we are mid-slot (S_DRIVE).
 wire arb_request = arm_now | (state == S_DRIVE);
+
+// --- owner-freeze: tell akiko the exact cycle we latch its byte so it can
+//     freeze the serving engine (arm_now picks akiko when ~arming_is_cdtv).
+assign akiko_arm = arm_now & ~arming_is_cdtv;
 
 // --- arb_drive: the actual override. Masked by minimig_busy on EVERY
 //     cycle so a slot minimig grabs (e.g. across a c_7m boundary into

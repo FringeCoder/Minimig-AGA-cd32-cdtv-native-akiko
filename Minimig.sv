@@ -412,6 +412,7 @@ wire [23:0] akiko_dma_baddr_w;
 wire  [7:0] akiko_dma_wbyte_w;
 wire  [7:0] akiko_dma_rbyte_w;
 wire        akiko_dma_ack_w;
+wire        akiko_dma_arm_w;   // owner-freeze pulse: chipdma_arb -> fastchip/akiko
 
 // Arbiter outputs that drive sdram_ctrl's chipDMA port (replacing the
 // direct minimig wiring). Default: pass minimig through. When akiko
@@ -859,6 +860,7 @@ chipdma_arb chipdma_arb
 	.akiko_dma_wbyte (akiko_dma_wbyte_w    ),
 	.akiko_dma_rbyte (akiko_dma_rbyte_w    ),
 	.akiko_dma_ack   (akiko_dma_ack_w      ),
+	.akiko_arm       (akiko_dma_arm_w      ),
 
 	// From / to cdtv bridge (M2 phase-1b sector DMA — chip-RAM writes).
 	.cdtv_dma_req    (cdtv_dma_req_w       ),
@@ -1016,6 +1018,7 @@ fastchip fastchip
 	.akiko_dma_wbyte (akiko_dma_wbyte_w ),
 	.akiko_dma_rbyte (akiko_dma_rbyte_w ),
 	.akiko_dma_ack   (akiko_dma_ack_w   ),
+	.akiko_dma_arm   (akiko_dma_arm_w   ),
 
 	// M3: Akiko HPS bridge to hps_ext (akiko_uio_* on fastchip side, akiko_*
 	// on hps_ext side — names flip because the two modules describe the
