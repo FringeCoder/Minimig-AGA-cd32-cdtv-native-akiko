@@ -72,11 +72,47 @@ module cpu_wrapper
 	output            a2065_ena,
 	output reg  [7:0] a2065_base,
 
+	// CDTV mode. When 1, the CDTV DMAC card joins the autoconfig chain
+	// ahead of Toccata/Z2 fastram with the WinUAE-canonical ROM bytes
+	// from cdtv.cpp cdtv_init.
+	input             cdtv_mode,
+
+	// CDTV bridge data path. After autoconfig at $E80000, the BIOS talks
+	// to the bridge at $E90000-$E9FFFF (DMAC/TPI/CR-511) and $DC8000-
+	// $DCFFFF (NVRAM). Both windows are decoded in gary.v (sel_cdtv +
+	// sel_cdtv_nvram) and the bridge / NVRAM module drive cdtv_din +
+	// cdtv_selack to short-circuit cpu_din the same cycle — no DTACK wait,
+	// the same pattern as fastchip_selack / fastchip_dout.
+	input      [15:0] cdtv_din,
+	input             cdtv_selack,
+
+	// AC ROM mirror feed. The BIOS reads back the autoconfig identity
+	// bytes at $E900-$E93F after relocating the board. cdtv_bridge.v
+	// provides the byte offset; cpu_wrapper looks up the 8-bit ROM value
+	// from its existing ac_rom table.
+	input       [5:0] cdtv_ac_rom_addr,
+	output      [7:0] cdtv_ac_rom_byte,
 
 	output reg  [1:0] cpustate,
 	output reg  [3:0] cacr,
-	output reg [31:0] nmi_addr
+	output reg [31:0] nmi_addr,
+
+	// AC-config state exported for chipdma_arb's memory_router
+	// instance. Same registers that drive cpu_wrapper's own decode at
+	// lines 553-625; routing the bridge DMA through the same view keeps
+	// CPU and DMA in lockstep on which Zorro window is live.
+	output            z2ram_ena_out,
+	output      [4:0] z3ram_base0_out,
+	output            z3ram_ena0_out,
+	output      [3:0] z3ram_base1_out,
+	output            z3ram_ena1_out
 );
+
+assign z2ram_ena_out   = z2ram_ena;
+assign z3ram_base0_out = z3ram_base0;
+assign z3ram_ena0_out  = z3ram_ena0;
+assign z3ram_base1_out = z3ram_base1;
+assign z3ram_ena1_out  = z3ram_ena1;
 
 assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
 assign ramshared    = sel_dd;
@@ -84,20 +120,46 @@ assign ramshared    = sel_dd;
 // NMI
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
 
-wire sel_z3ram0 = (cpu_addr[31:27] == z3ram_base0) && z3ram_ena0;
-wire sel_z3ram1 = (cpu_addr[31:28] == z3ram_base1) && z3ram_ena1;
-wire sel_z2ram  = !cpu_addr[31:24] && (cpu_addr[23] ^ |cpu_addr[22:21]) && z2ram_ena; // addr[23:21] = 1..4
-wire sel_zram   = sel_z3ram0 | sel_z3ram1 | sel_z2ram;
-wire sel_dd     = (cpu_addr[31:16] == 16'h00DD) && (cpu_addr[15:13] == 'b010);
-wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
+// Address decode + ramaddr remap factored into shared module so chipdma_arb
+// can apply the same authenticity bridge for Akiko/CDTV DMA.
+wire sel_chipram;
+wire sel_kickram;
+wire sel_kicklower;
+wire sel_z2ram;
+wire sel_z3ram0;
+wire sel_z3ram1;
+wire sel_zram;
+wire sel_dd;
+wire sel_rtg;
 
-// don't sel_kickram when writing
-wire sel_kickram   = !cpu_addr[31:24] && (&cpu_addr[23:19] || (cpu_addr[23:19] == 5'b11100)) && ckick && wr;	// $f8xxxx, e0xxxx
-wire sel_kicklower = !cpu_addr[31:24] && (cpu_addr[23:18] == 6'b111110);
-wire sel_chipram   = !cpu_addr[31:21] && cchip; 		             //$000000 - $1FFFFF
+memory_router u_memory_router
+(
+	.cpu_addr      (cpu_addr      ),
+	.cchip         (cchip         ),
+	.ckick         (ckick         ),
+	.wr            (wr            ),
+	.bootrom       (bootrom       ),
+	.z2ram_ena     (z2ram_ena     ),
+	.z3ram_base0   (z3ram_base0   ),
+	.z3ram_ena0    (z3ram_ena0    ),
+	.z3ram_base1   (z3ram_base1   ),
+	.z3ram_ena1    (z3ram_ena1    ),
+	.sel_chipram   (sel_chipram   ),
+	.sel_kickram   (sel_kickram   ),
+	.sel_kicklower (sel_kicklower ),
+	.sel_z2ram     (sel_z2ram     ),
+	.sel_z3ram0    (sel_z3ram0    ),
+	.sel_z3ram1    (sel_z3ram1    ),
+	.sel_zram      (sel_zram      ),
+	.sel_dd        (sel_dd        ),
+	.sel_rtg       (sel_rtg       ),
+	.ramaddr       (ramaddr       ),
+	.zram_sel      (              )  // unused at CPU side; Minimig.sv recomputes per port
+);
+
 
 // we route everything hrtmon related through cart.v (needs a couple of signals to
-// decide what to do, would not be good style to replicate that here). 
+// decide what to do, would not be good style to replicate that here).
 wire sel_nmi_vector = (cpu_addr[31:2] == nmi_addr[31:2]) && (cpustate == 2);
 
 wire [15:0] ramdat;
@@ -107,34 +169,20 @@ assign ramuds = sel_rtg ? lds_in : uds_in;
 assign ramdin = sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
 assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 
-//       Main  DDx  RTG  8M  128M  256M
-//       ----  ---  ---  --  ----  ----
-//        SDR  DDR  RTG  Z2  Z3_0  Z3_1
-// 28      0    0    0   1    0     1
-// 27      0    0    0   1    1     X
-// 26      0    1    1   0    X     X
-// 25-23   0   111  110  0    X     X
-// supported configs: SDR + (Z2, Z3_1, Z3_0+Z3_1)
-
-// This is the mapping to the sram
-// map 00-1f to 00-1f (chipram), a0-ff to 20-7f. All non-fastram goes into the first
-// 8M block(SDRAM). This map should be the same as in minimig_sram_bridge.v 
-// All Zorro RAM goes to DDR3
-assign ramaddr[28]    = sel_zram & ~sel_z3ram0;
-assign ramaddr[27]    = sel_zram & (~sel_z3ram1 | cpu_addr[27]);
-assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}});
-assign ramaddr[22:19] = {4{sel_dd}} | cpu_addr[22:19];
-assign ramaddr[18]    =    sel_dd   | (sel_kicklower & bootrom) | cpu_addr[18];
-assign ramaddr[17:16] = {2{sel_dd}} | cpu_addr[17:16];
-assign ramaddr[15:1]  = cpu_addr[15:1];
-
 assign fastchip_lds = lds_in;
 assign fastchip_uds = uds_in;
 assign fastchip_rnw = wr;
 
 reg  [31:0] cpu_addr;
 reg  [15:0] cpu_dout;
-wire [15:0] cpu_din = ramsel ? ramdat : fastchip_selack ? fastchip_dout : {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
+// CDTV bridge slots in alongside fastchip in the cpu_din mux. Spec section 1:
+// $E90000-$E9FFFF (DMAC/TPI/CR-511) + $DC8000-$DCFFFF (NVRAM) live on the
+// chip bus, but the bridge fires cdtv_selack the same cycle as sel so the
+// CPU does not wait on chip-bus DTACK — same short-circuit as fastchip uses.
+wire [15:0] cpu_din = ramsel ? ramdat :
+                      fastchip_selack ? fastchip_dout :
+                      cdtv_selack ? cdtv_din :
+                      {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
 reg         wr;
 reg         uds_in;
 reg         lds_in;
@@ -208,7 +256,7 @@ cpu_inst_p
 (
   .clk(clk),
   .nreset(reset),
-  .clkena_in(~cpu_req | chipready | ramready | fastchip_ready),
+  .clkena_in(~cpu_req | chipready | ramready | fastchip_ready | cdtv_selack),
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
@@ -271,7 +319,7 @@ fx68k cpu_inst_o
 
 wire cpu_req = (cpustate != 1);
 
-wire cchip = turbochip_d & (!cpustate | dcache_d);
+wire cchip = turbochip_d & (!cpustate | (dcache_d & (cpustate != 2'd3)));  // writes bypass turbo (direct chip bus), reads stay cached
 wire ckick = turbokick_d & (!cpustate | dcache_d);
 
 reg turbochip_d;
@@ -290,10 +338,18 @@ always @(posedge clk) begin
 	end
 end
 
+// The CDTV bridge fires cdtv_selack combinationally with sel, so its data is
+// available on the same cycle. It is the bridge's ready signal, the
+// counterpart of fastchip_ready alongside fastchip_selack, and has to release
+// clkena the same way.
+
 reg       chipreq;
 reg [2:0] cpu_ipl;
 always @(posedge clk) begin
-	chipreq <= cpu_req & ~ramsel & ~fastchip_selack;
+	// chipreq drives the chip-bus DTACK handshake. Gate off the CDTV bridge
+	// the same way fastchip is gated — when cdtv_selack fires, the bridge
+	// is serving the access and the chip bus must stay idle.
+	chipreq <= cpu_req & ~ramsel & ~fastchip_selack & ~cdtv_selack;
 	cpu_ipl <= ipl_i;
 end
 
@@ -360,28 +416,65 @@ end
 
 reg       ac_toccata;
 reg       ac_a2065;
+reg       ac_cdtv;
 reg [2:0] ac_memcard;
 reg [3:0] autocfg_data;
+reg [7:0] cdtv_base;
 
 
 always @(*) begin
 	autocfg_data = 4'b1111;
 
-	// Zorro II RAM (Up to 8 meg at 0x200000). It has a fixed base, so it must be first in the chain.
-	if (~ac_memcard[2] && ac_memcard[1:0]) begin
+	// CDTV DMAC — first in the chain when cdtv_mode is on. ROM image is
+	// the WinUAE cdtv.cpp dmacmemory[] (cdtv_init: ew(0x00,0xC1),
+	// ew(0x04,0x03), ew(0x08,0x40), ew(0x10,0x02), ew(0x14,0x02), serial
+	// 0). Nibbles below are what the CPU reads as the high half of each
+	// byte at offsets 0,2,...,3E inside the $E80000 window. chip_addr[6:1]
+	// is the upper 6 bits of the byte address inside the autoconfig page,
+	// matching the existing fastram case statement convention.
+	if (ac_cdtv) begin
 		case (chip_addr[6:1])
-			6'b000000: autocfg_data = 4'b1110;	// Zorro-II card, add mem, no ROM
-			6'b000001:
+			6'h00: autocfg_data = 4'b1100; // byte 0x00: 0xC1 high nibble (NOT inv) -> 0xC
+			6'h01: autocfg_data = 4'b0001; // byte 0x02: 0xC1 low nibble (NOT inv)  -> 0x1
+			// All other registers below are inverted-nibble. Defaults to 4'b1111
+			// (= NOT 0x0) for serial/reserved bytes, set explicitly only where the
+			// underlying nibble is non-zero.
+			6'h03: autocfg_data = 4'b1100; // byte 0x06: NOT(0x03 lo nibble) = NOT 0x3 = 0xC (product number)
+			6'h04: autocfg_data = 4'b1011; // byte 0x08: NOT(0x40 hi nibble) — CANT_SHUTUP
+			6'h09: autocfg_data = 4'b1101; // byte 0x12: NOT(0x02 lo nibble) = NOT 0x2 = 0xD (manuf hi)
+			6'h0B: autocfg_data = 4'b1101; // byte 0x16: NOT(0x02 lo nibble) = NOT 0x2 = 0xD (manuf lo)
+			default: autocfg_data = 4'b1111;
+		endcase
+	end
+	// Zorro II RAM (Up to 8 meg at 0x200000). It has a fixed base, so it must be first in the chain.
+	// Match the WinUAE fastmem PIC bytes exactly so the CD32 BIOS
+	// links Z2 into the system memory free list. Previously the PIC advertised
+	// pid=0x00 (invalid per Z2 spec) and manuf=0x139c; CD32 BIOS rejected the card,
+	// AllocMem fell back to chip RAM, and the CD command buffer landed at $1FE400
+	// (top of chip) instead of Z2 $2xxxxx. WinUAE reference (CD32-Z2-test.uae log):
+	//   Card 01: 'Z2 Fast RAM'  e0.51.00.00.07.db.00.00.00.01.00.00.00.00.00.00
+	//   MID 2011 (07db) PID 81 (51) SER 00000001
+	// Stored as Z2-inverted nibbles for offsets >= $04.
+	else if (~ac_memcard[2] && ac_memcard[1:0]) begin
+		case (chip_addr[6:1])
+			6'b000000: autocfg_data = 4'b1110;	// type byte $00 hi = 0xE (Z2 + add_mem, not-inverted)
+			6'b000001:                                  // type byte $00 lo = size code (not-inverted)
 				case (ac_memcard[1:0])
 							1: autocfg_data = 4'b0110; // 2MB
 							2: autocfg_data = 4'b0111; // 4MB
 					default: autocfg_data = 4'b0000; // 8MB
 				endcase
-			6'b001000: autocfg_data = 4'b1110;	// Manufacturer ID: 0x139c
-			6'b001001: autocfg_data = 4'b1100;
-			6'b001010: autocfg_data = 4'b0110;
-			6'b001011: autocfg_data = 4'b0011;
-			6'b010011: autocfg_data = 4'b1110; //serial=1
+			// Product number 0x51 (~0x5=0xA, ~0x1=0xE)
+			6'b000010: autocfg_data = 4'b1010;
+			6'b000011: autocfg_data = 4'b1110;
+			// Flags 0x00 — default 0xF/0xF reconstructs to inverted 0x00 ✓ (no override needed)
+			// Manuf ID 0x07DB: byte 4 = 0x07 (~0x0=0xF,~0x7=0x8), byte 5 = 0xDB (~0xD=0x2,~0xB=0x4)
+			6'b001000: autocfg_data = 4'b1111; // manuf hi hi (default 0xF == ~0x0, redundant but explicit)
+			6'b001001: autocfg_data = 4'b1000; // manuf hi lo
+			6'b001010: autocfg_data = 4'b0010; // manuf lo hi
+			6'b001011: autocfg_data = 4'b0100; // manuf lo lo
+			// Serial = 0x00000001 (only LSB nibble set), other serial bytes default 0
+			6'b010011: autocfg_data = 4'b1110; // serial[3] lo = ~0x1 = 0xE
 			  default:;
 		endcase
 	end
@@ -451,7 +544,63 @@ always @(*) begin
 	end
 end
 
-wire sel_autoconfig = (chip_addr[23:16] == 8'b11101000) && (ac_memcard || ac_toccata || ac_a2065); //$E80000 - $E8FFFF
+wire sel_autoconfig = (chip_addr[23:16] == 8'b11101000) && (ac_memcard || ac_toccata || ac_a2065 || ac_cdtv); //$E80000 - $E8FFFF
+
+// CDTV AC ROM byte mirror — spec section 2.2 + section 2.3 row 1.
+// The BIOS reads $E900-$E93F (AC ROM at the post-relocation base) to
+// re-identify the board. Returned bytes are the Z2-encoded NIBBLE form
+// stored in WinUAE's dmacmemory[] array — the BIOS does NOT see the
+// raw logical value, it sees the encoded nibbles split across two
+// adjacent offsets.
+//
+// ew() helper at cdtv.cpp:1610-1619 splits each logical byte:
+//   * Offsets $00/$02/$40/$42 use the NOT-inverted form:
+//       dmacmemory[addr  ] = value & 0xF0
+//       dmacmemory[addr+2] = (value & 0x0F) << 4
+//   * Other offsets use the INVERTED form (Z2 complement):
+//       dmacmemory[addr  ] = ~(value & 0xF0) & 0xF0
+//       dmacmemory[addr+2] = ~((value & 0x0F) << 4) & 0xF0
+// Untouched slots stay at 0xFF (per memset(dmacmemory, 0xff) at line 1753).
+//
+// cdtv_ac_rom_addr [5:0] is the byte offset / 2 — so addr=0 hits the
+// AC ROM at byte $00, addr=1 hits byte $02, etc.
+//
+// ew() calls in cdtv_init (cdtv.cpp:1755-1769):
+//   ew(0x00, 0xC1)  type=Z2+linked+ROM (NOT inv)
+//   ew(0x04, 0x03)  product number = 3
+//   ew(0x08, 0x40)  size flag = 64 KB
+//   ew(0x10, 0x02)  manuf hi = 2
+//   ew(0x14, 0x02)  manuf lo = 2
+//   ew(0x18..0x24, 0)  serial = 0
+//
+// Resulting bytes at the AC ROM offsets used by the BIOS:
+reg [7:0] cdtv_ac_rom_byte_r;
+always @* begin
+	cdtv_ac_rom_byte_r = 8'hFF;
+	case (cdtv_ac_rom_addr)
+		6'h00: cdtv_ac_rom_byte_r = 8'hC0;   // byte $00 = 0xC1 hi nibble (NOT inv)
+		6'h01: cdtv_ac_rom_byte_r = 8'h10;   // byte $02 = 0xC1 lo nibble << 4 (NOT inv)
+		6'h02: cdtv_ac_rom_byte_r = 8'hF0;   // byte $04 = ~(0x03 hi nibble) = 0xF0 (inv)
+		6'h03: cdtv_ac_rom_byte_r = 8'hC0;   // byte $06 = ~(0x03 lo nibble << 4) = 0xC0 (inv)
+		6'h04: cdtv_ac_rom_byte_r = 8'hB0;   // byte $08 = ~(0x40 hi nibble) = 0xB0 (inv)
+		6'h05: cdtv_ac_rom_byte_r = 8'hF0;   // byte $0A = ~(0x40 lo nibble << 4) = 0xF0
+		6'h08: cdtv_ac_rom_byte_r = 8'hF0;   // byte $10 = ~(0x02 hi) = 0xF0
+		6'h09: cdtv_ac_rom_byte_r = 8'hD0;   // byte $12 = ~(0x02 lo << 4) = 0xD0
+		6'h0A: cdtv_ac_rom_byte_r = 8'hF0;   // byte $14 = ~(0x02 hi) = 0xF0
+		6'h0B: cdtv_ac_rom_byte_r = 8'hD0;   // byte $16 = ~(0x02 lo << 4) = 0xD0
+		// Serial bytes $18 / $1C / $20 / $24 = ew(_, 0): both nibbles 0 inv -> 0xF0
+		6'h0C: cdtv_ac_rom_byte_r = 8'hF0;   // byte $18
+		6'h0D: cdtv_ac_rom_byte_r = 8'hF0;   // byte $1A
+		6'h0E: cdtv_ac_rom_byte_r = 8'hF0;   // byte $1C
+		6'h0F: cdtv_ac_rom_byte_r = 8'hF0;   // byte $1E
+		6'h10: cdtv_ac_rom_byte_r = 8'hF0;   // byte $20
+		6'h11: cdtv_ac_rom_byte_r = 8'hF0;   // byte $22
+		6'h12: cdtv_ac_rom_byte_r = 8'hF0;   // byte $24
+		6'h13: cdtv_ac_rom_byte_r = 8'hF0;   // byte $26
+		default: cdtv_ac_rom_byte_r = 8'hFF; // memset(0xff) default
+	endcase
+end
+assign cdtv_ac_rom_byte = cdtv_ac_rom_byte_r;
 
 reg       z2ram_ena;
 reg [4:0] z3ram_base0;
@@ -464,8 +613,19 @@ always @(posedge clk) begin
 
 	if (~reset | ~reset_out) begin
 		ac_memcard  <= cpucfg[1] ? fastramcfg : fastramcfg[2] ? 3'd3 : {1'b0, fastramcfg[1:0]};
-		ac_toccata  <= 1;
+		// In CDTV mode, suppress Toccata (a real CDTV had no soundcard) so
+		// the DMAC card is alone in the chain, matching the WinUAE log
+		// "Card 01: CDTV DMAC" / end.
+		ac_toccata  <= cdtv_mode ? 1'b0 : 1'b1;
 		ac_a2065    <= 1;
+		// The 6525 TPI is wired to D[7:0] on real CDTV silicon: the driver
+		// reads and writes TPI at ODD byte addresses ($B3/B5/...) via LDS.
+		// cdtv_bridge.v has to gate TPI writes on lwr and place tpi_rd on
+		// the lower read lane to match, or the driver's first STCH poll
+		// (`btst.b #2, $B5(a5)` at $F05D90 in cdtv.device) reads 0x00 and
+		// InitResident hangs before any visible log activity.
+		ac_cdtv     <= cdtv_mode;
+		cdtv_base   <= 8'hE9;       // WinUAE default fallback ($E90000)
 		z2ram_ena   <= 0;
 		z3ram_ena0  <= 0;
 		z3ram_ena1  <= 0;
@@ -473,7 +633,16 @@ always @(posedge clk) begin
 		z3ram_base1 <= 1;
 	end
 	else if (sel_autoconfig && ~chip_rw && ~chip_uds && old_uds) begin
-		if(~ac_memcard[2] && ac_memcard[1:0]) begin
+		if(ac_cdtv) begin
+			if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 — KS writes the base address byte
+				cdtv_base <= cpu_dout[15:8];
+				ac_cdtv   <= 0;
+			end
+			else if (chip_addr[6:1] == 6'b100110) begin // Register 0x4C — "shut up" / decline
+				ac_cdtv   <= 0;
+			end
+		end
+		else if(~ac_memcard[2] && ac_memcard[1:0]) begin
 			if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 - config, ZII RAM
 				z2ram_ena <= 1;
 				ac_memcard <= 0;
@@ -483,7 +652,7 @@ always @(posedge clk) begin
 			if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 - config, Toccata card in ZII io space ($E90000)
 				toccata_base <= cpu_dout[7:0];
 				ac_toccata<=0;
-			end		
+			end
 		end
 		else if(ac_a2065) begin
 			if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 - config, A2065 Ethernet
@@ -508,7 +677,10 @@ always @(posedge clk) begin
 	end
 end
 
-assign toccata_ena = ~ac_toccata;
+// In CDTV mode ac_toccata resets to 0 to suppress Toccata from autoconfig,
+// but toccata_base is uninitialized — without the cdtv_mode mask Toccata
+// would claim addr $00xxxx (the CPU reset vector) at FPGA boot. Mask it out.
+assign toccata_ena = ~ac_toccata & ~cdtv_mode;
 assign a2065_ena   = ~ac_a2065;
 
 endmodule
