@@ -8,14 +8,14 @@
 //
 // cdtv_hps_bridge: minimal UIO byte-stream adapter for cdtv_bridge.v.
 //
-// CDTV M2 phase-1a — userspace command/reply stream over UIO class 0xF800
+// CDTV userspace command/reply stream over UIO class 0xF800
 // (hps_ext.v: io_din[15:9] == 7'b1111100).
 //
 // Direction model (same convention as akiko_hps_bridge):
 //   - UIO read  (0x62 + 0xF800): byte = cmd_in_byte; cmd_in_pop pulses.
 //   - UIO write (0x61 + 0xF800): cmd_out_data = uio_din; cmd_out_push pulses.
 //
-// Sub-channels (phase-1e+):
+// Sub-channels:
 //   - UIO read  (0x62 + 0xF840): bit 0 = stch_ack (the BIOS took the STCH
 //     interrupt); the read clears it.
 //   - UIO write (0x61 + 0xF840): pulses stch_inject for one clk. The bridge
@@ -24,7 +24,7 @@
 //     mount. CDTV BIOS is event-driven and won't advance past the initial
 //     STATUS poll without seeing STCH after the disc appears.
 //   - UIO write (0x61 + 0xF820): each byte pushes sec_byte_data + pulses
-//     sec_byte_push (M2 phase-1b). The bridge enqueues the byte into the
+//     sec_byte_push. The bridge enqueues the byte into the
 //     8 KB sector staging FIFO; the drain FSM then master-writes it to
 //     chip RAM at acr via chipdma_arb.
 //
@@ -41,7 +41,7 @@ module cdtv_hps_bridge
 	// UIO byte stream from hps_ext
 	input             uio_cs,
 	input             uio_cs_stch,    // STCH-inject sub-channel
-	input             uio_cs_sec,     // sector-push sub-channel (M2 phase-1b)
+	input             uio_cs_sec,     // sector-push sub-channel
 	input             uio_wr,
 	input             uio_rd,
 	input       [7:0] uio_din,

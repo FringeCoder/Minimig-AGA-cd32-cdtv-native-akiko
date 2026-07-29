@@ -126,7 +126,7 @@ module cdtv_bridge
 	output reg        stch_ack,
 	input             stch_ack_clr,
 
-	// Chip-RAM master to chipdma_arb (M2 phase-1b). Single-byte write
+	// Chip-RAM master to chipdma_arb. Single-byte write
 	// protocol identical to akiko's port:
 	//   - assert cdtv_dma_req with we=1, baddr=acr[23:0], wbyte=sec_fifo head
 	//   - chipdma_arb pulses cdtv_dma_ack once it has written the byte
@@ -176,7 +176,7 @@ reg        fifo_touch;
 reg        dma_complete_pulse;
 reg        dma_complete_armed; // one-shot guard: fire dma_complete only once per DMA cycle
 
-// --- Sector drain FSM (M2 phase-1b chip-RAM master) ---
+// --- Sector drain FSM (chip-RAM master) ---
 // Sits between the sector staging FIFO and chipdma_arb. While dmac_dma is
 // active, wtc > 0, and the FIFO has bytes, the FSM emits TWO byte writes
 // per WTC tick (CDTV WTC is a 16-bit word counter — see spec section 2.3
@@ -367,7 +367,7 @@ assign sten_any  = sten_pulse_ext | sten_pulse_int;
 // to $E9xx43 and waits for INT2 on STCH. Without this OR-in, the
 // driver hangs in cdtv.device InitResident.
 //
-// SCOR frame-tick generator (phase-1f). WinUAE `CDTV_hsync_handler`
+// SCOR frame-tick generator. WinUAE `CDTV_hsync_handler`
 // (cdtv.cpp:1253-1258) fires SCOR every frame when media is present:
 // "frame interrupts happen all the time motor is running". CDTV BIOS
 // uses SCOR as its periodic heartbeat — without it the cd.device worker
@@ -422,7 +422,7 @@ assign selack = sel;
 // slots default to 0x00 per spec section 2.3.
 assign dout   = {rd_byte_eb, rd_byte_ob};
 
-// Free-running ~50 Hz SCOR pulse generator (phase-1f). See tpi_edges
+// Free-running ~50 Hz SCOR pulse generator. See tpi_edges
 // comment for rationale.
 always @(posedge clk) begin
 	if (reset) begin
@@ -528,7 +528,7 @@ always @(posedge clk) begin
 			dma_complete_armed <= 1'b0;
 		end
 
-		// Per-word DMA bookkeeping (M2 phase-1b drain). The FSM emits two
+		// Per-word DMA bookkeeping. The drain FSM emits two
 		// byte writes per WTC word; on the LOW-byte ack we advance acr by 2
 		// (next word's base) and decrement wtc by 1. NBA last-wins behavior
 		// versus CPU writes to $80-$87 above is acceptable: the BIOS leaves

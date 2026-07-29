@@ -99,7 +99,7 @@ module fastchip
 	input   [7:0] nvr_load_din,
 	input         nvr_load_we,
 
-	// M5+ fast sector DMA path: bytes from hps_io's UIO_SECTOR_RD
+	// Fast sector DMA path: bytes from hps_io's UIO_SECTOR_RD
 	// pipeline (sd_buff_*, gated by sd_ack[AKIKO_SEC_SLOT] in Minimig.sv).
 	// Pure pass-through to akiko module — fastchip just routes signals.
 	input         hps_sec_dma_active,

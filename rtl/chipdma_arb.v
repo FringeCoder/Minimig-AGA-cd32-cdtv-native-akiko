@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// chipdma_arb -- M5 chip-RAM master arbiter (v2: c_7m-aligned drive).
+// chipdma_arb -- chip-RAM master arbiter, c_7m-aligned drive.
 //
 // Sits between minimig.v's chipset DMA signals (Agnus / blitter / copper)
 // and sdram_ctrl's chipDMA port. Default forwards minimig's signals
 // through unchanged. When the chipset is not using a slot, the arbiter
 // claims it for one of two single-byte masters:
 //   - akiko (CD32 native-Akiko PBX/DMA path) — same as v2
-//   - cdtv  (CDTV bridge sector DMA, M2 phase-1b)
+//   - cdtv  (CDTV bridge sector DMA)
 // Static priority: akiko > cdtv. CD32 and CDTV cores never coexist (the
 // chipset gate that enables akiko also disables cdtv_mode in cpu_wrapper),
 // so the static choice never actually arbitrates — it just keeps the
@@ -74,7 +74,7 @@ module chipdma_arb
 	// cross-engine ack-ownership race; see akiko.v dma_arm).
 	output            akiko_arm,
 
-	// From cdtv bridge (single-byte master, M2 phase-1b sector DMA).
+	// From cdtv bridge (single-byte master, sector DMA).
 	// Same protocol as akiko: req held until ack pulses. CDTV does writes
 	// only (sector bytes into chip RAM at `acr`), so rbyte is unused, but
 	// the port is symmetrical to keep the diff minimal.

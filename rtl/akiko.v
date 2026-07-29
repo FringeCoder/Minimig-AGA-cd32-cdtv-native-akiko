@@ -29,18 +29,18 @@
 //     PIO byte, NVRAM I2C byte stubs, and akiko_irq output.
 //
 // Register semantics, masks, and read-mirror behavior are derived from
-// research/repos/WinUAE/akiko.cpp (akiko_bget2/akiko_bput2). Citations
-// in comments below reference WinUAE line numbers at SHA 2c7f8581.
+// WinUAE's akiko.cpp (akiko_bget2/akiko_bput2). Citations in comments
+// below reference WinUAE line numbers at SHA 2c7f8581.
 //
-// Notes worth remembering for later milestones (M2+):
+// Two places where the WinUAE comments and the WinUAE code disagree:
 //   * The cmd/status DMA sub-buffer offsets are documented inconsistently
 //     in WinUAE: the top-of-file comment claims base+0x000 is the command
 //     buffer, but the executable code (akiko.cpp:1939-1941) uses
 //       cdrx_address  = base | 0x000  // drive -> memory (response/status)
 //       cdtx_address  = base | 0x200  // memory -> drive (command)
 //       subcode_addr  = base | 0x100
-//     The code is the truth. M1 only stores the masked base; M2 must use
-//     these offsets when implementing TX/RX DMA.
+//     The code is the truth, and these are the offsets the TX/RX DMA
+//     below uses.
 //   * The "data DMA base must be 64K aligned" comment disagrees with the
 //     code mask 0x00fff000 (4K alignment). Code wins; we use 4K.
 //
@@ -131,7 +131,7 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	input       [7:0] nvr_load_din,
 	input             nvr_load_we,
 
-	// M5+ fast sector path via hps_io's UIO_SECTOR_RD pipeline.
+	// Fast sector path via hps_io's UIO_SECTOR_RD pipeline.
 	// Coexists with hps_sec_push/byte/done (the slow per-byte SSPI_ACK
 	// path); userspace picks one per push. When userspace sends
 	// `spi_w(UIO_SECTOR_RD | (AKIKO_SEC_SLOT<<8))` followed by a 2352-byte
@@ -834,12 +834,12 @@ if (NATIVE_CD32) begin : g_cd
 						// offset==length (full delivery, length cleared above)
 						// or another rxcmp match (another partial drain).
 						//
-						// The previous "M5 truncation hack" cleared length/offset
-						// on the first rxcmp match, destroying bytes 1..N-1 of
-						// any response BIOS hadn't pre-sized rxcmp for. That
-						// turned the post-INFO 3-byte media-status push into a
-						// single byte, leaving BIOS waiting for a frame it
-						// never received and never advancing to MULTI/TOC.
+						// Do NOT clear length/offset on the first rxcmp match.
+						// That destroys bytes 1..N-1 of any response BIOS has
+						// not pre-sized rxcmp for: the post-INFO 3-byte media-
+						// status push collapses to a single byte and BIOS waits
+						// forever for a frame it never receives, never advancing
+						// to MULTI/TOC.
 						cdrom_intreq <= cdrom_intreq | CDINT_RXDMADONE;
 					end
 					rx_busy     <= 1'b0;
@@ -1056,10 +1056,10 @@ if (NATIVE_CD32) begin : g_cd
 			if (hps_result_done && (cdrom_receive_length == 6'd0)) begin
 				cdrom_receive_length <= hps_result_wr_ptr;
 				hps_result_wr_ptr    <= 6'd0;
-				// v20: drop the M5 SUBCODE-on-push hack; BIOS may interpret
-				// SUBCODE as "drive playing, subcode coming" and stall waiting
-				// for actual subcode data. DRIVERECV alone signals "result
-				// ready" which is what the BIOS path actually needs.
+				// DRIVERECV only, never SUBCODE. DRIVERECV alone signals
+				// "result ready", which is what the BIOS path needs; BIOS
+				// reads SUBCODE as "drive playing, subcode coming" and stalls
+				// waiting for subcode data that is not on its way.
 				cdrom_intreq         <= cdrom_intreq | CDINT_DRIVERECV;
 			end
 		end // else !reset

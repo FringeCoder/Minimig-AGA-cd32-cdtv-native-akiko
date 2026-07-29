@@ -102,25 +102,10 @@ module hps_ext
 	output reg        cdtv_wr,
 	output reg        cdtv_rd,
 	output reg        cdtv_cs,
-	output reg        cdtv_cs_sec,     // sector-push sub-channel (M2 phase-1b)
+	output reg        cdtv_cs_sec,     // sector-push sub-channel
 	output reg        cdtv_cs_stch,    // STCH-inject sub-channel
 	input             cdtv_req         // bit 6 of status word
 );
-
-localparam UIO_MOUSE     = 'h04;
-localparam UIO_KEYBOARD  = 'h05;
-localparam UIO_KBD_OSD   = 'h06;
-localparam UIO_GET_VMODE = 'h2C;
-localparam UIO_SET_VPOS  = 'h2D;
-
-localparam EXT_CMD_MIN  = UIO_GET_VMODE;
-localparam EXT_CMD_MAX  = UIO_SET_VPOS;
-localparam EXT_CMD_MIN2 = 'h61;
-localparam EXT_CMD_MAX2 = 'h63;
-
-reg [15:0] io_dout;
-reg        dout_en;
-reg  [4:0] byte_cnt;
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
 assign io_din = EXT_BUS[31:16];
@@ -128,6 +113,21 @@ assign EXT_BUS[32] = dout_en | io_fpga;
 assign io_strobe = EXT_BUS[33];
 assign io_uio = EXT_BUS[34];
 assign io_fpga = EXT_BUS[35];
+
+localparam EXT_CMD_MIN  = UIO_GET_VMODE;
+localparam EXT_CMD_MAX  = UIO_SET_VPOS;
+localparam EXT_CMD_MIN2 = 'h61;
+localparam EXT_CMD_MAX2 = 'h63;
+
+localparam UIO_MOUSE     = 'h04;
+localparam UIO_KEYBOARD  = 'h05;
+localparam UIO_KBD_OSD   = 'h06;
+localparam UIO_GET_VMODE = 'h2C;
+localparam UIO_SET_VPOS  = 'h2D;
+
+reg [15:0] io_dout;
+reg        dout_en;
+reg  [4:0] byte_cnt;
 
 always@(posedge clk_sys) begin : main_proc
 	reg [15:0] cmd;
