@@ -108,15 +108,7 @@ module cpu_wrapper
 	// 2026-05-27 D-cache software toggle: '1' = D-cache enabled, '0' = off.
 	// Sourced from TG68K CACR bit 8 (real 030 spec). Defaults '1' until SW
 	// claims ownership via any MOVEC CACR write. See cpu_cache_new cc_den.
-	output            dcache_sw_en,
-
-	// 2026-05-27 Z2-hang trace ring drain. UIO class 7'b1111101 (0xFA00).
-	// 16 bytes per entry; userspace reads bytes contiguously, ring empty
-	// returns 0x00. See rtl/z2_trace.v header for entry format and
-	// trigger conditions. Optional; tie cs/rd to 0 to disable drain.
-	input             z2_trace_cs,
-	input             z2_trace_rd,
-	output      [7:0] z2_trace_dout
+	output            dcache_sw_en
 );
 
 wire dcache_sw_en_p;
@@ -172,45 +164,6 @@ memory_router u_memory_router
 	.zram_sel      (              )  // unused at CPU side; Minimig.sv recomputes per port
 );
 
-// 2026-05-27 Z2-hang instrumentation. Captures the CPU view of every
-// fast-RAM access through memory_router, plus AC-done sentinels and
-// stall conditions. Userspace drains via UIO class 0xFA00.
-//
-// Build-time gate: instantiated only when Z2_TRACE_BUILD is defined
-// (build_minimig.ps1 -Z2Trace). Release builds omit it entirely so the
-// 4 KB M10K ring + capture logic cost zero ALMs. CAPTURE_ENABLE then lets
-// an investigation build keep the ring but disable capture.
-`ifdef Z2_TRACE_BUILD
-z2_trace #(.CAPTURE_ENABLE(1)) u_z2_trace(
-	.clk           (clk           ),
-	.reset         (~reset        ),
-	.ramsel        (ramsel        ),
-	.ramready      (ramready      ),
-	.cpu_addr      (cpu_addr      ),
-	.ramaddr       (ramaddr       ),
-	.ramdat        (ramdat        ),
-	.wr            (wr            ),
-	.uds_in        (uds_in        ),
-	.lds_in        (lds_in        ),
-	.cpustate      (cpustate      ),
-	.cchip         (cchip         ),
-	.ckick         (ckick         ),
-	.sel_z2ram     (sel_z2ram     ),
-	.sel_z3ram0    (sel_z3ram0    ),
-	.sel_z3ram1    (sel_z3ram1    ),
-	.sel_kickram   (sel_kickram   ),
-	.sel_kicklower (sel_kicklower ),
-	.sel_chipram   (sel_chipram   ),
-	.sel_dd        (sel_dd        ),
-	.sel_rtg       (sel_rtg       ),
-	.z2ram_ena     (z2ram_ena     ),
-	.uio_cs_trace  (z2_trace_cs   ),
-	.uio_rd        (z2_trace_rd   ),
-	.uio_dout      (z2_trace_dout )
-);
-`else
-assign z2_trace_dout = 8'h00;
-`endif
 
 // we route everything hrtmon related through cart.v (needs a couple of signals to
 // decide what to do, would not be good style to replicate that here).

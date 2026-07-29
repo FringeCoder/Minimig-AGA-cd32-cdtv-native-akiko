@@ -300,11 +300,6 @@ module minimig
 	output        cdtv_nvr_dirty,
 	input         cdtv_nvr_clear_dirty,
 
-	// CDTV trace drain (declared for future hps_ext wiring).
-	input         cdtv_trace_uio_cs,
-	input         cdtv_trace_uio_rd,
-	output  [7:0] cdtv_trace_uio_dout,
-
 	// CDDA volume word from the TPI Port B DAC strobes (spec 3.3).
 	output  [9:0] cdtv_cdda_volume,
 
@@ -323,14 +318,7 @@ module minimig
 	input         ide_write,
 	input  [15:0] ide_writedata,
 	input         ide_read,
-	output [15:0] ide_readdata,
-
-	// Chipset bus trace drain (passes through to agnus). With agnus's
-	// CHIPSET_TRACE=0 the trace ring is generate-elided; uio_dout drives 0
-	// and the dead wires DCE out of the bitstream.
-	input         chipset_trace_uio_cs,
-	input         chipset_trace_uio_rd,
-	output  [7:0] chipset_trace_uio_dout
+	output [15:0] ide_readdata
 );
 
 
@@ -552,10 +540,7 @@ agnus AGNUS1
 	.a1k(chipset_config[2]),
 	.ecs(|chipset_config[4:3]),
 	.aga(chipset_config[4]),
-	.floppy_speed(floppy_config[0]),
-	.chipset_trace_uio_cs(chipset_trace_uio_cs),
-	.chipset_trace_uio_rd(chipset_trace_uio_rd),
-	.chipset_trace_uio_dout(chipset_trace_uio_dout)
+	.floppy_speed(floppy_config[0])
 );
 
 //instantiate paula
@@ -984,15 +969,12 @@ toccata #(
 //-------------------------------------------------------------------------------------
 // CDTV native bridge — spec research/docs/cdtv-bridge-spec.md sections 2-7.
 //
-// Three modules tied together: cdtv_bridge (DMAC + TPI + CR-511 FIFOs),
-// cdtv_nvram (16 KB BRAM at $DC8000-$DCFFFF), cdtv_trace (debug ring).
+// Two modules tied together: cdtv_bridge (DMAC + TPI + CR-511 FIFOs) and
+// cdtv_nvram (16 KB BRAM at $DC8000-$DCFFFF).
 // The bridge fires cdtv_selack on every $E9xxxx access; the NVRAM mirrors
 // its own 8-bit data into both halves of a 16-bit word. Both share the
 // cdtv_selack short-circuit into cpu_wrapper's cpu_din mux.
 //-------------------------------------------------------------------------------------
-
-wire        cdtv_trace_we;
-wire [63:0] cdtv_trace_data;
 
 cdtv_bridge cdtv_bridge_inst
 (
@@ -1035,10 +1017,7 @@ cdtv_bridge cdtv_bridge_inst
 	.cdtv_dma_we     (cdtv_dma_we          ),
 	.cdtv_dma_baddr  (cdtv_dma_baddr       ),
 	.cdtv_dma_wbyte  (cdtv_dma_wbyte       ),
-	.cdtv_dma_ack    (cdtv_dma_ack         ),
-
-	.trace_we        (cdtv_trace_we        ),
-	.trace_data      (cdtv_trace_data      )
+	.cdtv_dma_ack    (cdtv_dma_ack         )
 );
 
 cdtv_nvram cdtv_nvram_inst
@@ -1063,19 +1042,6 @@ cdtv_nvram cdtv_nvram_inst
 
 	.dirty           (cdtv_nvr_dirty       ),
 	.clear_dirty     (cdtv_nvr_clear_dirty )
-);
-
-cdtv_trace cdtv_trace_inst
-(
-	.clk             (clk                  ),
-	.reset           (reset                ),
-
-	.trace_we        (cdtv_trace_we        ),
-	.trace_data      (cdtv_trace_data      ),
-
-	.uio_cs          (cdtv_trace_uio_cs    ),
-	.uio_rd          (cdtv_trace_uio_rd    ),
-	.uio_dout        (cdtv_trace_uio_dout  )
 );
 
 // Bridge → cpu_wrapper short-circuit. Either the bridge ($E9 window) or

@@ -299,19 +299,6 @@ wire        akiko_sec_req; // FROM fastchip TO hps_ext (M4 sector status bit)
 wire        akiko_rx_busy; // FROM fastchip TO hps_ext (Phase 18: RX engine busy)
 wire        akiko_nvr_dirty; // FROM fastchip TO hps_ext (NVRAM dirty bit)
 
-// Akiko CPU-bus trace ring (debug). hps_ext drains via akiko_cs_trace sub-
-// channel; bytes flow fastchip -> hps_ext as akiko_trace_din.
-wire        akiko_cs_trace;
-wire        akiko_trace_rd;
-wire  [7:0] akiko_trace_din;
-
-// Chipset bus trace ring (debug, gfx-trio investigation). hps_ext drains
-// via chipset_cs_trace (UIO class 7'b1111011); bytes flow agnus → minimig
-// → here → hps_ext as chipset_trace_din.
-wire        chipset_cs_trace;
-wire        chipset_trace_rd;
-wire  [7:0] chipset_trace_din;
-
 // CDTV HPS bridge wires (M2 phase-1a). Bound to hps_ext's cdtv_* ports
 // via wildcard instantiation. cmd byte-stream sub-channel only —
 // sector / status pulses come later phases.
@@ -322,12 +309,9 @@ wire        cdtv_rd;
 wire        cdtv_cs;
 wire        cdtv_cs_sec;       // phase-1b sector-push sub-channel
 wire        cdtv_cs_stch;      // phase-1e STCH-inject sub-channel
-wire        cdtv_cs_trace;     // phase-1g trace-drain sub-channel
 wire        cdtv_stch_inject;  // 1-clk pulse from cdtv_hps_bridge -> minimig
 wire        cdtv_sec_byte_push_w; // 1-clk pulse per UIO sec byte
 wire  [7:0] cdtv_sec_byte_data_w;
-wire  [7:0] cdtv_trace_din;    // FROM cdtv_trace TO hps_ext (UIO drain byte)
-wire        cdtv_trace_rd;     // strobe from hps_ext -> cdtv_trace
 wire        cdtv_req;          // bit 6 of 0x63 status word
 
 // NVRAM load-from-disk via canonical SD-block path (the pattern SNES,
@@ -722,49 +706,11 @@ cpu_wrapper cpu_wrapper
 	.z3ram_base1_out (z3ram_base1_w   ),
 	.z3ram_ena1_out  (z3ram_ena1_w    ),
 	// 2026-05-27 D-cache software toggle from TG68K CACR bit 8.
-	.dcache_sw_en    (dcache_sw_en_w  ),
-
-	// 2026-05-27 Z2-hang trace ring drain. Wires connect via hps_ext's
-	// .* implicit port: z2_cs_trace, z2_trace_rd, z2_trace_din.
-	.z2_trace_cs     (z2_cs_trace     ),
-	.z2_trace_rd     (z2_trace_rd     ),
-	.z2_trace_dout   (z2_trace_din    )
+	.dcache_sw_en    (dcache_sw_en_w  )
 );
 
 wire dcache_sw_en_w;
 
-// 2026-05-27 Z2-hang trace ring drain wiring (UIO class 0xFA00).
-// hps_ext.v drives z2_cs_trace + z2_trace_rd (output reg), reads
-// z2_trace_din (input [7:0]). cpu_wrapper.v drives the byte stream.
-wire       z2_cs_trace;
-wire       z2_trace_rd;
-wire [7:0] z2_trace_din;
-
-// 2026-05-28 DDR peek sub-channel (UIO class 0xF420, io_din[5]=1 in 0xF400
-// class). Wired into hps_ext via .* -- names must match akiko_cs_peek /
-// akiko_peek_rd / akiko_peek_din. Snoops bridge writes to ram2.
-wire       akiko_cs_peek;
-wire       akiko_peek_rd;
-wire [7:0] akiko_peek_din;
-
-// Build-time gate (see cpu_wrapper.v z2_trace note). Z2_TRACE_BUILD only.
-`ifdef Z2_TRACE_BUILD
-akiko_ddr_peek #(.CAPTURE_ENABLE(1)) akiko_ddr_peek_inst(
-	.clk         (clk_sys        ),
-	.reset       (reset_d        ),
-	.dma_cs      (dma_ddr_cs_w   ),
-	.dma_we      (dma_ddr_we_w   ),
-	.dma_addr    (dma_ddr_addr_w ),
-	.dma_l       (dma_ddr_l_w    ),
-	.dma_u       (dma_ddr_u_w    ),
-	.dma_wr      (dma_ddr_wr_w   ),
-	.uio_cs_peek (akiko_cs_peek  ),
-	.uio_rd      (akiko_peek_rd  ),
-	.uio_dout    (akiko_peek_din )
-);
-`else
-assign akiko_peek_din = 8'h00;
-`endif
 
 // Phase B: AC-state exported from cpu_wrapper, fanout to chipdma_arb's
 // memory_router so bridge DMA picks the same ram1-vs-ram2 routing the CPU
@@ -1047,12 +993,7 @@ fastchip fastchip
 	.hps_sec_dma_active (akiko_sec_dma_active),
 	.hps_sec_dma_byte   (akiko_sec_dma_byte  ),
 	.hps_sec_dma_addr   (akiko_sec_dma_addr  ),
-	.hps_sec_dma_we     (akiko_sec_dma_we    ),
-
-	// Trace sub-channel (debug ring buffer of CPU bus accesses to akiko window).
-	.akiko_uio_cs_trace   (akiko_cs_trace  ),
-	.akiko_uio_trace_rd   (akiko_trace_rd  ),
-	.akiko_uio_trace_dout (akiko_trace_din )
+	.hps_sec_dma_we     (akiko_sec_dma_we    )
 );
 
 
@@ -1244,10 +1185,6 @@ minimig minimig
 	.cdtv_nvr_dirty      (cdtv_nvr_dirty_w     ),
 	.cdtv_nvr_clear_dirty(1'b0                 ),
 
-	.cdtv_trace_uio_cs   (cdtv_cs_trace        ),
-	.cdtv_trace_uio_rd   (cdtv_trace_rd        ),
-	.cdtv_trace_uio_dout (cdtv_trace_din       ),
-
 	.cdtv_cdda_volume    (cdtv_cdda_volume_w   ),
 
 	//user i/o
@@ -1265,14 +1202,7 @@ minimig minimig
 	.ide_write    (ide_wr           ),
 	.ide_writedata(ide_dout         ),
 	.ide_read     (ide_rd           ),
-	.ide_readdata (ide_c_readdata   ),
-
-	// Chipset bus trace drain. hps_ext drives the cs/rd strobes from class
-	// 7'b1111011; agnus's trace ring drains a byte at a time into trace_din.
-	// With CHIPSET_TRACE=0 in agnus.v, uio_dout stays at 8'h00 (DCE).
-	.chipset_trace_uio_cs   (chipset_cs_trace ),
-	.chipset_trace_uio_rd   (chipset_trace_rd ),
-	.chipset_trace_uio_dout (chipset_trace_din)
+	.ide_readdata (ide_c_readdata   )
 );
 
 // power led control

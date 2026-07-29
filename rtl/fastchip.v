@@ -105,14 +105,7 @@ module fastchip
 	input         hps_sec_dma_active,
 	input   [7:0] hps_sec_dma_byte,
 	input  [13:0] hps_sec_dma_addr,
-	input         hps_sec_dma_we,
-
-	// Akiko CPU-bus trace ring (debug). Independent of M3/M4 bridge: hps_ext
-	// pulses akiko_uio_trace_rd to drain one byte at a time; trace_dout returns
-	// the next byte. 4 bytes per entry; byte 3 == 0 means ring empty.
-	input         akiko_uio_cs_trace,
-	input         akiko_uio_trace_rd,
-	output  [7:0] akiko_uio_trace_dout
+	input         hps_sec_dma_we
 );
 
 // Native CD32 Akiko gate.
@@ -201,26 +194,6 @@ akiko #(.NATIVE_CD32(NATIVE_CD32)) akiko
 	.hps_subcode_push(akiko_hps_subcode_push),
 	.hps_subcode_byte(akiko_hps_subcode_byte),
 	.hps_subcode_done(akiko_hps_subcode_done)
-);
-
-// CPU-bus trace ring: snapshots every CPU access in the akiko window
-// ($B80000-$B8003F). Drained over the akiko_uio_cs_trace sub-channel.
-akiko_bus_trace akiko_bus_trace
-(
-	.clk          (clk_sys              ),
-	.reset        (reset                ),
-	// Trace the full sel_akiko window ($B80000-$B800FF), not just the
-	// $B80000-$B8003F sub-range akiko answers. This way we catch any access
-	// the firmware tries that we don't currently respond to.
-	.sel          (sel_akiko            ),
-	.rd           (rnw                  ),
-	.wr           (~rnw & (lds|uds)     ),
-	.addr         (addr[7:1]            ),
-	.din          (din                  ),
-	.dout         (akiko_dout           ),
-	.uio_cs_trace (akiko_uio_cs_trace   ),
-	.uio_rd       (akiko_uio_trace_rd   ),
-	.uio_dout     (akiko_uio_trace_dout )
 );
 
 akiko_hps_bridge akiko_hps_bridge

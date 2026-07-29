@@ -65,10 +65,9 @@ module hps_ext
 	// byte_cnt==1 (mutually exclusive — at most one extra bit set per txn):
 	//   no extra bits  -> cmd/result stream (M3)             0xF400
 	//   io_din[8]=1    -> sector data stream (M4)            0xF500
-	//   io_din[7]=1    -> bus trace ring (debug, drain-only) 0xF480
 	//   io_din[6]=1    -> NVRAM save-dump (read-only)        0xF440
-	// Trace is exclusive (overrides cs entirely). Sec and Nvr both ride
-	// alongside akiko_cs so the bridge can mux on the sub-channel cs flag.
+	// Sec and Nvr both ride alongside akiko_cs so the bridge can mux on the
+	// sub-channel cs flag.
 	//
 	// NVRAM LOAD (disk → BRAM) does NOT come through this UIO path. It uses
 	// the canonical hps_io.ioctl_download mechanism wired directly from
@@ -87,36 +86,11 @@ module hps_ext
 	input             akiko_rx_busy,
 	input             akiko_nvr_dirty, // status word bit 7
 
-	input       [7:0] akiko_trace_din,
-	output reg        akiko_trace_rd,
-	output reg        akiko_cs_trace,
-
-	// 2026-05-28 DDR peek sub-channel (UIO class 0xF400 with io_din[5]=1
-	// captured on byte_cnt==1, i.e. 0xF420). Drain-only; 8 bytes per ring
-	// entry, last byte 0x00 = ring empty. See rtl/akiko_ddr_peek.v.
-	input       [7:0] akiko_peek_din,
-	output reg        akiko_peek_rd,
-	output reg        akiko_cs_peek,
-
-	// Chipset bus trace sub-channel (UIO class 7'b1111011 = 0xF600).
-	// Drain-only, single byte per io_din[15:0]==0x62 read. 0x00 = ring empty.
-	input       [7:0] chipset_trace_din,
-	output reg        chipset_trace_rd,
-	output reg        chipset_cs_trace,
-
-	// 2026-05-27 Z2-hang trace sub-channel (UIO class 7'b1111101 = 0xFA00).
-	// Drain-only; 16 bytes per ring entry, 0x00 byte = ring empty.
-	// See rtl/z2_trace.v.
-	input       [7:0] z2_trace_din,
-	output reg        z2_trace_rd,
-	output reg        z2_cs_trace,
-
 	// CDTV bridge — UIO class 0xF800 = io_din[15:9] == 7'b1111100.
 	// Sub-channels share the class:
 	//   no extra bits  -> cmd byte stream (R/W cmd_in_fifo / cmd_out_fifo)  0xF800
 	//   io_din[5]=1    -> sector byte push (W-only; M2 phase-1b)            0xF820
 	//   io_din[6]=1    -> STCH inject (W-only; any write pulses stch)       0xF840
-	//   io_din[7]=1    -> trace ring drain (R-only)                         0xF880+
 	// Phase-1e adds the STCH sub-channel so userspace can fire the CDTV
 	// status-change interrupt on disc mount — the BIOS is event-driven and
 	// without this it never advances past the initial 0x81 STATUS poll.
@@ -130,9 +104,6 @@ module hps_ext
 	output reg        cdtv_cs,
 	output reg        cdtv_cs_sec,     // sector-push sub-channel (M2 phase-1b)
 	output reg        cdtv_cs_stch,    // STCH-inject sub-channel
-	output reg        cdtv_cs_trace,   // trace-drain sub-channel
-	input       [7:0] cdtv_trace_din,
-	output reg        cdtv_trace_rd,
 	input             cdtv_req         // bit 6 of status word
 );
 
@@ -168,12 +139,7 @@ always@(posedge clk_sys) begin : main_proc
 	{ide_rd, ide_wr} <= 0;
 	cdda_wr <= 0;
 	{akiko_rd, akiko_wr} <= 0;
-	akiko_trace_rd <= 0;
-	akiko_peek_rd <= 0;
-	chipset_trace_rd <= 0;
-	z2_trace_rd <= 0;
 	{cdtv_rd, cdtv_wr} <= 0;
-	cdtv_trace_rd <= 0;
 	if((ide_rd | ide_wr) & ~&ide_addr[3:0]) ide_addr <= ide_addr + 1'd1;
 
 	if(~io_uio) begin
@@ -186,14 +152,9 @@ always@(posedge clk_sys) begin : main_proc
 		akiko_cs_sec <= 0;
 		akiko_cs_nvr <= 0;
 		akiko_cs_subcode <= 0;
-		akiko_cs_trace <= 0;
-		akiko_cs_peek <= 0;
-		chipset_cs_trace <= 0;
-		z2_cs_trace <= 0;
 		cdtv_cs <= 0;
 		cdtv_cs_sec <= 0;
 		cdtv_cs_stch <= 0;
-		cdtv_cs_trace <= 0;
 		if(cmd == 'h2D) sset <= 1;
 	end
 	else if(io_strobe) begin
@@ -216,21 +177,12 @@ always@(posedge clk_sys) begin : main_proc
 			akiko_cs_sec    <= (io_din[15:9] == 7'b1111010) && !io_din[7] && !io_din[5] && io_din[8];
 			akiko_cs_nvr    <= (io_din[15:9] == 7'b1111010) && !io_din[7] && !io_din[5] && io_din[6];
 			akiko_cs_subcode<= (io_din[15:9] == 7'b1111010) && !io_din[7] && !io_din[5] && io_din[4];
-			akiko_cs_trace  <= (io_din[15:9] == 7'b1111010) &&  io_din[7];
-			akiko_cs_peek   <= (io_din[15:9] == 7'b1111010) && !io_din[7] && io_din[5];
-			// Chipset bus trace — dedicated UIO class (drain-only, debug).
-			chipset_cs_trace <= (io_din[15:9] == 7'b1111011);
-			// 2026-05-27 Z2-hang trace ring — dedicated UIO class (drain-only).
-			z2_cs_trace      <= (io_din[15:9] == 7'b1111101);
 			// CDTV bridge cmd byte stream — io_din[7]=0, io_din[6]=0, io_din[5]=0.
 			cdtv_cs          <= (io_din[15:9] == 7'b1111100) && !io_din[7] && !io_din[6] && !io_din[5];
 			// CDTV sector-push sub-channel — io_din[7]=0, io_din[6]=0, io_din[5]=1.
 			cdtv_cs_sec      <= (io_din[15:9] == 7'b1111100) && !io_din[7] && !io_din[6] &&  io_din[5];
 			// CDTV STCH inject sub-channel — io_din[7]=0, io_din[6]=1.
 			cdtv_cs_stch     <= (io_din[15:9] == 7'b1111100) && !io_din[7] &&  io_din[6];
-			// CDTV trace-ring drain sub-channel — io_din[7]=1 (mirrors
-			// akiko_cs_trace pattern). 9 bytes per entry, last byte 0x00 = ring empty.
-			cdtv_cs_trace    <= (io_din[15:9] == 7'b1111100) &&  io_din[7];
 		end
 
 		if(byte_cnt == 0) begin
@@ -329,29 +281,9 @@ always@(posedge clk_sys) begin : main_proc
 						io_dout  <= akiko_din;
 						akiko_rd <= 1;
 					end
-					if(byte_cnt >= 3 && akiko_cs_trace) begin
-						io_dout        <= {8'h00, akiko_trace_din};
-						akiko_trace_rd <= 1;
-					end
-					if(byte_cnt >= 3 && akiko_cs_peek) begin
-						io_dout        <= {8'h00, akiko_peek_din};
-						akiko_peek_rd  <= 1;
-					end
-					if(byte_cnt >= 3 && chipset_cs_trace) begin
-						io_dout          <= {8'h00, chipset_trace_din};
-						chipset_trace_rd <= 1;
-					end
-					if(byte_cnt >= 3 && z2_cs_trace) begin
-						io_dout      <= {8'h00, z2_trace_din};
-						z2_trace_rd  <= 1;
-					end
 					if(byte_cnt >= 3 && cdtv_cs) begin
 						io_dout <= cdtv_din;
 						cdtv_rd <= 1;
-					end
-					if(byte_cnt >= 3 && cdtv_cs_trace) begin
-						io_dout       <= {8'h00, cdtv_trace_din};
-						cdtv_trace_rd <= 1;
 					end
 				end
 			endcase

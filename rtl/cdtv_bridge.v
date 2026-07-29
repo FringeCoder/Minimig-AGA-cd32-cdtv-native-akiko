@@ -133,13 +133,7 @@ module cdtv_bridge
 	output            cdtv_dma_we,
 	output     [23:0] cdtv_dma_baddr,
 	output      [7:0] cdtv_dma_wbyte,
-	input             cdtv_dma_ack,
-
-	// Trace output — every DMAC/TPI/CR-511 access, 64-bit entry, drained
-	// via cdtv_trace.v. We expose the strobes as separate one-shot wires
-	// so the trace module can capture them on its own clk edge.
-	output            trace_we,
-	output     [63:0] trace_data
+	input             cdtv_dma_ack
 );
 
 //----------------------------------------------------------------------------
@@ -267,9 +261,6 @@ reg [7:0] last_out;
 reg [12:0] sec_wr_p, sec_rd_p;
 reg  [7:0] sec_fifo_q;     // registered read of sec_fifo[sec_rd_p]
 
-// --- Trace output staging ---
-reg [7:0] trace_tag;
-
 // --- Read-side data mux. Per spec section 1 reads pull a 16-bit word
 //     with byte_off in upper half (even byte) and byte_off+1 in lower half
 //     (odd byte). Unmapped slots default to 0 (spec section 2.3 default
@@ -288,7 +279,6 @@ wire        cmd_out_empty;
 wire        sec_empty;
 wire        dmac_int2;
 wire        tpi_int2;
-wire        any_access;
 wire [15:0] byte_off;
 
 //----------------------------------------------------------------------------
@@ -420,18 +410,6 @@ wire drain_ack_pop  = drain_ack_u | drain_ack_l;       // pop one byte from sec_
 wire drain_ack_word = drain_ack_l;                     // word done — acr+=2, wtc-=1
 // Compatibility alias for any downstream reader expecting the old name.
 wire drain_ack_now  = drain_ack_pop;
-
-wire wr_any = hwr | lwr;
-assign any_access = sel && (rd || wr_any);
-assign trace_we   = any_access;
-// For writes: data the CPU sent (din[7:0]). For reads: the byte WE return
-// on the addressed lane (rd_byte_eb at even offset, rd_byte_ob at odd
-// offset). Without this, RD entries logged just the floating bus state
-// (0xff) and were useless for diagnosing what BIOS actually observed.
-assign trace_data = {32'h0, trace_tag,
-                     wr_any ? din[7:0]
-                            : (byte_off[0] ? rd_byte_ob : rd_byte_eb),
-                     byte_off};
 
 assign selack = sel;
 // Read mux assembles even-byte and odd-byte slots into a 16-bit word. The
@@ -962,30 +940,6 @@ always @* begin
 	else if (sel_cmda_ob)  rd_byte_ob = cmd_out_empty ? last_out
 	                                                  : cmd_out_fifo[cmd_out_rd_p];
 	else if (in_tpi_range) rd_byte_ob = tpi_rd;
-end
-
-//----------------------------------------------------------------------------
-// 8. Trace tag — for cdtv_trace.v capture
-//
-// Layout: see cdtv_trace.v header.
-//----------------------------------------------------------------------------
-
-always @* begin
-	trace_tag = {wr_any, 7'h0F};   // default = other
-	if      (sel_ac_rom)    trace_tag = {wr_any, 7'h08};
-	else if (sel_istr_b)    trace_tag = {wr_any, 7'h01};
-	else if (sel_cntr_b)    trace_tag = {wr_any, 7'h02};
-	else if (sel_wtc_w_hi)  trace_tag = {wr_any, 7'h03};
-	else if (sel_wtc_w_lo)  trace_tag = {wr_any, 7'h04};
-	else if (sel_acr_w_hi)  trace_tag = {wr_any, 7'h05};
-	else if (sel_acr_w_lo)  trace_tag = {wr_any, 7'h06};
-	else if (sel_dawr_w)    trace_tag = {wr_any, 7'h07};
-	else if (sel_cmda_b)    trace_tag = {wr_any, 7'h09};
-	else if (in_tpi_range)  trace_tag = {wr_any, 7'h0A};
-	else if (sel_dma_start) trace_tag = {wr_any, 7'h0B};
-	else if (sel_dma_stop)  trace_tag = {wr_any, 7'h0C};
-	else if (sel_istr_clr)  trace_tag = {wr_any, 7'h0D};
-	else if (sel_fifo_tog)  trace_tag = {wr_any, 7'h0E};
 end
 
 endmodule
