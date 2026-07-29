@@ -35,7 +35,7 @@ module cpu_wrapper
 
 	input       [1:0] cpucfg,
 	input       [2:0] fastramcfg,
-	input       [2:0] cachecfg,
+	input       [3:0] cachecfg,
 	input             bootrom,
 
 	output reg [23:1] chip_addr,
@@ -208,7 +208,7 @@ cpu_inst_p
 (
   .clk(clk),
   .nreset(reset),
-  .clkena_in(~cpu_req | chipready | ramready | fastchip_ready),
+  .clkena_in(clkena_p_throttled),
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
@@ -289,6 +289,22 @@ always @(posedge clk) begin
 		dcache_d    <= cachecfg[2];
 	end
 end
+
+// Stock-speed throttle. cachecfg[3]=1 forces a 9-sysclk cooldown after every
+// clkena tick, dropping the net pipeline rate about 10x to ~1.37 MIPS -- close
+// to a real A1200 68EC020 at 14 MHz. The cooldown is safe because the bus
+// controllers sit idle during it: clkena only rises once the current access has
+// completed, so no memory handshake is in flight while the CPU is held.
+wire stock_speed   = cachecfg[3];
+wire clkena_p_base = ~cpu_req | chipready | ramready | fastchip_ready;
+
+reg [3:0] cooldown;
+always @(posedge clk) begin
+	if (~reset)                                cooldown <= 4'd0;
+	else if (cooldown != 4'd0)                 cooldown <= cooldown - 4'd1;
+	else if (stock_speed & clkena_p_base)      cooldown <= 4'd9;
+end
+wire clkena_p_throttled = clkena_p_base & (cooldown == 4'd0);
 
 reg       chipreq;
 reg [2:0] cpu_ipl;

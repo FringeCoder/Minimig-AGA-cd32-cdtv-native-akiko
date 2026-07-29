@@ -254,7 +254,7 @@ module minimig
 
 	//user i/o
 	output  [1:0] cpucfg,
-	output  [2:0] cachecfg,
+	output  [3:0] cachecfg,
 	output  [6:0] memcfg,
 	output        bootrom,     // enable bootrom magic in gary.v
 	output        ide_ena,
@@ -432,7 +432,12 @@ wire        reset = sys_reset | ~_cpu_reset_in; // both tg68k and minimig_syscon
 assign pwr_led = ~_led;
 
 assign memcfg = {memory_config[7],memory_config[5:0]};
-assign cachecfg = {cachecfg_pre[2], ~ovl, ~ovl};
+// cachecfg_pre[3] is the stock-speed gate (CPU config byte bit 5). It is
+// independent of turbochip/turbokick: cpu_wrapper throttles the CPU pipeline
+// while chip RAM and Kickstart stay shadowed to fast SRAM, so the machine
+// runs at A1200 speed without chipset-bus wait states masking the result.
+wire force_turbo = ~ovl;
+assign cachecfg = {cachecfg_pre[3], cachecfg_pre[2], force_turbo, force_turbo};
 
 // NTSC/PAL switching is controlled by OSD menu, change requires reset to take effect
 always @(posedge clk) if (clk7_en && reset) ntsc <= chipset_config[1];
@@ -539,7 +544,7 @@ paula PAULA1
 	.floppy_drives(floppy_config[3:2])
 );
 
-wire [2:0] cachecfg_pre;
+wire [3:0] cachecfg_pre;
 //instantiate user IO
 userio USERIO1 
 (	
