@@ -71,6 +71,16 @@ reg  [39:0] cpu_sm_tag_dat_w;
 reg         cpu_sm_id;
 reg         cpu_sm_ilru;
 reg         cpu_sm_dlru;
+// Fill/snoop interlock: track the in-flight fill line so a chip or bridge
+// write (snoop) that lands while the line is being filled invalidates the
+// just-filled line, forcing a re-fill from now-committed RAM. Without it the
+// fill can commit data its SDRAM read predates, and the CPU keeps reading a
+// line the chipset has already overwritten.
+reg         fill_active;
+reg   [7:0] fill_idx;
+reg  [17:0] fill_tag;
+reg         fill_snooped;
+reg         inv_sel;
 reg   [9:0] sdr_sm_adr;
 reg         sdr_sm_itag_we;
 reg         sdr_sm_dtag_we;
@@ -190,7 +200,8 @@ localparam [3:0]
 	CPU_SM_FILL2 = 4'd7,
 	CPU_SM_FILL3 = 4'd8,
 	CPU_SM_FILL4 = 4'd9,
-	CPU_SM_FILLW = 4'd10;
+	CPU_SM_FILLW = 4'd10,
+	CPU_SM_INVAL = 4'd11;
 
 // sdram-side state machine
 localparam [3:0]
@@ -227,7 +238,7 @@ always @ (posedge clk) begin
 		//cc_fr  <= cpu_cache_freeze;
 		cc_clr <= cpu_cache_clear;
 	end
-end 
+end
 
 // slice up cpu address
 assign cpu_adr_blk = cpu_adr[2:1];    // cache block address (inside cache row), 2 bits for 4x16 rows
@@ -249,6 +260,9 @@ always @ (posedge clk) begin
     cpu_sm_dram0_we   <= 1'b0;
     cpu_sm_dram1_we   <= 1'b0;
     cpu_sm_bs         <= 2'b11;
+    fill_active       <= 1'b0;
+    fill_snooped      <= 1'b0;
+    inv_sel           <= 1'b0;
   end else begin
     // default values
     fill              <= 1'b0;
@@ -336,6 +350,11 @@ always @ (posedge clk) begin
           // on miss fetch data from SDRAM
           sdr_read_req <= 1'b1;
           cpu_sm_state <= CPU_SM_FILL1;
+          // begin tracking this fill line for the snoop interlock
+          fill_active  <= 1'b1;
+          fill_snooped <= 1'b0;
+          fill_idx     <= cpu_adr_idx;
+          fill_tag     <= cpu_adr_tag;
         end
       end
       CPU_SM_WAIT : begin
@@ -352,9 +371,11 @@ always @ (posedge clk) begin
           cpu_dat_r <= sdr_dat_r;
           cpu_ack <= 1'b1;
           if (cache_inhibit) begin
-            // don't update cache if caching is inhibited
+            // don't update cache if caching is inhibited.
+            // no cache line written -> nothing to invalidate.
+            fill_active  <= 1'b0;
             cpu_sm_state <= CPU_SM_FILLW;
-          end else begin      
+          end else begin
             // update tag ram
             if (cpu_ir) begin
               if (itag_lru) begin
@@ -426,10 +447,35 @@ always @ (posedge clk) begin
       end
       CPU_SM_FILLW : begin
         if (!cpu_ack) begin
-          cpu_sm_state <= CPU_SM_IDLE;
+          if (fill_active && fill_snooped) begin
+            // a snoop hit the line while it was being filled: the filled data
+            // may be stale (the fill's SDRAM read predates the chip write), so
+            // invalidate the line; the next read re-fills from committed RAM.
+            inv_sel          <= 1'b1;
+            cpu_sm_tag_dat_w <= 40'd0;
+            cpu_sm_itag_we   <=  cpu_sm_id;
+            cpu_sm_dtag_we   <= !cpu_sm_id;
+            cpu_sm_state     <= CPU_SM_INVAL;
+          end else begin
+            fill_active  <= 1'b0;
+            cpu_sm_state <= CPU_SM_IDLE;
+          end
         end
       end
+      CPU_SM_INVAL : begin
+        // tag-invalidate write to fill_idx fires this cycle (inv_sel mux);
+        // drop tracking and return to idle.
+        inv_sel      <= 1'b0;
+        fill_active  <= 1'b0;
+        fill_snooped <= 1'b0;
+        cpu_sm_state <= CPU_SM_IDLE;
+      end
     endcase
+    // snoop interlock: a chip/bridge write hitting the line currently being
+    // filled is remembered so the line is invalidated at fill completion.
+    if (fill_active && snoop_act
+        && (snoop_adr[10:3] == fill_idx) && (snoop_adr[28:11] == fill_tag))
+      fill_snooped <= 1'b1;
     // when CPU lowers its request signal, lower ack too
     if (!cpu_cs) cpu_ack <= 1'b0;
   end
@@ -513,7 +559,7 @@ end
 //// instruction memories ////
 
 // instruction tag ram
-assign itram_cpu_adr    = cpu_adr_idx;
+assign itram_cpu_adr    = inv_sel ? fill_idx : cpu_adr_idx;
 assign itram_cpu_we     = cpu_sm_itag_we;
 assign itram_cpu_dat_w  = cpu_sm_tag_dat_w;
 assign itag0_match      = (cpu_adr_tag == itram_cpu_dat_r[17:0]);
@@ -593,7 +639,7 @@ dpram_be_1024x16 idram1 (
 //// data data memories ////
 
 // data tag ram
-assign dtram_cpu_adr    = cpu_adr_idx;
+assign dtram_cpu_adr    = inv_sel ? fill_idx : cpu_adr_idx;
 assign dtram_cpu_we     = cpu_sm_dtag_we;
 assign dtram_cpu_dat_w  = cpu_sm_tag_dat_w;
 assign dtag0_match      = (cpu_adr_tag == dtram_cpu_dat_r[17:0]);
