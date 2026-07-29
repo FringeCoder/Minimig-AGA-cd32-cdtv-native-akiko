@@ -37,7 +37,7 @@ module sdram_ctrl
 	input             cache_rst,
 	input             cache_inhibit,
 	input       [3:0] cpu_cache_ctrl,
-	// 2026-05-27 D-cache software toggle: gates dtag matches independently
+	// D-cache software toggle: gates dtag matches independently
 	// of cpu_cache_ctrl[0]. See cpu_cache_new.cc_den.
 	input             dcache_sw_en,
 	// sdram
@@ -153,7 +153,7 @@ reg        write_ack;
 reg  [1:0] write_dqm;
 reg [24:1] writeAddr;
 reg [15:0] writeDat;
-// 2026-05-30 store-to-load forwarding: when the chipset reads a 4-word block
+// Store-to-load forwarding: when the chipset reads a 4-word block
 // the 1-entry CPU write buffer still holds (posted but not yet committed to
 // SDRAM), merge writeDat into the matching burst word so the chipset never
 // sees stale pre-write data. Closes the posted-write vs chip-read coherency

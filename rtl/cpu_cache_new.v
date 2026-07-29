@@ -20,7 +20,7 @@ module cpu_cache_new
   input             clk,            // clock
   input             rst,            // cache reset
   input       [3:0] cpu_cache_ctrl, // CPU cache control
-  // 2026-05-27 D-cache software toggle (TG68K CACR bit 8). Gates dtag
+  // D-cache software toggle (TG68K CACR bit 8). Gates dtag
   // matches independently of cpu_cache_ctrl[0]. Defaults '1' if upstream
   // doesn't drive it, preserving current behavior. See module top doc.
   input             dcache_sw_en,
@@ -75,7 +75,7 @@ reg  [39:0] cpu_sm_tag_dat_w;
 reg         cpu_sm_id;
 reg         cpu_sm_ilru;
 reg         cpu_sm_dlru;
-// 2026-05-29 fill/snoop interlock: track the in-flight fill line so a chip/
+// Fill/snoop interlock: track the in-flight fill line so a chip/
 // bridge write (snoop) that lands while the line is being filled invalidates
 // the just-filled line, forcing a re-fill from now-committed RAM. Closes the
 // D-Cache-ON image coherency hole (see module top doc / known-issues).
@@ -102,7 +102,7 @@ reg   [1:0] cc_clr_r;
 wire        cpu_cache_enable;
 wire        cpu_cache_clear;
 reg         cc_en;
-// 2026-05-27: cc_den gates D-cache hits + writes. = cc_en AND dcache_sw_en.
+// cc_den gates D-cache hits + writes. = cc_en AND dcache_sw_en.
 // Sampled alongside cc_en so they update in lockstep at cache enable edges.
 reg         cc_den;
 reg         cc_clr;
@@ -314,7 +314,7 @@ always @ (posedge clk) begin
         cpu_sm_mem_dat_w <= cpu_dat_w;
         cpu_sm_iram0_we <= itag0_match && itag0_valid /*&& !cc_fr*/;
         cpu_sm_iram1_we <= itag1_match && itag1_valid /*&& !cc_fr*/;
-        // 2026-05-27: skip D-cache writes when SW has disabled D-cache.
+        // Skip D-cache writes when SW has disabled D-cache.
         cpu_sm_dram0_we <= dtag0_match && dtag0_valid && cc_den /*&& !cc_fr*/;
         cpu_sm_dram1_we <= dtag1_match && dtag1_valid && cc_den /*&& !cc_fr*/;
         cpu_sm_state <= CPU_SM_WB;
@@ -381,7 +381,7 @@ always @ (posedge clk) begin
           cpu_ack <= 1'b1;
           if (cache_inhibit || (!cpu_ir && !cc_den)) begin
             // don't update cache if caching is inhibited; also bypass
-            // D-cache fill when SW has disabled D-cache (2026-05-27).
+            // D-cache fill when SW has disabled D-cache.
             // no cache line written -> nothing to invalidate.
             fill_active  <= 1'b0;
             cpu_sm_state <= CPU_SM_FILLW;
@@ -554,7 +554,7 @@ always @ (posedge clk) begin
 		end
       SDR_SM_SNOOP : begin
         // update if a matching address is in cache
-        // 2026-05-27: gate D-cache snoop writes with cc_den so a disabled
+        // Gate D-cache snoop writes with cc_den so a disabled
         // D-cache stays cold (no stale lines to flush when re-enabled).
         sdr_sm_mem_dat_w <= snoop_dat_w;
         sdr_sm_iram0_we <= sdr_itag0_match && sdr_itag0_valid;

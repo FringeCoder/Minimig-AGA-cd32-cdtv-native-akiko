@@ -12,11 +12,10 @@
 //
 // The address remap (sel_z2ram → ramaddr[28]=1 → DDR3 row) is the
 // "authenticity bridge" that makes both controllers look like one
-// coherent memory map. See research/docs/dma-fastram-routing-design.md.
+// coherent memory map.
 //
-// THIS MODULE IS A PURE REFACTOR. Phase A acceptance criterion is that
-// the synthesized RBF is functionally identical to the pre-refactor
-// build. Any change here is a Phase B (or later) concern.
+// This module is a pure extraction of decode logic that previously lived
+// in cpu_wrapper: the synthesized result is functionally identical.
 
 module memory_router
 (
@@ -34,8 +33,7 @@ module memory_router
 	input             bootrom,
 
 	// AutoConfig'd fast-RAM enable + base state. Owned by cpu_wrapper
-	// today (lines 549-619); exported via new ports for the bridge in
-	// Phase B.
+	// today (lines 549-619); exported via new ports for the bridge.
 	input             z2ram_ena,
 	input       [4:0] z3ram_base0,
 	input             z3ram_ena0,
@@ -97,12 +95,13 @@ assign sel_chipram   = !cpu_addr[31:21] && cchip;
 // minimig_sram_bridge.v. All Zorro RAM goes to DDR3.
 // -------------------------------------------------------------------------
 
-// 2026-05-27 Z2 fix (codex review). Original mapping put Z2 in DDR3 bank
-// ramaddr[28:26]=110, which Z3_1 (256MB base=1) only reaches at offsets
-// $18000000-$1BFFFFFF — i.e. never touched during a typical KS boot that
-// allocates from the front of Z3_1. Bank 110 has not been validated in
-// practice and Z2 boots hang there. Remap Z2 into bank 100 (the low
-// quadrant of Z3_1, proven good by every mem=0x83 boot). Z2 and Z3 configs
+// Mapping Z2 into DDR3 bank
+// ramaddr[28:26]=110 does not work: Z3_1 (256MB base=1) only reaches that
+// bank at offsets $18000000-$1BFFFFFF, never touched by a typical KS boot
+// that
+// allocates from the front of Z3_1, and Z2 boots hang there. Z2 therefore
+// maps into bank 100, the low quadrant of Z3_1, which every mem=0x83 boot
+// exercises. Z2 and Z3 configs
 // are mutually exclusive in fastramcfg, so the new aliased mapping is
 // safe — only one of them is ever live at runtime.
 assign ramaddr[28]    = sel_z2ram | sel_z3ram1;

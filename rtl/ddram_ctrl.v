@@ -29,7 +29,7 @@ module ddram_ctrl
 	input             cache_rst,
 	input             cache_inhibit,
 	input       [3:0] cpu_cache_ctrl,
-	// 2026-05-27 D-cache software toggle: gates dtag matches independently
+	// D-cache software toggle: gates dtag matches independently
 	// of cpu_cache_ctrl[0]. See cpu_cache_new.cc_den.
 	input             dcache_sw_en,
 
@@ -56,11 +56,11 @@ module ddram_ctrl
 	input             ramshared,
 	output            ramready,
 
-	// Phase B: bridge (Akiko / CDTV) DMA port. Single-byte transfers arrive
+	// Bridge (Akiko / CDTV) DMA port. Single-byte transfers arrive
 	// as 16-bit word + UDS/LDS so the same address mapping the CPU uses
 	// (in cpu_wrapper.v) routes them to the right DDR3 row. dmaCS is held
 	// high until dmaACK pulses; one transfer per CS edge.
-	// 2026-05-27 z2-read-fix: dmaWE is no longer hardwired 1 at chipdma_arb.
+	// z2-read-fix: dmaWE is no longer hardwired 1 at chipdma_arb.
 	// dmaWE=1 → write (PBX sector data into Z2/Z3); dmaWE=0 → read
 	// (Akiko TX command fetch from Z2/Z3, returned via dmaRD). Without the
 	// read path the CD32 BIOS hangs when it allocates the Akiko CMD block
@@ -82,7 +82,7 @@ wire cache_req;
 reg  cache_fill;
 wire cache_ack;
 
-// Phase B: snoop pulse + latched address/data for the cache.
+// Snoop pulse + latched address/data for the cache.
 // Fires for one sysclk when the bridge DMA write is latched into
 // dmaWriteAddr/Dat/BE below. cpu_cache_new uses "write-through" snoop —
 // updates the cached copy of the line if present, otherwise no-op.
@@ -111,7 +111,7 @@ cpu_cache_new cpu_cache
 	.sdr_dat_r        (ddr_swap ? {ddr_data[7:0], ddr_data[15:8]} : ddr_data), // sdram read data
 	.sdr_read_req     (cache_req),              // sdram read request from cache
 	.sdr_read_ack     (cache_fill),             // sdram read acknowledge to cache
-	.snoop_act        (dma_snoop_act),          // Phase B: bridge DMA write pulse
+	.snoop_act        (dma_snoop_act),          // bridge DMA write pulse
 	.snoop_adr        (dma_snoop_adr),
 	.snoop_dat_w      (dma_snoop_dat),
 	.snoop_bs         (dma_snoop_bs)
@@ -161,7 +161,7 @@ end
 assign ramready = cache_hit || write_ena;
 
 // -------------------------------------------------------------------------
-// Phase B v2: bridge DMA write buffer + ack handshake with proper CDC.
+// Bridge DMA write buffer + ack handshake with proper CDC.
 //
 // chipdma_arb runs on clk_sys (28.4 MHz); we run on sysclk = clk_114
 // (113.5 MHz). dmaCS / dmaAddr / dmaWR / dmaL / dmaU all come from
@@ -199,7 +199,7 @@ reg [15:0] dmaWriteDat;
 reg  [1:0] dmaWriteBE;
 reg        dmaACK_r;
 
-// 2026-05-27 z2-read-fix: bridge READ request bookkeeping. Mirrors
+// z2-read-fix: bridge READ request bookkeeping. Mirrors
 // dma_write_req/_ack but with no snoop pulse (reads don't change cache
 // contents). The captured 16-bit word at dma_read_done time is registered
 // in dmaRD and returned to chipdma_arb.
@@ -223,7 +223,7 @@ always @ (posedge sysclk) begin
 		// Data has been stable in chipdma_arb's registers since arm_now,
 		// many sysclk cycles ago, so sampling here is safe regardless of
 		// where Quartus placed the data lines.
-		// 2026-05-27 z2-read-fix: split write vs read paths on the same
+		// z2-read-fix: split write vs read paths on the same
 		// latching edge. dmaWE is the latched (and stable) WE bit.
 		if (dmaCS_rise & ~dma_write_req & ~dma_read_req & ~dmaACK_r) begin
 			if (dmaWE) begin
@@ -292,7 +292,7 @@ always @ (posedge sysclk) begin
 	else begin
 		case(state)
 			0: if(~DDRAM_BUSY) begin
-					// Phase B: bridge DMA write has priority over CPU.
+					// Bridge DMA write has priority over CPU.
 					// Bandwidth is tiny (one byte per ~150 KB/s sector),
 					// so this never starves the CPU in practice, but
 					// guarantees no head-of-line wait behind a slow CPU
@@ -304,7 +304,7 @@ always @ (posedge sysclk) begin
 						DDRAM_WE      <= 1;
 						dma_write_ack <= 1;
 					end
-					// 2026-05-27 z2-read-fix: bridge DMA read shares the
+					// z2-read-fix: bridge DMA read shares the
 					// state-1 read-return shape used by CPU cache fills.
 					// Priority below dma_write so a write already in flight
 					// completes first; above CPU write/cache to keep bridge
@@ -334,7 +334,7 @@ always @ (posedge sysclk) begin
 					end
 				end
 			1: if(~DDRAM_BUSY & DDRAM_DOUT_READY) begin
-					// 2026-05-27 z2-read-fix: distinguish bridge-DMA read
+					// z2-read-fix: distinguish bridge-DMA read
 					// (single 16-bit word, no cache_fill) from CPU cache
 					// fill (4-beat burst into cpu_cache_new). dma_read_in_flight
 					// was set at state-0 issue time for DMA reads.
