@@ -72,7 +72,7 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	output      [7:0] dma_wbyte,
 	input       [7:0] dma_rbyte, // valid in the cycle dma_ack pulses
 	input             dma_ack,
-	// 2026-06-05 owner-freeze: chipdma_arb pulses this for ONE clk_sys cycle
+	// chipdma_arb pulses this for ONE clk_sys cycle
 	// when it latches an akiko byte onto the chip bus (arm_now & ~cdtv). We
 	// freeze which sub-engine (RX/PBX/TX) owns the transaction at that instant
 	// so the later dma_ack is credited to the engine the arb actually serviced
@@ -107,7 +107,7 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	input       [7:0] hps_sec_byte,
 	input             hps_sec_done,    // pulse: commit; if sec_wr_ptr == 12'd2352, sector_ready<=1
 
-	// Phase 18: rx_busy = receive engine has a queued or in-flight response.
+	// rx_busy = receive engine has a queued or in-flight response.
 	// Userspace gates unsolicited pushes (TOC drip, post-INFO media-status)
 	// on this — matches WinUAE's cdrom_can_return_data() semantics.
 	output            hps_rx_busy,
@@ -138,9 +138,8 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	// fast block write, hps_io drives sd_ack[AKIKO_SEC_SLOT] high for the
 	// whole transfer and pulses sd_buff_wr per byte with sd_buff_addr
 	// auto-incrementing 0..2351. The pipeline absorbs back-to-back bytes
-	// at SPI clock without dropping (which the per-cs/sec_push path can't,
-	// see research/docs/known-issues-deferred.md "Per-sector SPI throughput
-	// vs WinUAE"). All four signals tied 0 leaves only the legacy path active.
+	// at SPI clock without dropping, which the per-cs/sec_push path cannot.
+	// All four signals tied 0 leaves only the legacy path active.
 	input             hps_sec_dma_active,  // = sd_ack[AKIKO_SEC_SLOT]
 	input       [7:0] hps_sec_dma_byte,    // = sd_buff_dout
 	input      [13:0] hps_sec_dma_addr,    // = sd_buff_addr
@@ -240,7 +239,7 @@ if (NATIVE_CD32) begin : g_cd
 	reg  [7:0] nvram_io;             // $30 master-driven SCL/SDA pair (bit 7=SCL, 6=SDA)
 	reg  [7:0] nvram_dir;            // $32 direction (1=master output, 0=floating-high input)
 
-	// Phase 13: real I2C slave EEPROM (1 KiB, 24LC08-equivalent) replaces
+	// Real I2C slave EEPROM (1 KiB, 24LC08-equivalent) replaces
 	// the M1 stub. See akiko_nvram.v for protocol; bus model below for
 	// open-drain wiring.
 	//
@@ -274,7 +273,7 @@ if (NATIVE_CD32) begin : g_cd
 	reg        rx_busy;                     // engine waiting for dma_ack (RX write)
 	reg        rx_inflight;                 // BFM has accepted our request (post-quiet-cycle)
 
-	// 2026-06-05 owner-freeze: the DMA-bus owner latched at chipdma_arb's
+	// The DMA-bus owner latched at chipdma_arb's
 	// arm_now (dma_arm). dma_owned is high for the whole arm->ack transaction;
 	// dma_owner records WHICH engine the arb serviced, sampled from the exact
 	// same combinational priority (rx>pbx>tx>sub) that produced dma_baddr on
@@ -337,15 +336,15 @@ if (NATIVE_CD32) begin : g_cd
 	reg  [3:0] pbx_seccnt;       // selected slot (0..15)
 	reg [11:0] pbx_byte_idx;     // 0..2351 in DATA, 0..145 in ZERO
 
-	// 2026-06-05 residual fix: STICKY ship-invalidation. A PBX ship in flight
+	// STICKY ship-invalidation. A PBX ship in flight
 	// (or starting this cycle) when a new READ DATA fires (CDFLAG_ENABLE 0->1)
 	// belongs to the PREVIOUS read; its PBX_FIN must NOT bump cdrom_sector_counter
 	// (the new read already reset it to 0 — bumping = off-by-one recurrence).
 	// pbx_ship_invalid is SET on any enable_rising while the ship is live and
 	// CLEARED only when a fresh ship starts without a concurrent enable_rising.
 	// A sticky set bit is idempotent under N rapid back-to-back READ DATA pulses,
-	// unlike a toggle-gen which aliases back to "valid" after an even number of
-	// rises (Codex review d, 2026-06-05).
+	// unlike a toggle-gen, which aliases back to "valid" after an even number
+	// of rises.
 	reg        pbx_ship_invalid;
 
 	// Subcode streaming (WinUAE akiko.cpp:1486-1509). subbuf holds one 96-byte
@@ -445,7 +444,7 @@ if (NATIVE_CD32) begin : g_cd
 	                          + ((pbx_state == PBX_DATA)
 	                              ? {12'h0, pbx_byte_idx}
 	                              : (24'h000c00 + {12'h0, pbx_byte_idx}));
-	// Phase 32 timing fix: register pbx_addr so the SDRAM-bound critical
+	// Register pbx_addr so the SDRAM-bound critical
 	// path no longer carries two cascaded 24-bit adders + chipdma_arb mux
 	// chain in a single combinational arc. The downstream chipdma_arb only
 	// samples this address on c_7m_rise (≥3 clk_sys cycles after the byte
@@ -456,15 +455,16 @@ if (NATIVE_CD32) begin : g_cd
 		if (reset) pbx_addr <= 24'h0;
 		else       pbx_addr <= pbx_addr_c;
 	end
-	// Deep Core garble root-cause fix (2026-06-05): sector_buffer was read
-	// COMBINATIONALLY here (sector_buffer[pbx_byte_idx]), which forces Quartus
-	// to map the 2352-byte array into ~5K ALM registers behind a 2352-way async
-	// read mux + 2352-way write decode — a timing-marginal structure that
-	// intermittently mis-fills/mis-reads under back-to-back fast UIO_SECTOR_RD
-	// block writes (A/B-proven: fast push 100% garble vs slow per-byte push
-	// 25%; D-Cache + PBX-write fixes both falsified → the corruption is born in
-	// the fast FILL of this array). Registering the read makes the array infer
-	// robust M10K block RAM (synchronous read) and incidentally aligns the read
+	// sector_buffer must NOT be read combinationally here
+	// (sector_buffer[pbx_byte_idx]): that forces Quartus to map the 2352-byte
+	// array into ~5K ALM registers behind a 2352-way async read mux and a
+	// 2352-way write decode — a timing-marginal structure that intermittently
+	// mis-fills and mis-reads under back-to-back fast UIO_SECTOR_RD block
+	// writes. Hardware A/B: fast push garbles every time, slow per-byte push
+	// a quarter of the time, and both a D-Cache and a PBX-write fix were
+	// falsified, so the corruption is born in the fast FILL of this array.
+	// Registering the read makes the array infer M10K block RAM
+	// (synchronous read) and incidentally aligns the read
 	// latency with the already-registered pbx_addr. The 1-cycle latency is
 	// invisible: pbx_byte_idx is stable between dma_acks and chipdma_arb samples
 	// pbx_addr/pbx_wbyte on c_7m_rise ≥3 clk_sys cycles after the byte
@@ -494,7 +494,7 @@ if (NATIVE_CD32) begin : g_cd
 	// truly writable. Drops as soon as Main commits a sector (sector_ready->1)
 	// and stays low while the PBX engine is consuming the buffer (pbx_busy).
 	//
-	// 2026-06-05 residual fix: the !pbx_busy term serializes the single-buffer
+	// The !pbx_busy term serializes the single-buffer
 	// producer (HPS fast-fill) against the consumer (PBX ship). The off-by-one
 	// ENABLE-clear can leave sector_ready=0 while pbx_busy=1; without this term
 	// the bridge would push a new sector into the buffer PBX is still reading
@@ -581,15 +581,14 @@ if (NATIVE_CD32) begin : g_cd
 			if (tx_dma_delay != 2'd0) tx_dma_delay <= tx_dma_delay - 2'd1;
 			if (rx_dma_delay != 2'd0) rx_dma_delay <= rx_dma_delay - 2'd1;
 
-			// 2026-06-05 owner-freeze: latch the serviced engine at arm_now and
+			// Latch the serviced engine at arm_now and
 			// hold it until the transaction's ack. Sampled from the SAME
 			// combinational priority that drives dma_baddr (RX>PBX>TX>SUB), so
 			// the byte the arb wrote and the engine that consumes the ack always
 			// match. arm and ack are >=4 clk_sys cycles apart (S_DRIVE), so they
 			// never coincide; arm takes priority defensively.
 			if (dma_arm) begin
-				// Codex review 2026-06-05: only claim ownership when a real
-				// engine is live this edge. The arb arms off the REGISTERED
+				// Only claim ownership when a real engine is live this edge. The arb arms off the REGISTERED
 				// akiko_dma_req_q while addr/owner are live-combinational, so it
 				// can arm a "stale" slot where req was high last cycle but every
 				// *_busy already cleared (e.g. just after PBX_FIN). Latching a
@@ -700,7 +699,7 @@ if (NATIVE_CD32) begin : g_cd
 					// CDFLAG_ENABLE 0->1: reset sector_counter and clear OVERFLOW
 					// (akiko.cpp:1973-1976).
 					//
-					// 2026-06-05 Deep Core off-by-one fix: ALSO drop any stale
+					// ALSO drop any stale
 					// staged sector (sector_ready) and reset the slow-path write
 					// pointer. Each READ DATA toggles ENABLE 0->1, resetting the
 					// counter to 0. If a sector staged by the PREVIOUS read is
@@ -720,7 +719,7 @@ if (NATIVE_CD32) begin : g_cd
 						cdrom_sector_counter <= 8'h0;
 						sector_ready         <= 1'b0;
 						sec_wr_ptr           <= 12'h0;
-						// 2026-06-05 residual fix: a new READ DATA invalidates any
+						// A new READ DATA invalidates any
 						// PBX ship still in flight from the PREVIOUS read so its
 						// PBX_FIN cannot bump the counter we just reset to 0 (off-
 						// by-one recurrence). The actual SET of pbx_ship_invalid is
@@ -826,7 +825,7 @@ if (NATIVE_CD32) begin : g_cd
 						cdrom_intreq <= ((cdrom_intreq & ~CDINT_DRIVERECV) | CDINT_DRIVEXMIT)
 						              | (((cdcomrxinx + 8'd1) == cdcomrxcmp) ? CDINT_RXDMADONE : 32'h0);
 					end else if ((cdcomrxinx + 8'd1) == cdcomrxcmp) begin
-						// Phase 12: rxcmp match mid-delivery sets RXDMADONE but
+						// Rxcmp match mid-delivery sets RXDMADONE but
 						// MUST preserve receive_length/offset. WinUAE
 						// cdrom_return_data (akiko.cpp:883-895) only `break`s
 						// the per-call loop here; the queued response stays
@@ -912,14 +911,14 @@ if (NATIVE_CD32) begin : g_cd
 				end
 			endcase
 
-			// 2026-06-05 residual fix: centralized sticky ship-invalidation.
+			// Centralized sticky ship-invalidation.
 			// Placed AFTER the PBX case so it wins same-cycle NBA conflicts
 			// against the fresh-ship clear and also covers a ship STARTING this
 			// cycle (pbx_starting). A ship that is live (in flight OR starting)
 			// when a new READ DATA fires belongs to the PREVIOUS read -> mark it
 			// invalid; the SET is sticky and idempotent under repeated rapid
-			// rises (the toggle-gen this replaced aliased back to "valid" after
-			// an even number of rises — Codex review d). A fresh ship starting
+			// rises, where a toggle-gen would alias back to "valid" after an
+			// even number of rises. A fresh ship starting
 			// with no concurrent enable_rising belongs to the current read ->
 			// clear (valid). Otherwise hold the sticky value.
 			if (enable_rising && (pbx_busy || pbx_starting))
@@ -943,7 +942,7 @@ if (NATIVE_CD32) begin : g_cd
 				sector_buffer[sec_w_addr] <= sec_w_din;
 			end
 
-			// 2026-06-05 residual fix: guard the sector_ready SET with
+			// Guard the sector_ready SET with
 			// !enable_rising. A fast-fill byte-2351 that lands in the same cycle
 			// as a new READ DATA (ENABLE 0->1) must NOT re-assert sector_ready
 			// after the restart cleared it — that race is exactly what let the
@@ -957,8 +956,8 @@ if (NATIVE_CD32) begin : g_cd
 				// !enable_rising: a new READ DATA resets sec_wr_ptr<=0 in the
 				// cfg_high block (textually earlier); without this guard a same-
 				// cycle slow-path increment would win the NBA and leave the ptr
-				// at 1 after a restart (Codex recheck, 2026-06-05). Fast path is
-				// the norm for CD32; this hardens the dormant SSPI slow path.
+				// at 1 after a restart. The fast path is the norm for CD32;
+				// this hardens the dormant SSPI slow path.
 				if (hps_sec_push && !sector_ready && sec_wr_ptr != 12'd2352
 				    && !enable_rising) begin
 					sec_wr_ptr <= sec_wr_ptr + 12'd1;
@@ -1011,9 +1010,9 @@ if (NATIVE_CD32) begin : g_cd
 					// DMA all 100 bytes then IRQ. A mid-walk CDFLAG_SUBCODE clear is
 					// deliberately NOT aborted here: dropping subcode_busy with a byte
 					// already armed in chipdma_arb would let rx/pbx/tx start and consume
-					// the stale subcode ack (same ownership race; Codex 2026-05-30).
+					// the stale subcode ack (the same ownership race).
 					// Delivering one final heartbeat block is benign (game ignores it).
-					// owner-freeze (Codex 2026-06-05): gate on the frozen owner,
+					// Gate on the frozen owner,
 					// not the live subcode_grant, so a stale no-live-engine arm
 					// (which sets dma_owned=0) can never advance subcode.
 					if (dma_ack && own_sub) begin
@@ -1099,10 +1098,10 @@ if (NATIVE_CD32) begin : g_cd
 			// $24-$27 CONFIG (akiko.cpp:1789-1794)
 			5'b10010: cd_dout_r = cdrom_flags[31:16];
 			5'b10011: cd_dout_r = cdrom_flags[15:0];
-			// $28 PIO byte read — M1 stub returns last write in upper byte
+			// $28 PIO byte read — stub, returns last write in upper byte
 			5'b10100: cd_dout_r = {pio_byte, 8'h0};
-			// $30 NVRAM I/O byte — Phase 13: now reflects the live I2C bus
-			// state (master's drives ANDed with the slave's open-drain
+			// $30 NVRAM I/O byte — reflects the live I2C bus state
+			// (master's drives ANDed with the slave's open-drain
 			// pull-down via akiko_nvram). bit 7 = SCL, bit 6 = SDA;
 			// remaining bits are 0. WinUAE akiko.cpp:285-296 reads back
 			// the same shape from eeprom_i2c_set() returns.
@@ -1138,10 +1137,10 @@ if (NATIVE_CD32) begin : g_cd
 	assign cd_hps_sec_req     = sec_req_w;
 	assign cd_hps_sec_status  = cdrom_sector_counter;
 
-	// Phase 18: rx_busy out — receive engine has a queued or in-flight response.
+	// rx_busy out — receive engine has a queued or in-flight response.
 	assign cd_hps_rx_busy     = (cdrom_receive_length != 6'd0);
 
-	// Phase 13: I2C slave EEPROM (1 KiB, 24LC08-equivalent). Pulls SDA
+	// I2C slave EEPROM (1 KiB, 24LC08-equivalent). Pulls SDA
 	// low for ACK and read-data; never drives SCL. Volatile BRAM —
 	// persistence is a separate feature.
 	akiko_nvram nvram_inst (
@@ -1214,7 +1213,7 @@ assign hps_sec_status  = cd_hps_sec_status;
 
 assign hps_rx_busy     = cd_hps_rx_busy;
 
-// Phase 32: NVRAM save-dump port out to fastchip / bridge.
+// NVRAM save-dump port out to fastchip / bridge.
 assign hps_nvr_dout    = cd_hps_nvr_dout;
 assign hps_nvr_dirty   = cd_hps_nvr_dirty;
 

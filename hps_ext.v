@@ -91,10 +91,10 @@ module hps_ext
 	//   no extra bits  -> cmd byte stream (R/W cmd_in_fifo / cmd_out_fifo)  0xF800
 	//   io_din[5]=1    -> sector byte push (W-only; M2 phase-1b)            0xF820
 	//   io_din[6]=1    -> STCH inject (W-only; any write pulses stch)       0xF840
-	// Phase-1e adds the STCH sub-channel so userspace can fire the CDTV
+	// The STCH sub-channel lets userspace fire the CDTV
 	// status-change interrupt on disc mount — the BIOS is event-driven and
 	// without this it never advances past the initial 0x81 STATUS poll.
-	// Phase-1b adds the sector-push sub-channel: userspace pushes raw CHD
+	// The sector-push sub-channel: userspace pushes raw CHD
 	// sector bytes via 0xF820 and the bridge's drain FSM writes them to
 	// chip RAM at acr via chipdma_arb's cdtv master port.
 	input      [15:0] cdtv_din,
@@ -191,7 +191,7 @@ always@(posedge clk_sys) begin : main_proc
 			if(io_din == 'h63) begin
 				// bit [11] = akiko_req (M3: command framed, ready to drain)
 				// bit [10] = akiko_sec_req (M4: PBX wants a sector pushed)
-				// bit  [9] = akiko_rx_busy (Phase 18: RX engine has pending response)
+				// Bit  [9] = akiko_rx_busy
 				// bit  [8] = cdda_req (legacy stock-Minimig CDDA — dormant in NATIVE_CD32)
 				// bit  [7] = akiko_nvr_dirty (NVRAM written since last clear)
 				// bit  [6] = cdtv_req (CDTV cmd_in_fifo has data)

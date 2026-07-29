@@ -94,18 +94,17 @@ module cpu_wrapper
 	output reg  [3:0] cacr,
 	output reg [31:0] nmi_addr,
 
-	// Phase B: AC-config state exported for chipdma_arb's memory_router
+	// AC-config state exported for chipdma_arb's memory_router
 	// instance. Same registers that drive cpu_wrapper's own decode at
 	// lines 553-625; routing the bridge DMA through the same view keeps
 	// CPU and DMA in lockstep on which Zorro window is live.
-	// See research/docs/dma-fastram-routing-design.md §4.5.
 	output            z2ram_ena_out,
 	output      [4:0] z3ram_base0_out,
 	output            z3ram_ena0_out,
 	output      [3:0] z3ram_base1_out,
 	output            z3ram_ena1_out,
 
-	// 2026-05-27 D-cache software toggle: '1' = D-cache enabled, '0' = off.
+	// D-cache software toggle: '1' = D-cache enabled, '0' = off.
 	// Sourced from TG68K CACR bit 8 (real 030 spec). Defaults '1' until SW
 	// claims ownership via any MOVEC CACR write. See cpu_cache_new cc_den.
 	output            dcache_sw_en
@@ -127,8 +126,7 @@ assign ramshared    = sel_dd;
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
 
 // Address decode + ramaddr remap factored into shared module so chipdma_arb
-// can apply the same authenticity bridge for Akiko/CDTV DMA. See
-// research/docs/dma-fastram-routing-design.md (Phase A).
+// can apply the same authenticity bridge for Akiko/CDTV DMA.
 wire sel_chipram;
 wire sel_kickram;
 wire sel_kicklower;
@@ -279,7 +277,7 @@ cpu_inst_p
   .cpu(cpucfg),
   .busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
   .cacr_out(cacr_p),
-  // 2026-05-27 D-cache software toggle: bit 8 of CACR (real 030 spec).
+  // D-cache software toggle: bit 8 of CACR (real 030 spec).
   // d_cache_out is '1' by default and tracks the latched MOVEC CACR write
   // thereafter — see TG68KdotC_Kernel.vhd CACR_DC / CACR_DC_owned regs.
   .d_cache_out(dcache_sw_en_p),
@@ -472,7 +470,7 @@ always @(*) begin
 		endcase
 	end
 	// Zorro II RAM (Up to 8 meg at 0x200000). It has a fixed base, so it must be first in the chain.
-	// 2026-05-27 CD32+Z2 fix: match WinUAE fastmem PIC bytes exactly so the CD32 BIOS
+	// Match the WinUAE fastmem PIC bytes exactly so the CD32 BIOS
 	// links Z2 into the system memory free list. Previously the PIC advertised
 	// pid=0x00 (invalid per Z2 spec) and manuf=0x139c; CD32 BIOS rejected the card,
 	// AllocMem fell back to chip RAM, and the CD command buffer landed at $1FE400
@@ -609,7 +607,7 @@ always @(posedge clk) begin
 		// the DMAC card is alone in the chain — matches the WinUAE log
 		// "Card 01: CDTV DMAC" / end.
 		ac_toccata  <= cdtv_mode ? 1'b0 : 1'b1;
-		// 2026-05-21: real AC commit re-enabled after the cdtv_bridge.v
+		// Real AC commit, re-enabled after the cdtv_bridge.v
 		// byte-lane fix. Root cause of the post-AC hang was that the
 		// 6525 TPI is wired to D[7:0] on real CDTV silicon — driver
 		// reads/writes TPI at ODD byte addresses ($B3/B5/...) via LDS,
@@ -617,10 +615,8 @@ always @(posedge clk) begin
 		// tpi_rd on the upper read lane (rd_byte_eb). Driver's first
 		// STCH poll (`btst.b #2, $B5(a5)`) at $F05D90 in cdtv.device
 		// always read 0x00, so InitResident hung before any visible
-		// log activity. Found by static disasm of the ext-ROM
-		// InitResident path; see
-		// research/docs/cdtv-initresident-disasm-2026-05-21.md and
-		// research/docs/cdtv-post-ac-init-research-2026-05-21.md.
+		// log activity. Found by static disassembly of the ext-ROM
+		// InitResident path.
 		ac_cdtv     <= cdtv_mode;
 		cdtv_base   <= 8'hE9;       // WinUAE default fallback ($E90000)
 		z2ram_ena   <= 0;

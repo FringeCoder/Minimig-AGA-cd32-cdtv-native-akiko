@@ -16,9 +16,8 @@
 //
 // cdtv_bridge — native CDTV expansion at $E90000-$E9FFFF.
 //
-// Implements the full WinUAE-equivalent register surface from
-// research/docs/cdtv-bridge-spec.md (sections 2-7). One module groups three
-// responsibilities:
+// Implements the full WinUAE-equivalent register surface. One module
+// groups three responsibilities:
 //
 //   * DMAC register file ($41 ISTR, $43 CNTR, $80-$83 WTC, $84-$87 ACR,
 //     $8E-$8F DAWR, $E0/$E2/$E4/$E8 DMA control strobes) — spec section 2.3.
@@ -366,8 +365,7 @@ assign sten_any  = sten_pulse_ext | sten_pulse_int;
 // (cdtv.cpp:1305-1317) sets `stch=1` unconditionally when CNTR is
 // written with bit 6 set. Driver writes `CNTR = PREST | INTEN = 0x50`
 // to $E9xx43 and waits for INT2 on STCH. Without this OR-in, the
-// driver hangs in cdtv.device InitResident. See
-// research/docs/cdtv-post-ac-init-research-2026-05-21.md.
+// driver hangs in cdtv.device InitResident.
 //
 // SCOR frame-tick generator (phase-1f). WinUAE `CDTV_hsync_handler`
 // (cdtv.cpp:1253-1258) fires SCOR every frame when media is present:
@@ -655,7 +653,7 @@ always @* begin
 			// cdtv.cpp get_tp_c: `~sbcp | ~scor<<1 | ~stch<<2 | ~sten<<3
 			// | ~sten<<4`). At idle this reads 0x1F — cdtv.device polls
 			// $E900B4 on init and treats 0x00 as "all four sources active",
-			// which loops forever. Pre-2026-05-21 we returned tp_ilatch in
+			// which loops forever. Returning tp_ilatch in
 			// mode 0 (=0 at reset) → post-AC hang root-cause candidate.
 			//   bit 0: ~sbcp  → ~sbcp_state (current subchannel byte pending)
 			//   bit 1: ~scor  → 1'b1       (no live SCOR source on M1)
@@ -725,7 +723,7 @@ always @(posedge clk) begin
 		// via LDS. Word writes at the even base ($B0) also reach us via
 		// hwr+lwr. Gate on either strobe and pick the data byte through
 		// `tpi_data` so the driver's LDS byte writes land — WinUAE's
-		// dmac_bput2 is lane-agnostic. 2026-05-21 byte-lane fix.
+		// dmac_bput2 is lane-agnostic.
 		if (in_tpi_range && (hwr || lwr)) begin
 			case (tpi_reg)
 				3'd0: tp_a <= tpi_data;
@@ -800,7 +798,7 @@ always @(posedge clk) begin
 		// same-cycle priority-encoder raise clobbers the raise (last NBA wins),
 		// silently dropping a sparse STCH. Gating on tp_ilatch[5] makes the
 		// clear mutually exclusive with the encoder (which requires !ilatch[5]).
-		// Sim: tb_cdtv_tpi_stch scenario C. 2026-05-30.
+		// Sim: tb_cdtv_tpi_stch scenario C.
 		if (air_rd_falling && tp_ilatch[5]) begin
 			tp_ilatch[5] <= 1'b0;
 			tp_ilatch2   <= 8'h00;
@@ -942,7 +940,7 @@ end
 // autoconfig protocol leaves alternate bytes as the no-op fill — spec
 // section 2.2 "memset(dmacmemory, 0xff)"). TPI registers ($B1/B3/.../BF)
 // are wired to D[7:0] on real CDTV — driver reads them with `.b` at the
-// odd address via LDS, so mirror tpi_rd here too. 2026-05-21 byte-lane fix.
+// odd address via LDS, so mirror tpi_rd here too.
 always @* begin
 	rd_byte_ob = 8'h00;
 	if      (sel_ac_rom_w) rd_byte_ob = 8'hFF;

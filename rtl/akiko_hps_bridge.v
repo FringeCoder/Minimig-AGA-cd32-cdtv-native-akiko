@@ -97,13 +97,13 @@ module akiko_hps_bridge
 	output            nvr_done,
 	input             nvr_dirty,     // from akiko_nvram
 
-	// Phase 18: rx_busy = receive engine has a queued or in-flight response.
+	// rx_busy = receive engine has a queued or in-flight response.
 	input             rx_busy,
 
 	// Status bits for hps_ext 0x63 status word
 	output            req,           // bit [11]: framed command waiting
 	output            sec_req_out,   // bit [10]: sector needed
-	output            rx_busy_out,   // bit [9]:  RX engine busy (Phase 18)
+	output            rx_busy_out,   // bit [9]:  RX engine busy
 	output            nvr_dirty_out  // bit [7]:  NVRAM dirty
 );
 

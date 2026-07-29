@@ -68,7 +68,7 @@ module chipdma_arb
 	input       [7:0] akiko_dma_wbyte,
 	output      [7:0] akiko_dma_rbyte,
 	output            akiko_dma_ack,
-	// 2026-06-05 owner-freeze: one-clk_sys pulse on the arming edge when this
+	// One-clk_sys pulse on the arming edge when this
 	// slot services akiko. akiko latches which sub-engine it is servicing here
 	// so the matching dma_ack is credited to the right engine (closes the
 	// cross-engine ack-ownership race; see akiko.v dma_arm).
@@ -95,11 +95,10 @@ module chipdma_arb
 	output     [15:0] chip_out_wr,
 	input      [15:0] chip_in_rd,
 
-	// Phase B: AC-config state + DDR3 (ram2) DMA write port. When the
+	// AC-config state + DDR3 (ram2) DMA write port. When the
 	// active master's address falls in a Zorro fast-RAM window the slot
 	// routes to ddr_out_* instead of chip_out_*. memory_router does the
 	// decode using the same logic cpu_wrapper applies for CPU access.
-	// See research/docs/dma-fastram-routing-design.md.
 	input             z2ram_ena,
 	input       [4:0] z3ram_base0,
 	input             z3ram_ena0,
@@ -126,7 +125,7 @@ reg c_7m_d;
 always @(posedge clk) c_7m_d <= c_7m;
 wire c_7m_rise = c_7m & ~c_7m_d;
 
-// --- Phase 32.5 timing fix: register akiko_dma_req to cut the long
+// --- Register akiko_dma_req to cut the long
 // combinational arc from akiko's rx_busy/tx_busy state-machine internals
 // through arm_now → arb_request → arb_drive into the sd_addr mux selector.
 // That arc was the worst-case setup path on the emu PLL (-0.981 ns slack).
@@ -162,13 +161,13 @@ reg [15:0] ak_wr_data;
 reg        ak_we;       // remembers whether this slot is a write (no chipRD sample)
 reg        ak_baddr0;   // byte selector for read demux
 
-// --- Phase B: latched DDR3 (ram2) routing fields. memory_router decides
+// --- Latched DDR3 (ram2) routing fields. memory_router decides
 //     ram1 vs ram2 from the master's 24-bit byte address + AC state.
 //     Latched at arm_now alongside ak_addr; held through the slot.
 reg        ak_is_ddr;
 reg [28:1] ak_ddr_addr;
 
-// --- Phase B v2: registered DDR3 bus driven from clk_sys to ddram_ctrl
+// --- Registered DDR3 bus driven from clk_sys to ddram_ctrl
 //     (clk_114). All six lines latched at arm_now and held until the
 //     synchronized ack returns. This makes the data lines stable for many
 //     clk_114 cycles before ddram_ctrl's sync_CS-rise edge — no need to
@@ -180,15 +179,14 @@ reg [28:1] dma_ddr_addr_r;
 reg        dma_ddr_l_r;
 reg        dma_ddr_u_r;
 reg [15:0] dma_ddr_wr_r;
-// 2026-05-27 (z2 read fix): latched WE replaces the prior `ddr_out_we = 1'b1`
-// hardcoding so the bridge can do BOTH reads (Akiko TX command fetch, dma_we=0
-// from akiko.v:819 when only tx_busy is set) AND writes (PBX sector data,
-// dma_we=1). Without this, Z2-allocated CMD blocks were unreachable and the
-// CD32 BIOS hung at $9FFC00 waiting for a TX read that the bridge silently
-// dropped.
+// Latched WE, rather than a hardwired `ddr_out_we = 1'b1`, so the bridge can
+// do BOTH reads (Akiko TX command fetch, dma_we=0 from akiko.v:819 when only
+// tx_busy is set) AND writes (PBX sector data, dma_we=1). Hardwired high,
+// Z2-allocated CMD blocks are unreachable and the CD32 BIOS hangs at
+// $9FFC00 waiting for a TX read that the bridge silently drops.
 reg        dma_ddr_we_r;
 
-// --- Phase B v2: 2-FF synchronizer on the LEVEL ddr_in_ack from
+// --- 2-FF synchronizer on the LEVEL ddr_in_ack from
 //     ddram_ctrl (clk_114). ddr_in_ack goes high when DDR3 commits the
 //     write and stays high until we drop dma_ddr_cs_r — long enough that
 //     a 2-FF chain always catches the transition cleanly.
@@ -285,7 +283,7 @@ wire        ak_u_w       = arm_now ?  live_baddr[0]                       : ak_u
 wire        ak_rw_w      = arm_now ? ~live_we                             : ak_rw;
 wire [15:0] ak_wr_data_w = arm_now ? {live_wbyte, live_wbyte}             : ak_wr_data;
 
-// --- Phase B: ram1-vs-ram2 routing decision via shared memory_router.
+// --- ram1-vs-ram2 routing decision via shared memory_router.
 //     cchip / ckick / wr tied to 0 — the bridge always reaches chip RAM
 //     via chip_out_* regardless of CPU turbo gates, and never writes to
 //     KS ROM. Only ramaddr + zram_sel are consumed.
@@ -336,7 +334,7 @@ assign chip_out_rw   = arb_drive_chip ? ak_rw_w      : chip_in_rw;
 assign chip_out_dma  = arb_drive_chip ? 1'b0         : chip_in_dma;
 assign chip_out_wr   = arb_drive_chip ? ak_wr_data_w : chip_in_wr;
 
-// Phase B v2: DDR DMA bus is REGISTERED in chipdma_arb. Data lines stay
+// DDR DMA bus is REGISTERED in chipdma_arb. Data lines stay
 // stable from arm_now until the synchronized ack returns and we drop CS,
 // so ddram_ctrl can sample them safely after its 2-FF dmaCS sync edge.
 // ddr_out_we is hard-wired 1 today (bridge writes only into Z2/Z3).
@@ -376,7 +374,7 @@ always @(posedge clk) begin
 				ak_ddr_addr    <= router_ramaddr;
 				slot_cnt       <= 3'd0;
 				active_is_cdtv <= arming_is_cdtv;
-				// Phase B v2: when this slot routes to DDR, latch the
+				// When this slot routes to DDR, latch the
 				// full DDR bus on the same arm_now edge. Data is held
 				// stable from here until S_ACK clears dma_ddr_cs_r.
 				if (router_zram_sel) begin
@@ -385,7 +383,7 @@ always @(posedge clk) begin
 					dma_ddr_l_r    <= ~live_baddr[0];
 					dma_ddr_u_r    <=  live_baddr[0];
 					dma_ddr_wr_r   <= {live_wbyte, live_wbyte};
-					// 2026-05-27 z2-read-fix: latch the real WE so ddram_ctrl
+					// Latch the real WE so ddram_ctrl
 					// can route this transaction as either a write (PBX) or
 					// a read (TX command fetch).
 					dma_ddr_we_r   <= live_we;
@@ -396,14 +394,14 @@ always @(posedge clk) begin
 
 		S_DRIVE: begin
 			if (ak_is_ddr) begin
-				// Phase B v2: routing to ram2 (DDR3). dma_ddr_cs_r is
+				// Routing to ram2 (DDR3). dma_ddr_cs_r is
 				// REGISTERED high; ddram_ctrl synchronizes it through a
 				// 2-FF chain in the clk_114 domain, edge-detects the
 				// rise, and latches our (already-stable) data into its
 				// own write buffer. ddr_in_ack comes back as a level
 				// signal which we sample through ddr_in_ack_sync2.
 				if (ddr_ack_safe) begin
-					// 2026-05-27 z2-read-fix: on a TX (read) the
+					// On a TX (read) the
 					// captured 16-bit word is in ddr_in_rd, latched
 					// by ddram_ctrl's read FSM at the same instant
 					// ddr_in_ack rises. Demux to the byte the master
@@ -448,7 +446,7 @@ always @(posedge clk) begin
 			// gives the dmaACK sync chain (in chipdma_arb) time to
 			// settle low before the next arm_now.
 			//
-			// 2026-05-28 Z2 dropped-byte fix: for DDR (ram2) slots, also
+			// For DDR (ram2) slots, also
 			// hold here until ddr_ack_safe has fully DEASSERTED before
 			// returning to S_IDLE. ddr_in_ack is a LEVEL from ddram_ctrl
 			// that stays high until it sees our dmaCS drop (through its own

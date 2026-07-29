@@ -969,7 +969,7 @@ toccata #(
 );
 
 //-------------------------------------------------------------------------------------
-// CDTV native bridge — spec research/docs/cdtv-bridge-spec.md sections 2-7.
+// CDTV native bridge.
 //
 // Two modules tied together: cdtv_bridge (DMAC + TPI + CR-511 FIFOs) and
 // cdtv_nvram (16 KB BRAM at $DC8000-$DCFFFF).

@@ -1,6 +1,6 @@
 // CD32 NVRAM I2C slave EEPROM (24LC08-equivalent, 1 KiB)
 //
-// Phase 13: replaces the M1 stub at akiko.v:711 that returned 0xFF (NACK)
+// Replaces a stub that returned 0xFF (NACK)
 // for every NVRAM access. CD32 BIOS spent ~half its boot trace bit-banging
 // I2C looking for the NVRAM chip; on NACK it retries forever and never
 // finishes cd.device init, so MULTI/TOC never fires. With a real I2C slave
@@ -87,7 +87,7 @@ localparam BYTE_DEVADDR  = 2'd0;
 localparam BYTE_WORDADDR = 2'd1;
 localparam BYTE_DATA     = 2'd2;
 
-// Phase 33-J: initial values for all I²C state-machine regs (no-reset
+// Initial values for all I²C state-machine regs (no-reset
 // powerup). See banner comment above.
 reg [2:0] state                   = ST_IDLE;
 reg [1:0] byte_phase              = BYTE_DEVADDR;

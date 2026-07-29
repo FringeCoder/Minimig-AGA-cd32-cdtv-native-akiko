@@ -88,7 +88,7 @@ module fastchip
 	output [15:0] akiko_uio_dout,   // = hps_ext.akiko_din
 	output        akiko_uio_req,    // = hps_ext.akiko_req       (M3)
 	output        akiko_uio_sec_req,// = hps_ext.akiko_sec_req   (M4)
-	output        akiko_uio_rx_busy,// = hps_ext.akiko_rx_busy   (Phase 18)
+	output        akiko_uio_rx_busy,// = hps_ext.akiko_rx_busy
 	output        akiko_uio_nvr_dirty, // = hps_ext.akiko_nvr_dirty
 
 	// NVRAM load-from-disk port. Driven by hps_io.ioctl_download in

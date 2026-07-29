@@ -296,7 +296,7 @@ wire        akiko_cs_nvr; // NVRAM save-dump sub-channel (io_din[6])
 wire        akiko_cs_subcode; // subcode push sub-channel (io_din[4], 0xF410)
 wire        akiko_req;     // FROM fastchip TO hps_ext (cmd status bit)
 wire        akiko_sec_req; // FROM fastchip TO hps_ext (M4 sector status bit)
-wire        akiko_rx_busy; // FROM fastchip TO hps_ext (Phase 18: RX engine busy)
+wire        akiko_rx_busy; // FROM fastchip TO hps_ext (RX engine busy)
 wire        akiko_nvr_dirty; // FROM fastchip TO hps_ext (NVRAM dirty bit)
 
 // CDTV HPS bridge wires (M2 phase-1a). Bound to hps_ext's cdtv_* ports
@@ -590,7 +590,7 @@ wire [7:0] toccata_base;
 wire toccata_ena;
 wire cdtv_mode;
 
-// CDTV bridge ↔ cpu_wrapper short-circuit (spec research/docs/cdtv-bridge-spec.md).
+// CDTV bridge ↔ cpu_wrapper short-circuit.
 // Bridge fires cdtv_selack on every $E90000-$E9FFFF or $DC8000-$DCFFFF
 // access; cpu_wrapper's cpu_din mux uses it the same way it uses
 // fastchip_selack.
@@ -702,21 +702,20 @@ cpu_wrapper cpu_wrapper
 	.cacr         (cpu_cacr        ),
 	.nmi_addr     (cpu_nmi_addr    ),
 
-	// Phase B: AC-config state exported for chipdma_arb's memory_router.
-	// research/docs/dma-fastram-routing-design.md §4.5.
+	// AC-config state exported for chipdma_arb's memory_router.
 	.z2ram_ena_out   (z2ram_ena_w     ),
 	.z3ram_base0_out (z3ram_base0_w   ),
 	.z3ram_ena0_out  (z3ram_ena0_w    ),
 	.z3ram_base1_out (z3ram_base1_w   ),
 	.z3ram_ena1_out  (z3ram_ena1_w    ),
-	// 2026-05-27 D-cache software toggle from TG68K CACR bit 8.
+	// D-cache software toggle from TG68K CACR bit 8.
 	.dcache_sw_en    (dcache_sw_en_w  )
 );
 
 wire dcache_sw_en_w;
 
 
-// Phase B: AC-state exported from cpu_wrapper, fanout to chipdma_arb's
+// AC-state exported from cpu_wrapper, fanout to chipdma_arb's
 // memory_router so bridge DMA picks the same ram1-vs-ram2 routing the CPU
 // would for the same byte address.
 wire       z2ram_ena_w;
@@ -725,7 +724,7 @@ wire       z3ram_ena0_w;
 wire [3:0] z3ram_base1_w;
 wire       z3ram_ena1_w;
 
-// Phase B: ram2 (DDR3) bridge-DMA bus. Driven by chipdma_arb when the
+// ram2 (DDR3) bridge-DMA bus. Driven by chipdma_arb when the
 // active master's address falls in a Zorro fast window; ack from ram2's
 // new dmaACK port closes the handshake.
 wire [28:1] dma_ddr_addr_w;
@@ -735,7 +734,7 @@ wire        dma_ddr_we_w;
 wire        dma_ddr_cs_w;
 wire [15:0] dma_ddr_wr_w;
 wire        dma_ddr_ack_w;
-// 2026-05-27 z2-read-fix: bridge DMA read return path. ddram_ctrl latches
+// Bridge DMA read return path. ddram_ctrl latches
 // the 16-bit word into dma_ddr_rd_w at the same instant it raises
 // dma_ddr_ack_w on a read; chipdma_arb's S_DRIVE samples it under
 // ddr_ack_safe (2-FF sync ensures data has stabilized).
@@ -829,7 +828,7 @@ chipdma_arb chipdma_arb
 	.chip_out_wr     (arb_chip_wr          ),
 	.chip_in_rd      (ramdata_in           ),
 
-	// Phase B: AC-state inputs (memory_router decode) + DDR (ram2) write
+	// AC-state inputs (memory_router decode) + DDR (ram2) write
 	// bus when the bridge address falls in a Zorro fast-RAM window.
 	.z2ram_ena       (z2ram_ena_w          ),
 	.z3ram_base0     (z3ram_base0_w        ),
@@ -881,8 +880,8 @@ ddram_ctrl ram2
 	.ramshared    (ramshared       ),
 	.ramready     (ram_ready2      ),
 
-	// Phase B: bridge (Akiko/CDTV) DMA port — see chipdma_arb.
-	// 2026-05-27 z2-read-fix: dmaRD carries the read-return word so the
+	// Bridge (Akiko/CDTV) DMA port — see chipdma_arb.
+	// dmaRD carries the read-return word so the
 	// bridge can satisfy Akiko's TX command fetches from Z2/Z3.
 	.dmaAddr      (dma_ddr_addr_w  ),
 	.dmaCS        (dma_ddr_cs_w    ),

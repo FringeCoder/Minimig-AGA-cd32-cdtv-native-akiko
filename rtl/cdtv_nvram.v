@@ -16,25 +16,23 @@
 //
 // cdtv_nvram — 16 KB M10K-backed CDTV battery RAM at $DC8000-$DCFFFF.
 //
-// Per spec research/docs/cdtv-bridge-spec.md section 5:
 //   * Only 14 address bits are decoded (CDTV_NVRAM_MASK = 0x3FFF) — the
 //     upper 16 KB of the $DC8000-$DCFFFF window mirrors the lower 16 KB
 //     even though the chip is documented as 32 KB. WinUAE source is the
-//     truth (spec section 5.3 + section 10 contradiction #1).
+//     truth.
 //   * Byte-wide on the wire; the CIA clock-bank dispatcher decomposes any
 //     word/long access into byte transactions, so this module sees one
-//     byte access at a time (spec section 5.2). hwr selects even byte
+//     byte access at a time. hwr selects even byte
 //     (data[15:8]), lwr selects odd byte (data[7:0]).
-//   * Persistence: dirty flag set on any write; userspace will drain
-//     via a UIO sub-channel in a future session. For now hps_save_dout
-//     is wired to 0 — userspace plumbing is out of scope per spec.
+//   * Persistence: dirty flag set on any write. hps_save_dout is wired
+//     to 0; there is no userspace drain for CDTV battery RAM yet.
 //
 // Storage: single altsyncram, width=16, depth=8192 (= 16 KB), with
 // byte-enable on Port A. Same pattern as akiko_nvram.v but byteena lets
 // us collapse two byte-wide BRAMs into one block. Maps to M10K (~13
 // blocks on Cyclone V) — verified versus the prior `reg [7:0] mem[]`
-// inference which Quartus collapsed to ALMs (87,624 ALMs / 209% of
-// the device — fit failure 2026-05-20 with 287% total utilisation).
+// inference, which Quartus collapsed to ALMs (87,624 ALMs / 209% of the
+// device, failing the fit at 287% total utilisation).
 //
 //----------------------------------------------------------------------------------
 
