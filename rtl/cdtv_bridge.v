@@ -121,6 +121,12 @@ module cdtv_bridge
 	input             scor_pulse,
 	input             sbcp_pulse,
 
+	// Sticky "the BIOS took an STCH interrupt" flag — set when an AIR read
+	// acknowledges an in-service interrupt whose source was STCH. Userspace
+	// re-fires STCH until it sees this, then stops. Cleared by stch_ack_clr.
+	output reg        stch_ack,
+	input             stch_ack_clr,
+
 	// Chip-RAM master to chipdma_arb (M2 phase-1b). Single-byte write
 	// protocol identical to akiko's port:
 	//   - assert cdtv_dma_req with we=1, baddr=acr[23:0], wbyte=sec_fifo head
@@ -694,7 +700,10 @@ always @(posedge clk) begin
 		subq_head   <= 8'h00;
 		sbcp_state  <= 1'b0;
 		in_air_rd_d <= 1'b0;
+		stch_ack    <= 1'b0;
 	end else begin
+		if (stch_ack_clr) stch_ack <= 1'b0;
+
 		// Accumulate IRQ edges — spec section 3.4.
 		tp_ilatch[4:0] <= tp_ilatch[4:0] | tpi_edges;
 		in_air_rd_d    <= in_air_rd;
@@ -796,6 +805,9 @@ always @(posedge clk) begin
 			tp_ilatch[5] <= 1'b0;
 			tp_ilatch2   <= 8'h00;
 			tp_air       <= 8'h00;
+			// Source 0x04 is STCH: the status change was both delivered and
+			// taken, so userspace can stop re-firing it.
+			if (tp_air == 8'h04) stch_ack <= 1'b1;
 		end
 	end
 end

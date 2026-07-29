@@ -310,6 +310,8 @@ wire        cdtv_cs;
 wire        cdtv_cs_sec;       // phase-1b sector-push sub-channel
 wire        cdtv_cs_stch;      // phase-1e STCH-inject sub-channel
 wire        cdtv_stch_inject;  // 1-clk pulse from cdtv_hps_bridge -> minimig
+wire        cdtv_stch_ack;     // BIOS took the STCH interrupt
+wire        cdtv_stch_ack_clr;
 wire        cdtv_sec_byte_push_w; // 1-clk pulse per UIO sec byte
 wire  [7:0] cdtv_sec_byte_data_w;
 wire        cdtv_req;          // bit 6 of 0x63 status word
@@ -637,6 +639,8 @@ cdtv_hps_bridge cdtv_hps_bridge_inst
 	.sec_byte_push  (cdtv_sec_byte_push_w   ),
 	.sec_byte_data  (cdtv_sec_byte_data_w   ),
 	.stch_inject    (cdtv_stch_inject       ),
+	.stch_ack       (cdtv_stch_ack          ),
+	.stch_ack_clr   (cdtv_stch_ack_clr      ),
 	.req            (cdtv_req               )
 );
 
@@ -1166,6 +1170,8 @@ minimig minimig
 	.cdtv_subq_push      (1'b0                 ),
 	.cdtv_subq_byte      (8'h00                ),
 	.cdtv_stch_pulse     (cdtv_stch_inject     ),
+	.cdtv_stch_ack       (cdtv_stch_ack        ),
+	.cdtv_stch_ack_clr   (cdtv_stch_ack_clr    ),
 	.cdtv_sten_pulse     (1'b0                 ),
 	.cdtv_scor_pulse     (1'b0                 ),
 	.cdtv_sbcp_pulse     (1'b0                 ),
