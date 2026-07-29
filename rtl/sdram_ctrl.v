@@ -37,6 +37,9 @@ module sdram_ctrl
 	input             cache_rst,
 	input             cache_inhibit,
 	input       [3:0] cpu_cache_ctrl,
+	// D-cache software toggle: gates dtag matches independently
+	// of cpu_cache_ctrl[0]. See cpu_cache_new.cc_den.
+	input             dcache_sw_en,
 	// sdram
 	output reg [12:0] sd_addr,
 	output reg  [1:0] sd_ba,
@@ -111,6 +114,7 @@ cpu_cache_new cpu_cache
 	.clk              (sysclk),                // clock
 	.rst              (!reset || !cache_rst),  // cache reset
 	.cpu_cache_ctrl   (cpu_cache_ctrl),        // CPU cache control
+	.dcache_sw_en     (dcache_sw_en),          // D-cache software toggle
 	.cache_inhibit    (cache_inhibit),         // cache inhibit
 	.cpu_cs           (ramsel),                // cpu activity
 	.cpu_adr          (cpuAddr),               // cpu address

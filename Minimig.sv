@@ -563,8 +563,12 @@ cpu_wrapper cpu_wrapper
 	.z3ram_base0_out (z3ram_base0_w   ),
 	.z3ram_ena0_out  (z3ram_ena0_w    ),
 	.z3ram_base1_out (z3ram_base1_w   ),
-	.z3ram_ena1_out  (z3ram_ena1_w    )
+	.z3ram_ena1_out  (z3ram_ena1_w    ),
+	// D-cache software toggle from TG68K CACR bit 8.
+	.dcache_sw_en    (dcache_sw_en_w  )
 );
+
+wire dcache_sw_en_w;
 
 
 // AC-state exported from cpu_wrapper, fanout to chipdma_arb's
@@ -603,6 +607,7 @@ sdram_ctrl ram1
 
 	.cache_rst    (cpu_rst         ),
 	.cpu_cache_ctrl(cpu_cacr       ),
+	.dcache_sw_en (dcache_sw_en_w  ),
 
 	.sd_data      (SDRAM_DQ        ),
 	.sd_addr      (SDRAM_A         ),
@@ -707,6 +712,7 @@ ddram_ctrl ram2
 
 	.cache_rst    (cpu_rst         ),
 	.cpu_cache_ctrl(cpu_cacr       ),
+	.dcache_sw_en (dcache_sw_en_w  ),
 
 	.DDRAM_CLK    (DDRAM_CLK       ),
 	.DDRAM_BUSY   (DDRAM_BUSY      ),

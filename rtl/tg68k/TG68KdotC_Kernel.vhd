@@ -138,6 +138,9 @@ entity TG68KdotC_Kernel is
 		skipFetch				: out std_logic;
 		regin_out				: out std_logic_vector(31 downto 0);
 		CACR_out					: out std_logic_vector( 3 downto 0);
+		-- D-cache enable bit (CACR bit 8 on real 030+). Defaults on until a
+		-- MOVEC CACR write claims it; gates cpu_cache_new's cc_den.
+		D_CACHE_out				: out std_logic;
 		VBR_out					: out std_logic_vector(31 downto 0)
 		);
 end TG68KdotC_Kernel;
@@ -354,6 +357,12 @@ architecture logic of TG68KdotC_Kernel is
 	signal movec_data			: std_logic_vector(31 downto 0);
 	signal VBR					: std_logic_vector(31 downto 0);
 	signal CACR					: std_logic_vector(3 downto 0);
+	-- D-cache bit (CACR bit 8 on real 030).
+	-- CACR_DC defaults '1' so legacy SW that never writes bit 8 still gets
+	-- D-cache.  CACR_DC_owned latches '1' on the first MOVEC CACR write
+	-- regardless of value, after which the latched CACR_DC takes effect.
+	signal CACR_DC				: std_logic;
+	signal CACR_DC_owned		: std_logic;
 	signal DFC					: std_logic_vector(2 downto 0);
 	signal SFC					: std_logic_vector(2 downto 0);
 	
@@ -4004,18 +4013,23 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 -----------------------------------------------------------------------------
 -- MOVEC
 -----------------------------------------------------------------------------
-  process (clk, SFC, DFC, VBR, CACR, brief)
+  process (clk, SFC, DFC, VBR, CACR, CACR_DC, brief)
   begin
 	-- all other hexa codes should give illegal isntruction exception
 	if rising_edge(clk) then
 	  if Reset = '1' then
 		VBR <= (others => '0');
 		CACR <= (others => '0');
+		CACR_DC <= '1';
+		CACR_DC_owned <= '0';
 	  elsif clkena_lw = '1' and exec(movec_wr) = '1' then
 		case brief(11 downto 0) is
 		  when X"000" => SFC <= reg_QA(2 downto 0); -- SFC -- 68010+
 		  when X"001" => DFC <= reg_QA(2 downto 0); -- DFC -- 68010+
-		  when X"002" => CACR <= reg_QA(3 downto 0); -- 68020+
+		  when X"002" =>
+		    CACR <= reg_QA(3 downto 0); -- 68020+
+		    CACR_DC <= reg_QA(8); -- 030 D-cache enable; captured on every CACR write
+		    CACR_DC_owned <= '1';
 		  when X"800" => NULL; -- USP -- 68010+
 		  when X"801" => VBR <= reg_QA; -- 68010+
 		  when X"802" => NULL; -- CAAR -- 68020+
@@ -4030,7 +4044,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 	case brief(11 downto 0) is
 		when X"000" => movec_data <= "00000000000000000000000000000" & SFC;
 		when X"001" => movec_data <= "00000000000000000000000000000" & DFC;
-	  when X"002" => movec_data <= "0000000000000000000000000000" & (CACR AND "0011");
+	  when X"002" => movec_data <= "00000000000000000000000" & CACR_DC & "0000" & (CACR AND "0011"); -- bit 8 = D-cache enable
 
 	  when X"801" => 
 		movec_data <= VBR;
@@ -4040,6 +4054,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
   end process;
 
   CACR_out <= CACR;
+  -- D_CACHE_out is '1' until SW first writes CACR (then follows
+  -- the latched bit 8). Defaults-on so legacy SW that never touches bit 8
+  -- still benefits from D-cache.
+  D_CACHE_out <= CACR_DC or not CACR_DC_owned;
   VBR_out <= VBR;
 -----------------------------------------------------------------------------
 -- Conditions

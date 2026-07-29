@@ -105,8 +105,16 @@ module cpu_wrapper
 	output      [4:0] z3ram_base0_out,
 	output            z3ram_ena0_out,
 	output      [3:0] z3ram_base1_out,
-	output            z3ram_ena1_out
+	output            z3ram_ena1_out,
+
+	// D-cache software toggle: '1' = D-cache enabled, '0' = off.
+	// Sourced from TG68K CACR bit 8 (real 030 spec). Defaults '1' until SW
+	// claims ownership via any MOVEC CACR write. See cpu_cache_new cc_den.
+	output            dcache_sw_en
 );
+
+wire dcache_sw_en_p;
+assign dcache_sw_en = cpucfg[1] ? dcache_sw_en_p : 1'b1;
 
 assign z2ram_ena_out   = z2ram_ena;
 assign z3ram_base0_out = z3ram_base0;
@@ -272,6 +280,10 @@ cpu_inst_p
   .cpu(cpucfg),
   .busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
   .cacr_out(cacr_p),
+  // D-cache software toggle: bit 8 of CACR (real 030 spec).
+  // d_cache_out is '1' by default and tracks the latched MOVEC CACR write
+  // thereafter — see TG68KdotC_Kernel.vhd CACR_DC / CACR_DC_owned regs.
+  .d_cache_out(dcache_sw_en_p),
   .vbr_out(vbr_p)
 );
 
