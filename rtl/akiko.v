@@ -77,9 +77,9 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	// freeze which sub-engine (RX/PBX/TX) owns the transaction at that instant
 	// so the later dma_ack is credited to the engine the arb actually serviced
 	// — not to whatever engine the combinational priority mux now favours. This
-	// closes the cross-engine ack-ownership race (Universe book-load garble +
-	// GURU: a higher engine asserting busy mid-flight stole a lower engine's ack
-	// → one CD byte dropped → corrupted pointer / scattered graphics).
+	// closes the cross-engine ack-ownership race: a higher engine asserting
+	// busy mid-flight stole a lower engine's ack, dropping one CD byte and
+	// leaving the title with a corrupted pointer or scattered graphics.
 	input             dma_arm,
 
 	// ---------------------------------------------------------------------
@@ -810,9 +810,9 @@ if (NATIVE_CD32) begin : g_cd
 			// -----------------------------------------------------------------
 			if (rx_busy) begin
 				// owner-freeze: ground-truth ownership replaces the rx_inflight
-				// "wait for a quiet cycle" heuristic (which only covered the
+				// "wait for a quiet cycle" heuristic, which only covered the
 				// same-cycle case and still dropped RX bytes when RX asserted
-				// >=2 cycles before the ack — the Universe race). rx_inflight is
+				// two or more cycles before the ack. rx_inflight is
 				// left wired for the dormant BFM path but no longer gates here.
 				if (dma_ack && own_rx) begin
 					cdcomrxinx           <= cdcomrxinx + 8'd1;

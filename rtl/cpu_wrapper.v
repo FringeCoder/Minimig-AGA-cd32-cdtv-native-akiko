@@ -331,7 +331,7 @@ fx68k cpu_inst_o
 
 wire cpu_req = (cpustate != 1);
 
-wire cchip = turbochip_d & (!cpustate | (dcache_d & (cpustate != 2'd3)));  // Variant R: writes bypass turbo (direct chip bus), reads stay cached
+wire cchip = turbochip_d & (!cpustate | (dcache_d & (cpustate != 2'd3)));  // writes bypass turbo (direct chip bus), reads stay cached
 wire ckick = turbokick_d & (!cpustate | dcache_d);
 
 reg turbochip_d;

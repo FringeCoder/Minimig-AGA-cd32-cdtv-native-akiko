@@ -12,7 +12,7 @@
 // register layout (bit 7 = SCL, bit 6 = SDA on $B80030).
 //
 // Storage is volatile BRAM. Persistence (save to SD via HPS) is a
-// separate step — not needed for boot or for Cannon Fodder MVP.
+// separate step; booting a disc does not need it.
 //
 // Bus model: open-drain wired-AND. Master writes drive scl_in/sda_in
 // when its direction bits select output; otherwise the line floats

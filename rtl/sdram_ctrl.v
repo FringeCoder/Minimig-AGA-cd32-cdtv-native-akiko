@@ -157,7 +157,7 @@ reg [15:0] writeDat;
 // the 1-entry CPU write buffer still holds (posted but not yet committed to
 // SDRAM), merge writeDat into the matching burst word so the chipset never
 // sees stale pre-write data. Closes the posted-write vs chip-read coherency
-// hole Universe hits with the turbo D-cache on (replaces blunt Variant R).
+// hole that appears when the turbo chip-RAM D-cache is on.
 reg        fwd_en = 1'b0;
 reg  [1:0] fwd_pos;
 reg [15:0] fwd_dat;
