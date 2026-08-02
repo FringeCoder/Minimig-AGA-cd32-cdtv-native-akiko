@@ -17,6 +17,15 @@ assign HDMI_FREEZE = 0;
 assign HDMI_BLACKOUT = 0;
 assign HDMI_BOB_DEINT = 0;
 
+// MiSTer Floppy shares the SNAC user port with MT32-pi, so USER_OUT is
+// muxed between them. Declared as wires (Rob uses reg); both are driven
+// by module outputs, and a wire says that unambiguously.
+wire        user_port_mode;              // 1 = MiSTer Floppy, 0 = MT32-pi
+wire  [2:0] mister_floppy_status;        // {cable, drive type, detected}
+wire  [6:0] IndirectUserOutmt32;
+wire  [6:0] IndirectUserOutFlop;
+assign USER_OUT = user_port_mode ? IndirectUserOutFlop : IndirectUserOutmt32;
+
 `include "build_id.v" 
 localparam CONF_STR = {
 	"Minimig;UART115200:230400,MIDI;",
@@ -74,7 +83,7 @@ hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 	.HPS_BUS({HPS_BUS[45:42],ce_pix,HPS_BUS[40:0]}),
 
 	.status(status),
-	.status_menumask({mt32_cfg,mt32_available}),
+	.status_menumask({mister_floppy_status,mt32_cfg,mt32_available}),
 	.info_req(mt32_info_req),
 	.info(mt32_info_disp),
 
@@ -870,7 +879,12 @@ minimig minimig
 	.a2065_mem_writedata(a2065_mem_writedata),
 	.a2065_mem_byteenable(a2065_mem_byteenable),
 	.a2065_mem_write(a2065_mem_write),
-	.a2065_mem_waitrequest(a2065_mem_waitrequest)
+	.a2065_mem_waitrequest(a2065_mem_waitrequest),
+
+	.USER_IN              (USER_IN              ),
+	.USER_OUT             (IndirectUserOutFlop  ),
+	.user_port_mode       (user_port_mode       ),
+	.mister_floppy_status (mister_floppy_status )
 );
 
 // power led control
@@ -1142,7 +1156,10 @@ end
 
 ////////////////////////////  MT32pi  ////////////////////////////////// 
 
-wire        mt32_reset    = status[32] | reset;
+// Reset MT32-pi when the user port changes hands, so it does not keep
+// driving state onto a bus it no longer owns.
+reg         userport_change_reset;
+wire        mt32_reset    = status[32] | reset | userport_change_reset;
 wire        mt32_disable  = status[33];
 wire        mt32_mode_req = status[34];
 wire  [1:0] mt32_rom_req  = status[36:35];
@@ -1163,10 +1180,18 @@ wire mt32_mute = mt32_available &  mt32_disable;
 mt32pi mt32pi
 (
 	.*,
+	.USER_OUT(IndirectUserOutmt32),
 	.CE_PIXEL(ce_pix_mt32),
 	.reset(mt32_reset),
 	.midi_tx(midi_tx | mt32_mute)
 );
+
+always @(posedge clk_sys) begin
+	reg last_userport_mode;
+	userport_change_reset <= 0;
+	last_userport_mode <= user_port_mode;
+	if (last_userport_mode != user_port_mode) userport_change_reset <= 1;
+end
 
 wire  [4:0] mt32_cfg = (mt32_mode == 'hA2) ? {mt32_sf[2:0],  2'b10} :
                        (mt32_mode == 'hA1) ? {mt32_rom[1:0], 2'b01} : 5'd0;
