@@ -210,25 +210,52 @@ wire     virtualFloppyMode;			 // Set to 1 means we're emulating a floppy drive 
 wire     sel_external;			    // Set to 1 if a real drive is selected
 wire     flux_inuse;				    // Means the PLL is in use (real drive or flux data)
 
-assign _exsel[0] = (floppy_ext_drive[2:0]  == 3'd1) ? _sel[0] :
-                   (floppy_ext_drive[5:3]  == 3'd1) ? _sel[1] :
-                   (floppy_ext_drive[8:6]  == 3'd1) ? _sel[2] :
-                   (floppy_ext_drive[11:9] == 3'd1) ? _sel[3] : 1'b1;
+// AmigaCD retiming, 2026-08-02. Upstream decoded floppy_ext_drive straight into
+// _exsel: four 3-bit comparators plus a priority mux per external slot, all in
+// the fast path. From _exsel it runs sel_external -> flux_inuse -> dmal ->
+// agnus -> chipdma_arb -> sdram_ctrl.sd_addr, and Quartus flagged the result as
+// a long unbalanced combinational path (-0.454 ns worst, 20 paths violating).
+//
+// floppy_ext_drive is an OSD configuration register: it changes when the player
+// edits the setting, never during a transfer. So do the comparing once, in a
+// register, and leave only an AND-OR in the fast path.
+//
+// exmask[i] is a one-hot mask of which _sel bit drives external slot i, built
+// with the same top-to-bottom priority the original ternary chain had, so
+//     _exsel[i] = ~|(~_sel & exmask[i])
+// is exactly equivalent: no match -> mask 0 -> 1'b1, match on bit k -> _sel[k].
+// Cost is one clk of latency on a menu setting, which is invisible.
+reg [3:0] exmask [0:3];
+always @(posedge clk) begin
+	if (reset) begin
+		exmask[0] <= 4'b0000;
+		exmask[1] <= 4'b0000;
+		exmask[2] <= 4'b0000;
+		exmask[3] <= 4'b0000;
+	end else begin
+		exmask[0] <= (floppy_ext_drive[2:0]  == 3'd1) ? 4'b0001 :
+		             (floppy_ext_drive[5:3]  == 3'd1) ? 4'b0010 :
+		             (floppy_ext_drive[8:6]  == 3'd1) ? 4'b0100 :
+		             (floppy_ext_drive[11:9] == 3'd1) ? 4'b1000 : 4'b0000;
+		exmask[1] <= (floppy_ext_drive[2:0]  == 3'd2) ? 4'b0001 :
+		             (floppy_ext_drive[5:3]  == 3'd2) ? 4'b0010 :
+		             (floppy_ext_drive[8:6]  == 3'd2) ? 4'b0100 :
+		             (floppy_ext_drive[11:9] == 3'd2) ? 4'b1000 : 4'b0000;
+		exmask[2] <= (floppy_ext_drive[2:0]  == 3'd3) ? 4'b0001 :
+		             (floppy_ext_drive[5:3]  == 3'd3) ? 4'b0010 :
+		             (floppy_ext_drive[8:6]  == 3'd3) ? 4'b0100 :
+		             (floppy_ext_drive[11:9] == 3'd3) ? 4'b1000 : 4'b0000;
+		exmask[3] <= (floppy_ext_drive[2:0]  == 3'd4) ? 4'b0001 :
+		             (floppy_ext_drive[5:3]  == 3'd4) ? 4'b0010 :
+		             (floppy_ext_drive[8:6]  == 3'd4) ? 4'b0100 :
+		             (floppy_ext_drive[11:9] == 3'd4) ? 4'b1000 : 4'b0000;
+	end
+end
 
-assign _exsel[1] = (floppy_ext_drive[2:0]  == 3'd2) ? _sel[0] :
-                   (floppy_ext_drive[5:3]  == 3'd2) ? _sel[1] :
-                   (floppy_ext_drive[8:6]  == 3'd2) ? _sel[2] :
-                   (floppy_ext_drive[11:9] == 3'd2) ? _sel[3] : 1'b1;
-
-assign _exsel[2] = (floppy_ext_drive[2:0]  == 3'd3) ? _sel[0] :
-                   (floppy_ext_drive[5:3]  == 3'd3) ? _sel[1] :
-                   (floppy_ext_drive[8:6]  == 3'd3) ? _sel[2] :
-                   (floppy_ext_drive[11:9] == 3'd3) ? _sel[3] : 1'b1;
-
-assign _exsel[3] = (floppy_ext_drive[2:0]  == 3'd4) ? _sel[0] :
-                   (floppy_ext_drive[5:3]  == 3'd4) ? _sel[1] :
-                   (floppy_ext_drive[8:6]  == 3'd4) ? _sel[2] :
-                   (floppy_ext_drive[11:9] == 3'd4) ? _sel[3] : 1'b1;
+assign _exsel[0] = ~|(~_sel[3:0] & exmask[0]);
+assign _exsel[1] = ~|(~_sel[3:0] & exmask[1]);
+assign _exsel[2] = ~|(~_sel[3:0] & exmask[2]);
+assign _exsel[3] = ~|(~_sel[3:0] & exmask[3]);
 
 assign sel_external    = ((~_exsel[0]) | (~_exsel[1]) | (~_exsel[2]) | (~_exsel[3])) & enable_mister_floppy;
 assign flux_inuse      = sel_external | ((disk_fluxmode[sel]|disk_fluxdensitymode[sel]) & ~_selx);
