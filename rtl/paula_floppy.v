@@ -258,8 +258,26 @@ assign _exsel[2] = ~|(~_sel[3:0] & exmask[2]);
 assign _exsel[3] = ~|(~_sel[3:0] & exmask[3]);
 
 assign sel_external    = ((~_exsel[0]) | (~_exsel[1]) | (~_exsel[2]) | (~_exsel[3])) & enable_mister_floppy;
-assign flux_inuse      = sel_external | ((disk_fluxmode[sel]|disk_fluxdensitymode[sel]) & ~_selx);
-assign virtualFloppyMode = (disk_fluxmode[sel]|disk_fluxdensitymode[sel]) & ~sel_external & ~_selx;
+// AmigaCD retiming, 2026-08-03. These two tested the selected drive's flux
+// mode as disk_fluxmode[sel], where sel is a priority encoder over _sel. That
+// put an encoder plus a 4:1 mux in the fast path, and the timing report had
+// pf1|sel[0]~0 -> pf1|Mux0~0 costing 1.47 ns right in front of
+// AGNUS1|dsk1|dma -> ... -> sdram_ctrl|sd_addr.
+//
+// Same question, one gate: is any selected drive in a flux mode. This is the
+// idiom upstream already uses for the other three drive-state signals --
+// _wprot_adf, _change_adf and _track0_adf are all &(_sel | <per-drive>) --
+// so flux mode now matches its neighbours rather than being the odd one out.
+//
+// Behavioural note: with several drives selected at once the old form took the
+// lowest-numbered one, this ORs them. Not a normal state (the OS selects one
+// at a time), and it is exactly the semantics upstream already applies to
+// write-protect and disk-change, which face the same question.
+wire [3:0] fluxmode_any = disk_fluxmode | disk_fluxdensitymode;
+wire       flux_selected = |(~_sel[3:0] & fluxmode_any);   // implies ~_selx
+
+assign flux_inuse        = sel_external | flux_selected;
+assign virtualFloppyMode = flux_selected & ~sel_external;
 assign floppy_speed   = (reset | ~flux_inuse) ? floppy_speed_allowed : 1'b0;
 
 wire _virtReadData;
