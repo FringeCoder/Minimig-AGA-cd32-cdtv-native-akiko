@@ -51,18 +51,8 @@ set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT LOW
 set_global_assignment -name OPTIMIZE_POWER_DURING_SYNTHESIS OFF
 set_global_assignment -name ROUTER_REGISTER_DUPLICATION ON
-# Was ALWAYS. That deliberately trades timing away for routability, which is
-# the wrong trade at 54% ALM utilisation -- we are not area-starved, we are
-# missing setup by 208 ps on a routing-dominated path.
-set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION AUTOMATICALLY
+set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 set_global_assignment -name SEED 1
-
-# Router/placer effort. The synthesis knobs above were already maxed, but
-# these three were unset and left at defaults (NORMAL / 1.0 / 1.0) -- and the
-# failing path is 4.6 ns of interconnect on one hop, i.e. a routing problem.
-set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM
-set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 3.0
-set_global_assignment -name ROUTER_EFFORT_MULTIPLIER 3.0
 set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_FB_PALETTE=1"
 
