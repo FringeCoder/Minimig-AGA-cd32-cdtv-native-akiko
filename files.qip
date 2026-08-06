@@ -16,6 +16,8 @@ set_global_assignment -name VERILOG_FILE rtl/rtg.v
 set_global_assignment -name VERILOG_FILE rtl/chipdma_arb.v
 set_global_assignment -name VERILOG_FILE rtl/memory_router.v
 set_global_assignment -name VERILOG_FILE rtl/fastchip.v
+set_global_assignment -name VERILOG_FILE rtl/snac_psx.v
+set_global_assignment -name VERILOG_FILE rtl/snac_cd32.v
 set_global_assignment -name VERILOG_FILE rtl/userio.v
 set_global_assignment -name VERILOG_FILE rtl/cart.v
 set_global_assignment -name VERILOG_FILE rtl/amiga_clk.v

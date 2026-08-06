@@ -17,14 +17,20 @@ assign HDMI_FREEZE = 0;
 assign HDMI_BLACKOUT = 0;
 assign HDMI_BOB_DEINT = 0;
 
-// MiSTer Floppy shares the SNAC user port with MT32-pi, so USER_OUT is
-// muxed between them. Declared as wires (Rob uses reg); both are driven
+// MT32-pi, MiSTer Floppy and PSX SNAC share the SNAC user port, so USER_OUT
+// is muxed between them. Declared as wires (Rob uses reg); all are driven
 // by module outputs, and a wire says that unambiguously.
-wire        user_port_mode;              // 1 = MiSTer Floppy, 0 = MT32-pi
+wire  [1:0] user_port_mode;              // 0 = MT32-pi, 1 = MiSTer Floppy, 2 = PSX SNAC
+wire  [5:0] snac_mode;                   // {port2[2:0], port1[2:0]}
 wire  [2:0] mister_floppy_status;        // {cable, drive type, detected}
 wire  [6:0] IndirectUserOutmt32;
 wire  [6:0] IndirectUserOutFlop;
-assign USER_OUT = user_port_mode ? IndirectUserOutFlop : IndirectUserOutmt32;
+wire  [6:0] IndirectUserOutSnac;
+
+// One tenant at a time -- they collide on every user-port pin.
+assign USER_OUT = (user_port_mode == 2'd2) ? IndirectUserOutSnac :
+                  (user_port_mode == 2'd1) ? IndirectUserOutFlop :
+                                             IndirectUserOutmt32;
 
 `include "build_id.v" 
 localparam CONF_STR = {
@@ -55,6 +61,42 @@ wire [15:0] JOY2;
 wire [15:0] JOY3;
 wire [15:0] JOYA0;
 wire [15:0] JOYA1;
+
+wire [15:0] snac_pad0, snac_pad1;
+wire [31:0] snac_axes0, snac_axes1;
+wire  [7:0] snac_id0, snac_id1;
+wire [10:0] snac_joy0, snac_joy1;
+wire  [6:0] snac_user_out_raw;
+
+snac_psx #(.CLK_KHZ(28688), .BAUD_KHZ(250)) snac
+(
+	.clk(clk_sys),
+	.reset(reset),
+	.enable(user_port_mode == 2'd2),
+	.user_in(USER_IN),
+	.user_out(snac_user_out_raw),
+	.pad0(snac_pad0), .pad1(snac_pad1),
+	.axes0(snac_axes0), .axes1(snac_axes1),
+	.id0(snac_id0), .id1(snac_id1)
+);
+
+snac_cd32 snac_map0 (.psx(snac_pad0), .joy(snac_joy0));
+snac_cd32 snac_map1 (.psx(snac_pad1), .joy(snac_joy1));
+
+// A GunCon derives its timing from the displayed raster, so it needs composite
+// sync fed back. hs/vs are active low, so a wired-AND is the classic composite.
+// Only driven when a port is actually in light-gun mode; otherwise the reader's
+// own idle level goes out.
+wire snac_lightgun = (snac_mode[2:0] == 3'd4) || (snac_mode[5:3] == 3'd4);
+assign IndirectUserOutSnac = { snac_lightgun ? (hs & vs) : snac_user_out_raw[6],
+                               snac_user_out_raw[5:0] };
+
+// OR rather than replace: a USB pad and a SNAC pad can both be connected, and
+// locking one out would be a surprise. Bits are active high here; they are
+// inverted at the minimig instantiation below.
+wire [15:0] JOY0_MUX = JOY0 | {5'd0, snac_joy0};
+wire [15:0] JOY1_MUX = JOY1 | {5'd0, snac_joy1};
+
 wire  [7:0] kbd_mouse_data;
 wire        kbd_mouse_level;
 wire  [1:0] kbd_mouse_type;
@@ -767,8 +809,8 @@ minimig minimig
 	.ri           (1                ), // RS232 Ring Indicator
 
 	//I/O
-	._joy1        (~JOY0            ), // joystick 1 [fire4,fire3,fire2,fire,up,down,left,right] (default mouse port)
-	._joy2        (~JOY1            ), // joystick 2 [fire4,fire3,fire2,fire,up,down,left,right] (default joystick port)
+	._joy1        (~JOY0_MUX        ), // joystick 1 [fire4,fire3,fire2,fire,up,down,left,right] (default mouse port)
+	._joy2        (~JOY1_MUX        ), // joystick 2 [fire4,fire3,fire2,fire,up,down,left,right] (default joystick port)
 	._joy3        (~JOY2            ), // joystick 1 [fire4,fire3,fire2,fire,up,down,left,right]
 	._joy4        (~JOY3            ), // joystick 2 [fire4,fire3,fire2,fire,up,down,left,right]
 	.joya1        (JOYA0            ),
@@ -884,6 +926,7 @@ minimig minimig
 	.USER_IN              (USER_IN              ),
 	.USER_OUT             (IndirectUserOutFlop  ),
 	.user_port_mode       (user_port_mode       ),
+	.snac_mode            (snac_mode            ),
 	.mister_floppy_status (mister_floppy_status )
 );
 
@@ -1187,7 +1230,7 @@ mt32pi mt32pi
 );
 
 always @(posedge clk_sys) begin
-	reg last_userport_mode;
+	reg [1:0] last_userport_mode;
 	userport_change_reset <= 0;
 	last_userport_mode <= user_port_mode;
 	if (last_userport_mode != user_port_mode) userport_change_reset <= 1;

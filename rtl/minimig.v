@@ -313,11 +313,13 @@ module minimig
 	output        a2065_mem_write,
 	input         a2065_mem_waitrequest,
 
-	// MiSTer Floppy (SNAC user port). USER_OUT is muxed against MT32-pi at
-	// the top level on user_port_mode; the two cannot be active together.
+	// MiSTer Floppy / PSX SNAC (SNAC user port). USER_OUT is muxed against
+	// MT32-pi at the top level on user_port_mode; the tenants cannot be
+	// active together.
 	input   [6:0] USER_IN,
 	output  [6:0] USER_OUT,
-	output        user_port_mode,
+	output  [1:0] user_port_mode,
+	output  [5:0] snac_mode,
 	output  [2:0] mister_floppy_status
 );
 
@@ -602,7 +604,7 @@ paula PAULA1
 	.floppy_speed_allowed(floppy_config[0]),
 	.floppy_speed(floppy_speed),
 
-	.enable_mister_floppy(user_port_mode),
+	.enable_mister_floppy(user_port_mode == 2'd1),
 	.mister_floppy_status(mister_floppy_status),
 
 	.USER_IN(USER_IN),
@@ -642,6 +644,7 @@ userio USERIO1
 	.floppy_config(floppy_config),
 	.floppy_ext_drive(floppy_ext_drive),
 	.user_port_mode(user_port_mode),
+	.snac_mode(snac_mode),
 	.scanline(scanline),
 	.ar(ar),
 	.blver(blver),
