@@ -56,6 +56,8 @@ module userio
 	output reg  [5:0] chipset_config,
 	output reg  [3:0] floppy_config,
 	output reg [11:0] floppy_ext_drive,	// external drive per unit, 3 bits each
+	output reg [10:0] lpen_vpos,	// light-pen vertical position latch (AmigaCD, PSX GunCon)
+	output reg  [8:0] lpen_hpos,	// light-pen horizontal position latch (AmigaCD, PSX GunCon)
 	output reg  [1:0] user_port_mode,	// 0 = MT32-pi, 1 = MiSTer Floppy, 2 = PSX SNAC
 	output reg  [5:0] snac_mode,	// {port2[2:0], port1[2:0]}
 	output reg  [2:0] scanline,
@@ -434,6 +436,8 @@ wire joystick_cfg_sel = (cmd[3:0] == 9); // XXXXSMMX || joystick config | S - sw
 wire floppyex01_cfg_sel = (cmd[3:0] == 10);// XXAAABBB || external floppy config, AAA/BBB = drive number (1-4), 0 = disabled
 wire floppyex23_cfg_sel = (cmd[3:0] == 11);// XXCCCDDD || external floppy config, CCC/DDD = drive number (1-4), 0 = disabled
 wire userport_cfg_sel   = (cmd[3:0] == 12);// PPPPPPmm || bits[13:8] = snac_mode {port2[2:0],port1[2:0]}, bits[1:0] = user port mode - 0: MT32-pi, 1: MiSTer Floppy, 2: PSX SNAC
+wire lpenv_cfg_sel = (cmd[3:0] == 13);  // UIO_MM2_LPENV, 0xFD -- light-pen vertical position
+wire lpenh_cfg_sel = (cmd[3:0] == 15);  // UIO_MM2_LPENH, 0xFF -- light-pen horizontal position, latches
 always @(posedge clk) begin
 	reg       has_cmd;
 	reg       mrx;
@@ -472,6 +476,8 @@ always @(posedge clk) begin
 				if (floppyex23_cfg_sel) floppy_ext_drive[11:6] <= IO_DIN[5:0];
 				if (userport_cfg_sel)   user_port_mode         <= IO_DIN[1:0];
 				if (userport_cfg_sel)   snac_mode              <= IO_DIN[13:8];
+				if (lpenv_cfg_sel)      lpen_vpos              <= IO_DIN[10:0];
+				if (lpenh_cfg_sel)      lpen_hpos              <= IO_DIN[8:0];
 				if (harddisk_cfg_sel) t_ide_config <= IO_DIN[5:0];
 				if (joystick_cfg_sel) {joy_swap, cd32pad, joy_ana_en} <= {IO_DIN[3], ~IO_DIN[1] & IO_DIN[2], IO_DIN[1]};
 				if (aud_sel)          aud_mix <= IO_DIN[1:0];

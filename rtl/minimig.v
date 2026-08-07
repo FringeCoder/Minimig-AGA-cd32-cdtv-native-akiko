@@ -472,6 +472,8 @@ wire        hires;				//hires signal from Denise for interpolation filter enable
 wire  [7:0] memory_config;		//memory configuration
 wire  [3:0] floppy_config;		//floppy drives configuration (external settings, drive number and speed)
 wire [11:0] floppy_ext_drive;	//external floppy drive config (3 bits per drive)
+wire [10:0] lpen_vpos;			//light-pen vertical position, latched by userspace (userio.v -> agnus)
+wire  [8:0] lpen_hpos;			//light-pen horizontal position, latched by userspace (userio.v -> agnus)
 wire  [5:0] chipset_config;	//chipset features selection (bit 5 = CDTV mode)
 assign cdtv_mode = chipset_config[5];
 wire  [5:0] ide_config;			//HDD & HDC config: bit #0 enables Gayle, bit #1 enables Master drive, bit #2 enables Slave drive
@@ -573,7 +575,9 @@ agnus AGNUS1
 	.a1k(chipset_config[2]),
 	.ecs(|chipset_config[4:3]),
 	.aga(chipset_config[4]),
-	.floppy_speed(floppy_speed)
+	.floppy_speed(floppy_speed),
+	.lpen_vpos(lpen_vpos),
+	.lpen_hpos(lpen_hpos)
 );
 
 //instantiate paula
@@ -666,6 +670,8 @@ userio USERIO1
 	.chipset_config(chipset_config),
 	.floppy_config(floppy_config),
 	.floppy_ext_drive(floppy_ext_drive),
+	.lpen_vpos(lpen_vpos),
+	.lpen_hpos(lpen_hpos),
 	.user_port_mode(user_port_mode),
 	.snac_mode(snac_mode),
 	.scanline(scanline),
