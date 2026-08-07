@@ -68,6 +68,14 @@ wire  [7:0] snac_id0, snac_id1;
 wire [10:0] snac_joy0, snac_joy1;
 wire  [6:0] snac_user_out_raw;
 
+// Packed for hps_io's 'hFE read case, so the OSD/menu-side reader (and the
+// userspace analog-stick mouse) can see the raw pad. 112 bits = 32+16+32+16+8+8.
+// Matches core-menu's concatenation and the byte_cnt/word order userspace
+// reads in snac_psx_poll(): status, pad[0], axes0_lo, axes0_hi, pad[1],
+// axes1_lo, axes1_hi.
+wire [111:0] snac_state = { snac_axes1, snac_pad1, snac_axes0, snac_pad0,
+                            snac_id1, snac_id0 };
+
 snac_psx #(.CLK_KHZ(28688), .BAUD_KHZ(250)) snac
 (
 	.clk(clk_sys),
@@ -126,6 +134,7 @@ hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 
 	.status(status),
 	.status_menumask({mister_floppy_status,mt32_cfg,mt32_available}),
+	.snac_state(snac_state),
 	.info_req(mt32_info_req),
 	.info(mt32_info_disp),
 
