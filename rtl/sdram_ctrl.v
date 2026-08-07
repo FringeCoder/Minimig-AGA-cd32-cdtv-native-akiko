@@ -250,13 +250,33 @@ end
 
 //// sdram state ////
 reg [3:0] sdram_state;
+
+// Registered decodes of the two states that drive sd_addr. The path
+// sdram_state -> sd_addr is this core's critical path: sd_addr is a wide,
+// heavily loaded register, and decoding four state bits in front of it left
+// nothing for routing. These carry the same value one cycle earlier, computed
+// from the very expression that assigns sdram_state below, so state_is_N is
+// true on exactly the cycles sdram_state == N -- a decode moved across a
+// register boundary, not a timing assumption.
+//
+// Power-up: both start 0 while sdram_state is also 0, so the first cycle is
+// skipped. Harmless -- init_done is still low then, and the init sequence
+// decodes sdram_state directly rather than going through these.
+reg state_is_0, state_is_2;
+
 always @ (posedge sysclk) begin
 	reg old_7m;
+	reg [3:0] next_state;
 
-	sdram_state <= sdram_state + 1'd1;
+	// Blocking, and evaluated before old_7m is updated, so the edge detect sees
+	// the same old_7m the original single assignment did.
+	next_state  = (~old_7m & c_7m) ? 4'd0 : (sdram_state + 1'd1);
+
+	sdram_state <= next_state;
+	state_is_0  <= (next_state == 4'd0);
+	state_is_2  <= (next_state == 4'd2);
 
 	old_7m <= c_7m;
-	if(~old_7m & c_7m) sdram_state <= 0;
 end
 
 //// sdram control ////
@@ -314,10 +334,10 @@ always @ (posedge sysclk) begin
 		end
 	end else begin
 
-		case(sdram_state)
-
-			// RAS
-			0 : begin
+		// Was case(sdram_state) on 0 and 2 -- now the registered decodes, so the
+		// four state bits are no longer in front of sd_addr. Same cycles, same
+		// order, same mutual exclusion.
+		if(state_is_0) begin
 				cas_sd_cas      <= 1;
 				cas_sd_we       <= 1;
 				cas_dqm         <= 0;
@@ -372,8 +392,8 @@ always @ (posedge sysclk) begin
 				end
 			end
 
-			// CAS
-			2 : begin
+		// CAS
+		else if(state_is_2) begin
 				sd_addr         <= {1'b1, casaddr}; // AUTO PRECHARGE
 				sd_cas          <= cas_sd_cas;
 				sd_dqm          <= 0;
@@ -384,8 +404,7 @@ always @ (posedge sysclk) begin
 					sd_we        <= 0;
 				end
 				write_ack       <= 0; // indicate to write that it's safe to accept the next write
-			end
-		endcase
+		end
 	end
 end
 
