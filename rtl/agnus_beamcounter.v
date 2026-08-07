@@ -37,6 +37,8 @@ module agnus_beamcounter
 	input	     [15:0] data_in,        // bus data in
 	output reg [15:0] data_out,       // bus data out
 	input       [8:1] reg_address_in, // register address inputs
+	input      [10:0] lpen_vpos,      // light-pen vertical position, latched by userspace (userio.v)
+	input       [8:0] lpen_hpos,      // light-pen horizontal position, latched by userspace (userio.v)
 	output reg  [8:0] hpos,           // horizontal beam counter (140ns)
 	output reg [10:0] vpos,           // vertical beam counter
 	output reg        _hsync,         // horizontal sync
@@ -102,11 +104,21 @@ parameter VBSTOP_NTSC_VAL = 9'd20;           // vertical blanking end (PAL 26 li
 //--------------------------------------------------------------------------------------
 
 //beamcounter read registers VPOSR and VHPOSR
+//
+// The light-pen latch (lpen_vpos/lpen_hpos) is selected in only when
+// lpen_en & ~lpendis. lpen_en defaults to 0 (BPLCON0 bit 3 is never set until
+// software writes it) and lpendis defaults to 0 too, so lpen_en & ~lpendis is
+// 0 on any machine that never touches the light pen, and every term below
+// collapses back to exactly the original expression -- vpos[10:8] and
+// {vpos[7:0],hpos[8:1]}, unchanged. This is the read every game that polls
+// the beam position depends on; do not disturb the false-condition path.
 always @(*) begin
 	if (reg_address_in[8:1]==VPOSR[8:1] || reg_address_in[8:1]==VPOSW[8:1])
-		data_out[15:0] = {long_frame,1'b0,ecs,ntsc,2'b00,{2{aga}},long_line,4'b0000,vpos[10:8]};
+		data_out[15:0] = {long_frame,1'b0,ecs,ntsc,2'b00,{2{aga}},long_line,4'b0000,
+		                  (lpen_en & ~lpendis) ? lpen_vpos[10:8] : vpos[10:8]};
 	else if (reg_address_in[8:1]==VHPOSR[8:1] || reg_address_in[8:1]==VHPOSW[8:1])
-		data_out[15:0] = {vpos[7:0],hpos[8:1]};
+		data_out[15:0] = (lpen_en & ~lpendis) ? {lpen_vpos[7:0], lpen_hpos[8:1]}
+		                                      : {vpos[7:0], hpos[8:1]};
 	else
 		data_out[15:0] = 0;
 end
@@ -123,7 +135,7 @@ always @ (posedge clk) begin
 end
 
 wire harddis      = beamcon0_reg[14];
-//wire lpendis      = beamcon0_reg[13];
+wire lpendis      = beamcon0_reg[13];
 wire varvben      = beamcon0_reg[12];
 wire loldis       = beamcon0_reg[11];
 //wire cscben       = beamcon0_reg[10];
@@ -151,12 +163,20 @@ always @(posedge clk) begin
 end
 
 //BPLCON0 register
+// lpen_en (bit 3, LPEN) rides in the same always block as lace (bit 2): both
+// are loaded only on a BPLCON0 write, so this reuses the one comparator
+// instead of adding a second decode for the same address.
+reg lpen_en;
 always @(posedge clk) begin
 	if (clk7_en) begin
-		if (reset)
-			lace <= 1'b0;
-		else if (reg_address_in[8:1]==BPLCON0[8:1])
-			lace <= data_in[2];
+		if (reset) begin
+			lace    <= 1'b0;
+			lpen_en <= 1'b0;
+		end
+		else if (reg_address_in[8:1]==BPLCON0[8:1]) begin
+			lace    <= data_in[2];
+			lpen_en <= data_in[3];
+		end
 	end
 end
 

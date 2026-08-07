@@ -95,7 +95,9 @@ module agnus
 	input         a1k,             // enable A1000 OCS features
 	input         ecs,             // enable ECS features
 	input         aga,             // enables AGA features
-	input         floppy_speed     // allocates refresh slots for disk DMA
+	input         floppy_speed,    // allocates refresh slots for disk DMA
+	input  [10:0] lpen_vpos,       // light-pen vertical position, latched by userspace (userio.v)
+	input   [8:0] lpen_hpos        // light-pen horizontal position, latched by userspace (userio.v)
 );
 
 //register names and adresses
@@ -457,6 +459,8 @@ agnus_beamcounter  bc1
 	.reg_address_in(reg_address),
 	.data_in(data_in),
 	.data_out(data_bmc),
+	.lpen_vpos(lpen_vpos),
+	.lpen_hpos(lpen_hpos),
 	.hpos(hpos),
 	.vpos(vpos),
 	._hsync(_hsync),
