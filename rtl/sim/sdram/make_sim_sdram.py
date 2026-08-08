@@ -8,9 +8,13 @@ import os
 
 SRC = os.path.join(os.path.dirname(__file__), "..", "..", "sdram_ctrl.v")
 DST = os.path.join(os.path.dirname(__file__), "sdram_ctrl_sim.v")
-NL = "\r\n"
 
 c = open(SRC, "r", newline="").read()
+
+# Take the line ending from the file rather than assuming CRLF. Git checks this
+# file out with LF on Linux, so a hard-coded "\r\n" makes every hoist anchor
+# miss and the script dies on its own assertion -- which is exactly what CI hit.
+NL = "\r\n" if "\r\n" in c else "\n"
 
 # the exact declaration lines that are used before their point of declaration
 hoist = [
