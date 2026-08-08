@@ -133,6 +133,7 @@ module tb_sdram_fwd;
   endtask
 
   reg [15:0] g0,g1,g2,g3;
+  reg [15:0] bt;   // Icarus cannot bit-select base(N) inline
   reg [15:0] ctl0,ctl1,ctl2,ctl3;   // measured raw (no-forward) baseline
   integer p;
   reg [24:1] blk;
@@ -187,7 +188,7 @@ module tb_sdram_fwd;
     post_cpu_write({blk[24:3], 2'd1}, wd, 1'b1, 1'b0); // bU=1(masked), bL=0(write low)
     chipAddr <= blk;
     capture_burst(g0,g1,g2,g3);
-    check("lob.merge", g1, {base(1)[15:8], wd[7:0]});  // hi from SDRAM, lo from write
+    bt = base(1); check("lob.merge", g1, {bt[15:8], wd[7:0]});  // hi from SDRAM, lo from write
     check("lob.w0raw", g0, base(0));
 
     // ---- byte-enable: write only UPPER byte to position 3 ----
@@ -196,7 +197,7 @@ module tb_sdram_fwd;
     post_cpu_write({blk[24:3], 2'd3}, wd, 1'b0, 1'b1); // bU=0(write hi), bL=1(masked)
     chipAddr <= blk;
     capture_burst(g0,g1,g2,g3);
-    check("hib.merge", g3, {wd[15:8], base(3)[7:0]});
+    bt = base(3); check("hib.merge", g3, {wd[15:8], bt[7:0]});
 
     // ---- non-matching block: pending write to a DIFFERENT block, no merge ----
     reinit;

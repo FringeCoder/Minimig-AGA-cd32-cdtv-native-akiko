@@ -1,0 +1,52 @@
+# Run the RTL testbenches that already exist in rtl/sim/ on every push.
+#
+# These benches ship with ModelSim .do runners, and ModelSim is not installed on
+# the dev machine -- so in practice they were never run, including through an
+# entire session of changes to sdram_ctrl.v. Icarus runs both of these fine, so
+# there is no reason for them to be manual.
+#
+# Only the two benches that cover the memory path are here. The akiko/cdtv/
+# chipset benches in rtl/sim/ have not been tried under Icarus yet; add them as
+# they are confirmed to run rather than committing a red pipeline.
+name: rtl-sim
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  sim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Icarus Verilog
+        run: sudo apt-get update && sudo apt-get install -y iverilog
+
+      # sdram_ctrl's chip-read burst path, store-to-load forwarding and byte-enable
+      # merging. Waits on dut.sdram_state == 0, so it also covers the registered
+      # state decode that the sd_addr retiming introduced -- a wrong decode means
+      # the CHIP slot never loads chipAddr and the baseline reads come back garbage.
+      - name: SDRAM store-to-load forwarding
+        run: |
+          set -euo pipefail
+          cd rtl/sim/sdram
+          # ModelSim needs declaration-before-use; this regenerates the reordered
+          # copy from the real sdram_ctrl.v. Behaviour-identical, sim only.
+          python3 make_sim_sdram.py
+          iverilog -g2012 -o tb_fwd \
+            dpram_sim.v ../../cpu_cache_new.v sdram_ctrl_sim.v tb_sdram_fwd.sv
+          vvp tb_fwd | tee out.log
+          grep -q "RUN: PASS" out.log
+
+      # cpu_cache_new's fill-vs-snoop interlock. sdram_ctrl drives snoop_act from
+      # chipWE, so a change to the chip write path shows up here.
+      - name: Cache fill/snoop interlock
+        run: |
+          set -euo pipefail
+          cd rtl/sim/cache
+          iverilog -g2012 -o tb_snoop \
+            dpram_sim.v ../../cpu_cache_new.v tb_cache_snoop.sv
+          vvp tb_snoop | tee out.log
+          grep -q "RUN: PASS" out.log
