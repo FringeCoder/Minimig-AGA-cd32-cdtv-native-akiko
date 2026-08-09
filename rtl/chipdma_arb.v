@@ -112,6 +112,35 @@ module chipdma_arb
 	output            ddr_out_cs,
 	output     [15:0] ddr_out_wr,
 	input             ddr_in_ack,
+	// --- Save state hold / busy handshake -------------------------------
+	//
+	// dma_hold: while high the arbiter refuses to CLAIM a new slot for
+	// either bridge master. A slot already armed or in flight is allowed
+	// to finish; nothing new starts. The bridge masters keep their req
+	// asserted (the protocol holds req until ack), so no transfer is lost
+	// -- each is simply deferred until the hold drops.
+	//
+	// This is what keeps a chip RAM snapshot self-consistent. The dump
+	// reads 2 MB through sdram_ctrl's CPU port and takes ~0.2 s, during
+	// which the chipset is frozen but the Akiko / CDTV bridges are NOT --
+	// their sector DMA is driven by the HPS, which knows nothing about the
+	// freeze. Without this gate a CD sector transfer landing mid-dump
+	// rewrites chip RAM behind ss_dma and the snapshot is torn.
+	//
+	// Quiescing only at freeze entry is not enough on its own for exactly
+	// that reason: the window is 0.2 s wide, not one cycle. dma_busy below
+	// closes the entry instant, dma_hold closes the rest of the window.
+	input             dma_hold,
+	//
+	// dma_busy: high whenever a bridge slot is being armed or is in
+	// flight, so the save state quiescer can pick a freeze instant with no
+	// bridge transfer outstanding. arm_now is included, not just
+	// state != S_IDLE: the arming cycle already drives chip_out_* at
+	// sdram_ctrl combinationally, one clk_sys edge before `state` moves to
+	// S_DRIVE, so a busy flag built from `state` alone reads idle while a
+	// write is being committed.
+	output            dma_busy,
+
 	// Read return path. ddr_in_rd is the 16-bit word captured by ddram_ctrl
 	// at the same time it raises ddr_in_ack on a read. Data is stable for
 	// many sysclks before the level-ack arrives, so the 2-FF ack sync is
@@ -251,8 +280,19 @@ wire  [7:0] live_wbyte  = arming_is_cdtv ? cdtv_dma_wbyte : akiko_dma_wbyte;
 //     chip_out_dma=0 within the same clk_sys edge, in time for
 //     sdram_ctrl to see it ~8.7 ns later (the existing minimig path
 //     fits the same budget the same way). Gated by minimig_idle so we
-//     never preempt the chipset.
-wire arm_now = (state == S_IDLE) & c_7m_rise & minimig_idle & any_req;
+//     never preempt the chipset. Also gated by ~dma_hold so a save state
+//     freeze stops new bridge claims for the whole chip RAM dump (see the
+//     dma_hold port comment).
+//
+//     dma_hold matters here specifically because minimig_idle goes STATIC
+//     once the chipset timebase is frozen: chip_in_dma / chip_in_rw stop
+//     changing, so whatever they held at the freeze instant is what
+//     minimig_idle reads for the next 0.2 s. If that value happens to be
+//     "idle" the bridge would otherwise have unrestricted access to every
+//     slot for the entire dump.
+wire arm_now = (state == S_IDLE) & c_7m_rise & minimig_idle & any_req & ~dma_hold;
+
+assign dma_busy = (state != S_IDLE) | arm_now;
 
 // --- arb_request: we want to be on the bus this cycle. Either we
 //     just armed combinationally, or we are mid-slot (S_DRIVE).

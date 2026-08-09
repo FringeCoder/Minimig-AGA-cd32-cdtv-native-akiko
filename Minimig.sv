@@ -415,6 +415,24 @@ always @(posedge clk_sys, posedge reset) begin
 end
 
 //// amiga clocks ////
+//
+// Both amiga_clk instances are reset from ~reset_d, never from ~reset.
+// `reset` is ~locked | buttons[1] | RESET -- asynchronous to clk_sys -- and
+// amiga_clk recovers it with `always @(posedge clk_28, negedge reset_n)`.
+// With two instances that is two INDEPENDENT recoveries of the same
+// asynchronous release edge: one metastable capture and the two phase
+// generators come out of reset a clk_28 cycle apart and stay that way for
+// the whole session. chipdma_arb (see its header) requires minimig's chip
+// DMA inputs to be aligned to the c_7m it samples, and those now come from
+// different generators, so a permanent one-cycle skew is a permanent
+// chip-RAM slot corruption -- nondeterministic, boot-time, and invisible
+// until something tears.
+//
+// reset_d is the clk_sys-synchronised reset already used by sdram_ctrl,
+// ddram_ctrl, chipdma_arb, minimig, ss_ctrl and ss_freeze_7m. It is only
+// ever written on posedge clk_sys (the async `posedge reset` branch of its
+// always block writes reset_s, not reset_d), so both its assertion and its
+// release are synchronous and both instances leave reset on the same edge.
 wire       clk7_en;
 wire       clk7n_en;
 wire       c1;
@@ -432,7 +450,7 @@ amiga_clk amiga_clk
 	.cck      ( cck        ), // colour clock output (3.54 MHz)
 	.eclk     ( eclk       ), // 0.709379 MHz clock enable output (clk domain pulse)
 	.ce       ( 1'b1       ), // free-running: this copy drives sdram_ctrl and chipdma_arb
-	.reset_n  ( ~reset     )
+	.reset_n  ( ~reset_d   )  // synchronous release -- see note above
 );
 
 
@@ -484,7 +502,7 @@ amiga_clk amiga_clk_am
 	.cck      ( am_cck        ),
 	.eclk     ( am_eclk       ),
 	.ce       ( ~ss_freeze_7m ),
-	.reset_n  ( ~reset        )
+	.reset_n  ( ~reset_d      )  // same synchronous release as the master copy
 );
 
 // TG68K register file sweep. One read port, so the sixteen registers are
@@ -507,6 +525,12 @@ wire  [3:0] ss_map;
 wire        ss_blit_busy;
 wire        ss_disk_busy;
 wire        ss_audio_busy;
+
+// From chipdma_arb: a bridge (Akiko / CDTV) chip-RAM slot is armed or in
+// flight. Joins cpu_boundary so the freeze is never taken with a bridge
+// write half-committed; the ss_freeze_7m hold on the arbiter keeps new ones
+// from starting once it is.
+wire        ss_dma_busy;
 
 // Borrowed sdram_ctrl CPU port.
 wire [24:1] ss_sd_addr;
@@ -867,7 +891,17 @@ chipdma_arb chipdma_arb
 	.ddr_out_cs      (dma_ddr_cs_w         ),
 	.ddr_out_wr      (dma_ddr_wr_w         ),
 	.ddr_in_ack      (dma_ddr_ack_w        ),
-	.ddr_in_rd       (dma_ddr_rd_w         )
+	.ddr_in_rd       (dma_ddr_rd_w         ),
+
+	// Save state: stop granting bridge slots for the duration of the chip
+	// RAM dump, and tell the quiescer when a bridge transfer is in flight.
+	// ss_freeze_7m rather than ss_freeze because chipdma_arb is a clk_sys
+	// module and ss_freeze_7m is already the clk_sys-domain, clk7_en-aligned
+	// copy that stops the chipset -- using it makes the bridge stop on the
+	// same edge the chipset does. Both are 0 when no save is in progress, so
+	// arm_now is unchanged on an idle machine.
+	.dma_hold        (ss_freeze_7m         ),
+	.dma_busy        (ss_dma_busy          )
 );
 
 wire [15:0] ram_dout2;
@@ -1396,17 +1430,32 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.state_out    (),
 	.state_we     (),
 
-	// cpu_boundary carries two extra conditions beyond "the CPU is parked".
+	// cpu_boundary carries three extra conditions beyond "the CPU is parked".
 	// ss_regs_valid, because the register sweep must be complete before the
 	// vector is latched (see above). ss_ram_idle, because a DDR3 read already
 	// accepted for master 0 returns its data out of band, and taking master 0
 	// away in that window would lose the readdatavalid pulse -- see
-	// ddram_ctrl.v. Neither is a property of the CPU, but cpu_boundary is the
-	// only input ss_quiesce has left for "not yet".
+	// ddram_ctrl.v. ~ss_dma_busy, because chipdma_arb is a chip RAM WRITE
+	// master for the Akiko and CDTV bridges and neither is stopped by the CPU
+	// park or the chipset freeze; freezing with one of their slots
+	// half-committed would put a write into chip RAM at an unknown point
+	// relative to the dump. None of the three is a property of the CPU, but
+	// cpu_boundary is the only input ss_quiesce has left for "not yet".
+	//
+	// ~ss_dma_busy closes the freeze INSTANT only. The rest of the ~0.2 s
+	// dump is closed by chipdma_arb's dma_hold input (tied to ss_freeze_7m
+	// above), which stops the arbiter granting any further bridge slot. The
+	// two together are what make the snapshot self-consistent; either alone
+	// only moves the tear.
+	//
+	// ss_dma_busy is a clk_sys signal sampled here in clk_114. So are
+	// ss_blit_busy / ss_disk_busy / ss_audio_busy (minimig.v runs on
+	// clk_sys): the two clocks come from the same PLL at 4:1, so these are
+	// timed paths, not CDCs.
 	.blit_busy    (ss_blit_busy),
 	.disk_busy    (ss_disk_busy),
 	.audio_busy   (ss_audio_busy),
-	.cpu_boundary (ss_cpu_parked & ss_regs_valid & ss_ram_idle),
+	.cpu_boundary (ss_cpu_parked & ss_regs_valid & ss_ram_idle & ~ss_dma_busy),
 	.frame_tick   (ss_frame_tick),
 	.freeze       (ss_freeze),
 

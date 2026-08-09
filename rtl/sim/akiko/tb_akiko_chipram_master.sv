@@ -144,7 +144,13 @@ chipdma_arb u_dut (
 	.ddr_out_we      (                ),
 	.ddr_out_cs      (                ),
 	.ddr_out_wr      (                ),
-	.ddr_in_ack      (1'b0            )
+	.ddr_in_ack      (1'b0            ),
+
+	// Save state hold: tied off here. This bench predates the save state
+	// feature and exercises the arbiter's normal (never-frozen) behaviour,
+	// which is exactly the case dma_hold=0 must leave untouched.
+	.dma_hold        (1'b0            ),
+	.dma_busy        (                )
 );
 
 // -----------------------------------------------------------------------

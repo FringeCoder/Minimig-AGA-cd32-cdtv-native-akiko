@@ -59,10 +59,29 @@ module ddram_ctrl
 	output            mem2_waitrequest,
 
 	// Save state writer. Takes over master 0 of the DDR3 arbiter while
-	// ss_freeze is asserted. Master 0 is the fast-RAM path, which cannot
-	// issue anything then because the CPU is parked -- the same argument
-	// that lets ss_dma borrow the SDRAM CPU port. The arbiter itself is not
-	// touched.
+	// ss_freeze is asserted. The arbiter itself is not touched.
+	//
+	// Master 0 carries TWO clients, not one: the CPU's fast-RAM path
+	// (write_req / cache_req) and the Akiko / CDTV bridge DMA port
+	// (dma_write_req / dma_read_req, see the state-0 arm below). The CPU is
+	// parked for the freeze, so it issues nothing -- the same argument that
+	// lets ss_dma borrow the SDRAM CPU port. The bridge is NOT parked; its
+	// sector DMA is driven by the HPS, which knows nothing about the freeze.
+	//
+	// What actually makes taking the port safe is ram_busy, not the CPU
+	// park. ram_busy is pinned high for the whole freeze (see its assign
+	// below), the only place a master-0 request is armed is
+	// `case(state) 0: if(~ram_busy)`, and ram_rd / ram_we are cleared only
+	// under ~ram_busy. So during the freeze no new master-0 request of
+	// either kind is generated, and anything already armed at freeze entry
+	// is held with its strobe intact and re-issued when the freeze lifts.
+	//
+	// The consequence, which is deliberate: bridge DMA to DDR3 (Zorro fast
+	// RAM) stalls for the duration of the dump, ~0.2 s. That is the same
+	// stall chipdma_arb's dma_hold input imposes on the bridge's chip-RAM
+	// path, and for the same reason -- a bridge write landing mid-dump would
+	// tear the snapshot. The bridges hold req until ack, so nothing is lost,
+	// only deferred.
 	input             ss_freeze,
 	input      [28:0] ss_address,
 	input      [63:0] ss_writedata,
