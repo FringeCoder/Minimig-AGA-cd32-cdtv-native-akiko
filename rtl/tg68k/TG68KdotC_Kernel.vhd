@@ -141,7 +141,15 @@ entity TG68KdotC_Kernel is
 		-- D-cache enable bit (CACR bit 8 on real 030+). Defaults on until a
 		-- MOVEC CACR write claims it; gates cpu_cache_new's cc_den.
 		D_CACHE_out				: out std_logic;
-		VBR_out					: out std_logic_vector(31 downto 0)
+		VBR_out					: out std_logic_vector(31 downto 0);
+
+		-- Save state export. Read-only view of the architectural registers,
+		-- valid whenever the CPU is stopped at an instruction boundary.
+		ss_reg_index			: in  std_logic_vector( 3 downto 0) := (OTHERS => '0');
+		ss_reg_data				: out std_logic_vector(31 downto 0);
+		ss_pc						: out std_logic_vector(31 downto 0);
+		ss_sr						: out std_logic_vector(15 downto 0);
+		ss_usp					: out std_logic_vector(31 downto 0)
 		);
 end TG68KdotC_Kernel;
 
@@ -582,6 +590,18 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 			END IF;
 		END IF;
 	END PROCESS;
+
+-----------------------------------------------------------------------------
+-- Save state export
+-----------------------------------------------------------------------------
+-- A second, asynchronous read port on the register file. The savestate
+-- controller sweeps ss_reg_index while the CPU is frozen, so there is no
+-- contention with RDindex_A/RDindex_B and no timing path into the execute
+-- pipeline.
+ss_reg_data <= regfile(conv_integer(ss_reg_index));
+ss_pc       <= TG68_PC;
+ss_sr       <= FlagsSR & Flags;
+ss_usp      <= USP;
 
 -----------------------------------------------------------------------------
 -- Write Reg

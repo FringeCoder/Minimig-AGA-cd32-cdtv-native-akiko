@@ -38,6 +38,16 @@ module cpu_wrapper
 	input       [3:0] cachecfg,
 	input             bootrom,
 
+	// Save state export. Read-only view of the TG68K architectural
+	// registers, valid while the CPU is frozen by the savestate controller.
+	input       [3:0] ss_reg_index,
+	output     [31:0] ss_reg_data,
+	output     [31:0] ss_pc,
+	output     [15:0] ss_sr,
+	output     [31:0] ss_usp,
+	output     [31:0] ss_vbr,
+	output      [3:0] ss_cacr,
+
 	output reg [23:1] chip_addr,
 	input      [15:0] chip_dout,
 	output reg [15:0] chip_din,
@@ -284,8 +294,19 @@ cpu_inst_p
   // d_cache_out is '1' by default and tracks the latched MOVEC CACR write
   // thereafter — see TG68KdotC_Kernel.vhd CACR_DC / CACR_DC_owned regs.
   .d_cache_out(dcache_sw_en_p),
-  .vbr_out(vbr_p)
+  .vbr_out(vbr_p),
+
+  .ss_reg_index(ss_reg_index),
+  .ss_reg_data(ss_reg_data),
+  .ss_pc(ss_pc),
+  .ss_sr(ss_sr),
+  .ss_usp(ss_usp)
 );
+
+// VBR and CACR are already brought out of the kernel for the memory map, so
+// the savestate view reuses them rather than adding ports.
+assign ss_vbr  = vbr_p;
+assign ss_cacr = cacr_p;
 
 wire [15:0] cpu_dout_o;
 wire [23:1] cpu_addr_o;
