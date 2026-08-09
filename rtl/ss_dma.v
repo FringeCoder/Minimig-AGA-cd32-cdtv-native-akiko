@@ -1,0 +1,141 @@
+`timescale 1ns/1ns
+
+// Reads a chip RAM range out through the SDRAM controller's CPU port.
+//
+// Borrowing the CPU port rather than adding one is deliberate. sdram_ctrl's
+// sd_addr register is the core's worst timing path, and widening its arbiter
+// would add fan-in exactly where there is none to spare. The port is free
+// because the machine is frozen: no CPU cycle can be in flight.
+//
+// cache_inhibit is asserted for the whole transfer (from the word after
+// `start` through the word `done` commits), not just while `sd_cs` happens
+// to be high. The CPU port is cached, and chip DMA writes do not pass
+// through that cache, so an uninhibited dump could return stale data for
+// anything the blitter or copper wrote.
+//
+// Per-word handshake, not a held burst. `sd_cs` is asserted for exactly one
+// address at a time: wait for `sd_ready`, capture the word, deassert
+// `sd_cs` for one cycle, then assert again with the next address. This is
+// the real bus-cycle protocol `cpu_cache_new.v` implements, confirmed by
+// direct inspection:
+//   - `cpu_ack` (the presumptive `sd_ready` source) is a *level*: once
+//     asserted on a hit or fill completion it stays asserted for as long as
+//     `cpu_cs` stays asserted, and is only cleared by
+//     `if (!cpu_cs) cpu_ack <= 1'b0` (cpu_cache_new.v:490).
+//   - The cache's own state machine sits in `CPU_SM_WAIT`/`CPU_SM_FILLW`
+//     until `cpu_cs` drops, and only then returns to `CPU_SM_IDLE`, where a
+//     newly asserted `cpu_cs` begins servicing a new address
+//     (cpu_cache_new.v:322,325,370,296-309). It never re-services a second
+//     address while `cpu_cs` stays up.
+// An earlier version of this module held `sd_cs` high for the whole
+// multi-word burst, relying on `sd_ready` pulsing once per word on its own.
+// Against the real cache that fails silently: `cpu_ack` would stay high
+// after the first word forever (never cleared, since `cpu_cs` never drops),
+// so every subsequent cycle would look like "another word ready" while the
+// cache's state machine -- frozen in `CPU_SM_WAIT` -- never advances to
+// look at the next address. The result is not a hang but something worse:
+// word 0 read over and over, silently, with a word count that looks correct.
+// The one-word-at-a-time handshake below is what makes this module safe to
+// wire straight onto the CPU port's `cpuCS`/`cpuAddr`/`ramready` pins.
+
+module ss_dma
+(
+	input             clk,
+	input             rst_n,
+
+	input             start,
+	input      [24:1] base_addr,
+	input      [23:0] word_count,
+
+	// Borrowed sdram_ctrl CPU port. uds_n/lds_n are active low to match
+	// sdram_ctrl.v:119 ({!cpuU, !cpuL}); state 2 is "read data" per
+	// sdram_ctrl.v:122 (cpustate == 2).
+	output reg [24:1] sd_addr,
+	output reg        sd_cs,
+	output     [1:0]  sd_state,
+	output            sd_uds_n,
+	output            sd_lds_n,
+	output            sd_cache_inhibit,
+	input      [15:0] sd_rd,
+	input             sd_ready,
+
+	output reg        word_valid,
+	output reg [15:0] word_out,
+	output reg        done
+);
+
+assign sd_state         = 2'd2;
+assign sd_uds_n         = 1'b0;
+assign sd_lds_n         = 1'b0;
+assign sd_cache_inhibit = busy;
+
+// xfer_state sequences a single in-flight address at a time:
+//   XFER_IDLE - no transfer in progress, sd_cs held low.
+//   XFER_REQ  - sd_cs asserted for the current address, waiting for
+//               sd_ready.
+//   XFER_GAP  - sd_cs deasserted for exactly one cycle so the real cache
+//               can see !cpu_cs and return to CPU_SM_IDLE before the next
+//               address is presented.
+localparam [1:0] XFER_IDLE = 2'd0;
+localparam [1:0] XFER_REQ  = 2'd1;
+localparam [1:0] XFER_GAP  = 2'd2;
+
+reg [1:0]  xfer_state;
+reg [23:0] remaining;
+reg        busy;
+
+always @(posedge clk) begin
+	if (!rst_n) begin
+		xfer_state <= XFER_IDLE;
+		sd_cs      <= 1'b0;
+		sd_addr    <= 24'd0;
+		word_valid <= 1'b0;
+		done       <= 1'b0;
+		busy       <= 1'b0;
+		remaining  <= 24'd0;
+	end
+	else begin
+		word_valid <= 1'b0;
+		done       <= 1'b0;
+
+		if (start) begin
+			sd_addr    <= base_addr;
+			remaining  <= word_count;
+			busy       <= (word_count != 24'd0);
+			sd_cs      <= (word_count != 24'd0);
+			done       <= (word_count == 24'd0);
+			xfer_state <= (word_count != 24'd0) ? XFER_REQ : XFER_IDLE;
+		end
+		else begin
+			case (xfer_state)
+				XFER_REQ: begin
+					if (sd_ready) begin
+						word_out   <= sd_rd;
+						word_valid <= 1'b1;
+						sd_cs      <= 1'b0;
+						remaining  <= remaining - 24'd1;
+						if (remaining == 24'd1) begin
+							busy       <= 1'b0;
+							done       <= 1'b1;
+							xfer_state <= XFER_IDLE;
+						end
+						else begin
+							xfer_state <= XFER_GAP;
+						end
+					end
+				end
+
+				XFER_GAP: begin
+					sd_addr    <= sd_addr + 24'd1;
+					sd_cs      <= 1'b1;
+					xfer_state <= XFER_REQ;
+				end
+
+				default: begin // XFER_IDLE
+				end
+			endcase
+		end
+	end
+end
+
+endmodule

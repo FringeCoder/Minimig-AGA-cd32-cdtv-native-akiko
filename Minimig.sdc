@@ -35,6 +35,21 @@ set_multicycle_path -from {emu|amiga_clk|c1*} -to {emu|ram1|*} -hold 1
 set_multicycle_path -from {emu|amiga_clk|c3*} -to {emu|ram1|*} -setup 2
 set_multicycle_path -from {emu|amiga_clk|c3*} -to {emu|ram1|*} -hold 1
 
+# init_done is a one-shot: set when initstate saturates at sdram_state == 15 and
+# never cleared except by reset (sdram_ctrl.v:240-251). It is static for the
+# entire life of the design either side of that single transition, and it only
+# changes on state 15 of a 16-state machine, so anything downstream has many
+# cycles before it matters. After the sd_addr split this became the sole binding
+# path in the design (init_done -> sd_cas, -0.172 ns) with 0.34 ns of clear air
+# to the next one, purely because a static configuration signal was being held
+# to a single-cycle budget it never needs.
+#
+# setup 2 is deliberately conservative rather than a false path: the 0->1 edge
+# does change downstream behaviour, and on a memory controller "it only glitches
+# once, during init" is not an argument worth relying on.
+set_multicycle_path -from {emu|ram1|init_done} -to {emu|ram1|*} -setup 2
+set_multicycle_path -from {emu|ram1|init_done} -to {emu|ram1|*} -hold 1
+
 # Bridge DMA write port on ram2 (DDR3) is a CDC handshake. chipdma_arb
 # (clk_sys) registers dma_ddr_cs_r plus the entire DDR bus (addr / wr / l / u)
 # on arm_now and holds them stable until S_ACK. ddram_ctrl (clk_114)
