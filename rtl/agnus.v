@@ -86,6 +86,7 @@ module agnus
 	output        harddis,
 	output        varbeamen,
 	output        int3,            // blitter finished interrupt (to Paula)
+	output        blit_busy,       // blitter busy status, for the save state quiesce
 	input   [3:0] audio_dmal,      // audio dma data transfer request (from Paula)
 	input   [3:0] audio_dmas,      // audio dma location pointer restart (from Paula)
 	input         disk_dmal,       // disk dma data transfer request (from Paula)
@@ -407,7 +408,7 @@ always @(posedge clk) if (clk7_en) begin
 		else if (bls_cnt[1:0] != BLS_CNT_MAX) bls_cnt <= bls_cnt + 2'b01;
 end
 
-wire        blit_busy;       //blitter busy status
+// blit_busy is a module output now (save state quiesce); no local wire.
 wire        blit_zero;       //blitter zero status
 wire        req_blt;         //blitter dma request
 wire [20:1] address_blt;     //blitter dma engine chip address out

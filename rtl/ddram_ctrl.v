@@ -58,6 +58,21 @@ module ddram_ctrl
 	input             mem2_write,
 	output            mem2_waitrequest,
 
+	// Save state writer. Takes over master 0 of the DDR3 arbiter while
+	// ss_freeze is asserted. Master 0 is the fast-RAM path, which cannot
+	// issue anything then because the CPU is parked -- the same argument
+	// that lets ss_dma borrow the SDRAM CPU port. The arbiter itself is not
+	// touched.
+	input             ss_freeze,
+	input      [28:0] ss_address,
+	input      [63:0] ss_writedata,
+	input       [7:0] ss_byteenable,
+	input             ss_write,
+	output            ss_waitrequest,
+	// High when no master-0 read is outstanding and nothing is queued, i.e.
+	// when it is safe to take the port away. See ss_rd_outstanding below.
+	output            ss_ram_idle,
+
 	// cpu
 	input      [28:1] cpuAddr,
 	input             cpuCS,
@@ -287,21 +302,48 @@ reg         ram_rd, ram_we;
 wire        ram_busy;
 wire [63:0] ram_dout       = DDRAM_DOUT;
 wire        ram_dout_ready;
+wire        m0_waitrequest_int;
+
+// Holding ram_busy high for the whole freeze is what protects a request
+// that was asserted but not yet accepted when the port was taken away:
+// the state machine below only clears ram_rd/ram_we under ~ram_busy, so a
+// pending request is held and re-issued once the freeze lifts rather than
+// being dropped on the floor. It also stalls the fast-RAM path outright if
+// a future change makes it ask for something mid-save.
+assign ram_busy       = ss_freeze ? 1'b1               : m0_waitrequest_int;
+assign ss_waitrequest = ss_freeze ? m0_waitrequest_int : 1'b1;
+
+// A read that has already been accepted by the arbiter is a different
+// problem: its readdatavalid comes back out of band, state 1 below waits
+// for it under ~ram_busy, and ram_busy is pinned high while frozen -- so a
+// pulse arriving mid-freeze would be lost and the reader (a CPU cache fill,
+// or an Akiko/CDTV bridge read, which the quiesce's blitter/disk/audio
+// conditions say nothing about) would wait for it forever. Rather than
+// change the state machine, the freeze simply waits for the port to be
+// quiet: ss_ram_idle joins cpu_boundary in Minimig.sv, the same way
+// blit_busy does.
+reg ss_rd_outstanding;
+always @(posedge sysclk) begin
+	if (~reset_n)                            ss_rd_outstanding <= 1'b0;
+	else if (ram_rd & ~m0_waitrequest_int)   ss_rd_outstanding <= 1'b1;
+	else if (ram_dout_ready)                 ss_rd_outstanding <= 1'b0;
+end
+assign ss_ram_idle = ~ss_rd_outstanding & ~ram_rd & ~ram_we;
 
 a2065_ddram_arbiter arbiter
 (
 	.clk             (sysclk),
 	.rst             (~reset_n),
 
-	.m0_address      (ram_addr),
+	.m0_address      (ss_freeze ? ss_address    : ram_addr),
 	.m0_burstcount   (8'd1),
-	.m0_read         (ram_rd),
+	.m0_read         (ss_freeze ? 1'b0          : ram_rd),
 	.m0_readdata     (),
 	.m0_readdatavalid(ram_dout_ready),
-	.m0_writedata    (ram_din),
-	.m0_byteenable   (ram_be),
-	.m0_write        (ram_we),
-	.m0_waitrequest  (ram_busy),
+	.m0_writedata    (ss_freeze ? ss_writedata  : ram_din),
+	.m0_byteenable   (ss_freeze ? ss_byteenable : ram_be),
+	.m0_write        (ss_freeze ? ss_write      : ram_we),
+	.m0_waitrequest  (m0_waitrequest_int),
 
 	.m1_address      (mem2_address),
 	.m1_burstcount   (mem2_burstcount),

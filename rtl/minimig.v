@@ -343,7 +343,23 @@ module minimig
 	output  [6:0] USER_OUT,
 	output  [1:0] user_port_mode,
 	output  [5:0] snac_mode,
-	output  [2:0] mister_floppy_status
+	output  [2:0] mister_floppy_status,
+
+	// Save state observation ports. Read-only: nothing here changes how the
+	// machine runs, and there is no ss_freeze input -- the freeze is applied
+	// upstream by stopping the amiga_clk instance that feeds clk7_en/clk7n_en/
+	// c1/c3/cck/eclk, which holds every chipset module at once (see
+	// amiga_clk.v's ce port for why gating the levels here would not work).
+	//
+	// The three busy bits are the chip-RAM writers the quiesce waits on:
+	// the blitter, and Paula's disk and audio DMA requests to Agnus. Bitplane,
+	// sprite, copper and refresh DMA are reads and do not need to be quiet.
+	output        ss_blit_busy,
+	output        ss_disk_busy,
+	output        ss_audio_busy,
+	// Gary's memory map state, in the order ss_state.vh expects:
+	// {ovl, rom_readonly, sel_kick1mb, sel_kick256kmirror}.
+	output  [3:0] ss_map
 );
 
 
@@ -577,7 +593,8 @@ agnus AGNUS1
 	.aga(chipset_config[4]),
 	.floppy_speed(floppy_speed),
 	.lpen_vpos(lpen_vpos),
-	.lpen_hpos(lpen_hpos)
+	.lpen_hpos(lpen_hpos),
+	.blit_busy(ss_blit_busy)
 );
 
 //instantiate paula
@@ -976,6 +993,12 @@ always @(posedge clk) begin
 	if(~_cpu_reset | ~_cpu_reset_in)       ovl <= 1;
 	else if(sel_cia_a & (cpu_lwr|cpu_hwr)) ovl <= 0;
 end
+
+// Save state observation taps. Purely combinational reads of signals that
+// already exist -- nothing here loads or perturbs the machine.
+assign ss_map        = {ovl, rom_readonly, sel_kick1mb, sel_kick256kmirror};
+assign ss_disk_busy  = disk_dmal;
+assign ss_audio_busy = |audio_dmal;
 
 //-------------------------------------------------------------------------------------
 

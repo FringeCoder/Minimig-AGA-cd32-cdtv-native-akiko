@@ -34,8 +34,9 @@ assign USER_OUT = (user_port_mode == 2'd2) ? IndirectUserOutSnac :
                                              IndirectUserOutmt32;
 
 `include "build_id.v" 
+`include "rtl/ss_state.vh"
 localparam CONF_STR = {
-	"AmigaCD;UART115200:230400,MIDI;",
+	"AmigaCD;UART115200:230400,MIDI,SS3E000000:400000;",
 	"J,Red(Fire),Blue,Yellow,Green,RT,LT,Pause;",
 	"jn,A,B,X,Y,R,L,Start;",
 	"jp,B,A,X,Y,R,L,Start;",
@@ -430,8 +431,99 @@ amiga_clk amiga_clk
 	.c3       ( c3         ), // clk28m clock domain signal synchronous with clk signal delayed by 90 degrees
 	.cck      ( cck        ), // colour clock output (3.54 MHz)
 	.eclk     ( eclk       ), // 0.709379 MHz clock enable output (clk domain pulse)
+	.ce       ( 1'b1       ), // free-running: this copy drives sdram_ctrl and chipdma_arb
 	.reset_n  ( ~reset     )
 );
+
+
+//////////////////////////  SAVE STATES (phase 1A)  /////////////////////////
+//
+// Declarations only; the sequencer itself is below the minimig instance,
+// where every signal it observes already exists.
+//
+// The freeze does not gate clk7_en/clk7n_en the way the plan described. c1,
+// c3, cck and eclk are Gray-coded phase LEVELS shared by agnus, denise, the
+// CIAs and the sram bridge, and a one-in-four phase decode off them becomes
+// true *every* cycle if the levels are held, so ANDing them with ~freeze
+// speeds the chipset up rather than stopping it. Instead the whole 7 MHz
+// timebase feeding minimig comes from a second amiga_clk whose ce can be
+// dropped. The original instance is untouched and still drives sdram_ctrl
+// and chipdma_arb: SDRAM refresh must not stop for the ~150 ms a 2 MB chip
+// RAM dump takes, and the dump itself reads chip RAM through sdram_ctrl's
+// CPU port.
+wire        ss_freeze;
+wire        ss_save_busy;
+
+wire        am_clk7_en;
+wire        am_clk7n_en;
+wire        am_c1;
+wire        am_c3;
+wire        am_cck;
+wire  [9:0] am_eclk;
+
+// The two timebases must come back in phase, because minimig's chip bus and
+// sdram_ctrl's chip slots are both aligned to their own c1 and chipdma_arb
+// samples one with the other. Sampling ss_freeze only on the master's
+// clk7_en pulse makes the pause an exact multiple of four clk_sys cycles --
+// one full c1/c3 period -- so the slave resumes on the phase it stopped on.
+// This is also where ss_freeze crosses from clk_114 into clk_sys; the two
+// come from the same PLL at 4:1 so it is a timed path, not a CDC.
+reg ss_freeze_7m;
+always @(posedge clk_sys) begin
+	if (reset_d)       ss_freeze_7m <= 1'b0;
+	else if (clk7_en)  ss_freeze_7m <= ss_freeze;
+end
+
+amiga_clk amiga_clk_am
+(
+	.clk_28   ( clk_sys       ),
+	.clk7_en  ( am_clk7_en    ),
+	.clk7n_en ( am_clk7n_en   ),
+	.c1       ( am_c1         ),
+	.c3       ( am_c3         ),
+	.cck      ( am_cck        ),
+	.eclk     ( am_eclk       ),
+	.ce       ( ~ss_freeze_7m ),
+	.reset_n  ( ~reset        )
+);
+
+// TG68K register file sweep. One read port, so the sixteen registers are
+// sampled one per clk_sys cycle while the CPU is parked.
+reg  [3:0]  ss_reg_index;
+wire [31:0] ss_reg_data;
+wire [31:0] ss_pc;
+wire [15:0] ss_sr;
+wire [31:0] ss_usp;
+wire [31:0] ss_vbr;
+wire  [3:0] ss_cacr;
+reg  [31:0] ss_cpu_d0, ss_cpu_d1, ss_cpu_d2, ss_cpu_d3;
+reg  [31:0] ss_cpu_d4, ss_cpu_d5, ss_cpu_d6, ss_cpu_d7;
+reg  [31:0] ss_cpu_a0, ss_cpu_a1, ss_cpu_a2, ss_cpu_a3;
+reg  [31:0] ss_cpu_a4, ss_cpu_a5, ss_cpu_a6, ss_cpu_a7;
+reg         ss_regs_valid;
+
+// From minimig.
+wire  [3:0] ss_map;
+wire        ss_blit_busy;
+wire        ss_disk_busy;
+wire        ss_audio_busy;
+
+// Borrowed sdram_ctrl CPU port.
+wire [24:1] ss_sd_addr;
+wire        ss_sd_cs;
+wire  [1:0] ss_sd_state;
+wire        ss_sd_uds_n;
+wire        ss_sd_lds_n;
+wire        ss_sd_cache_inhibit;
+
+// Borrowed DDR3 arbiter master 0.
+wire [28:0] ss_ddr_address;
+wire [63:0] ss_ddr_writedata;
+wire  [7:0] ss_ddr_byteenable;
+wire        ss_ddr_write;
+wire        ss_ddr_waitrequest;
+wire        ss_ram_idle;
+/////////////////////////////////////////////////////////////////////////////
 
 
 wire cpu_type = cpucfg[1];
@@ -588,6 +680,16 @@ cpu_wrapper cpu_wrapper
 
 	.cpucfg       (cpucfg          ),
 	.cachecfg     (cachecfg        ),
+
+	// Save state export, and the park request that makes it meaningful.
+	.ss_arm       (ss_save_busy    ),
+	.ss_reg_index (ss_reg_index    ),
+	.ss_reg_data  (ss_reg_data     ),
+	.ss_pc        (ss_pc           ),
+	.ss_sr        (ss_sr           ),
+	.ss_usp       (ss_usp          ),
+	.ss_vbr       (ss_vbr          ),
+	.ss_cacr      (ss_cacr         ),
 	.fastramcfg   (memcfg[6:4]     ),
 	.bootrom      (bootrom         ),
 
@@ -680,12 +782,18 @@ sdram_ctrl ram1
 	.sd_cke       (SDRAM_CKE       ),
 	.sd_clk       (SDRAM_CLK       ),
 
+	// While frozen the CPU port belongs to ss_dma. The CPU itself is parked
+	// at a no-memaccess boundary, so ram_cs is low and nothing is displaced.
+	// cache_inhibit was previously unconnected (and so tied low); ss_dma
+	// asserts it for the whole dump because chip DMA writes do not pass
+	// through this cache and a cached read could return a stale word.
 	.cpuWR        (ram_din         ),
-	.cpuAddr      (ram_addr[22:1]  ),
-	.cpuU         (ram_uds         ),
-	.cpuL         (ram_lds         ),
-	.cpustate     (cpu_state       ),
-	.cpuCS        (~zram_sel&ram_cs),
+	.cpuAddr      (ss_freeze ? ss_sd_addr  : {2'b00, ram_addr[22:1]}),
+	.cpuU         (ss_freeze ? ss_sd_uds_n : ram_uds),
+	.cpuL         (ss_freeze ? ss_sd_lds_n : ram_lds),
+	.cpustate     (ss_freeze ? ss_sd_state : cpu_state),
+	.cpuCS        (ss_freeze ? ss_sd_cs    : (~zram_sel & ram_cs)),
+	.cache_inhibit(ss_freeze & ss_sd_cache_inhibit),
 	.cpuRD        (ram_dout1       ),
 	.ramready     (ram_ready1      ),
 
@@ -804,6 +912,15 @@ ddram_ctrl ram2
 	.cpuRD        (ram_dout2       ),
 	.ramshared    (ramshared       ),
 	.ramready     (ram_ready2      ),
+
+	// Save state writer, muxed onto DDR3 arbiter master 0 while frozen.
+	.ss_freeze    (ss_freeze          ),
+	.ss_address   (ss_ddr_address     ),
+	.ss_writedata (ss_ddr_writedata   ),
+	.ss_byteenable(ss_ddr_byteenable  ),
+	.ss_write     (ss_ddr_write       ),
+	.ss_waitrequest(ss_ddr_waitrequest),
+	.ss_ram_idle  (ss_ram_idle        ),
 
 	// Bridge (Akiko/CDTV) DMA port — see chipdma_arb.
 	// dmaRD carries the read-return word so the
@@ -1014,12 +1131,15 @@ minimig minimig
 	.rst_ext      (reset_d          ), // reset from ctrl block
 	.rst_out      (                 ), // minimig reset status
 	.clk          (clk_sys          ), // output clock c1 ( 28.687500MHz)
-	.clk7_en      (clk7_en          ), // 7MHz clock enable
-	.clk7n_en     (clk7n_en         ), // 7MHz negedge clock enable
-	.c1           (c1               ), // clk28m clock domain signal synchronous with clk signal
-	.c3           (c3               ), // clk28m clock domain signal synchronous with clk signal delayed by 90 degrees
-	.cck          (cck              ), // colour clock output (3.54 MHz)
-	.eclk         (eclk             ), // 0.709379 MHz clock enable output (clk domain pulse)
+	// Freezable copy of the Amiga timebase -- see amiga_clk_am above. The
+	// RTC block inside minimig runs off raw clk and is deliberately not
+	// frozen, so a state resumed tomorrow sees tomorrow's time.
+	.clk7_en      (am_clk7_en       ), // 7MHz clock enable
+	.clk7n_en     (am_clk7n_en      ), // 7MHz negedge clock enable
+	.c1           (am_c1            ), // clk28m clock domain signal synchronous with clk signal
+	.c3           (am_c3            ), // clk28m clock domain signal synchronous with clk signal delayed by 90 degrees
+	.cck          (am_cck           ), // colour clock output (3.54 MHz)
+	.eclk         (am_eclk          ), // 0.709379 MHz clock enable output (clk domain pulse)
 
 	//rs232 pins
 	.rxd          (uart_rx          ), // RS232 receive
@@ -1164,8 +1284,154 @@ minimig minimig
 	.USER_OUT             (IndirectUserOutFlop  ),
 	.user_port_mode       (user_port_mode       ),
 	.snac_mode            (snac_mode            ),
-	.mister_floppy_status (mister_floppy_status )
+	.mister_floppy_status (mister_floppy_status ),
+
+	.ss_blit_busy         (ss_blit_busy         ),
+	.ss_disk_busy         (ss_disk_busy         ),
+	.ss_audio_busy        (ss_audio_busy        ),
+	.ss_map               (ss_map               )
 );
+
+//////////////////////////  SAVE STATES (phase 1A)  /////////////////////////
+
+// Request source. Nothing in the OSD drives these yet -- task 9 replaces
+// them with the minimig_config/UIO path. They are wired to spare status bits
+// rather than tied to constants so the controller is real logic that the
+// fitter has to place and the timing analyser has to close; a constant
+// request would let Quartus delete the whole feature and make the timing
+// gate meaningless.
+wire       ss_save_req_osd = status[51];
+wire [1:0] ss_slot         = status[53:52];
+
+// *** fx68k lockout ***
+// cpu_wrapper's ss_* export is taken from cpu_inst_p (TG68K) unconditionally,
+// bypassing the cpucfg mux at cpu_wrapper.v:211. When cpucfg == 0 the running
+// CPU is fx68k, which has no equivalent export at all -- not the register
+// file, not PC, SR or USP -- so a state captured in that mode would describe a
+// CPU that is not executing. fx68k is deferred to a later phase, and until it
+// lands save states are refused rather than silently wrong. Gating the request
+// is enough: save_busy (and therefore freeze, the CPU park and every port
+// takeover below) can only ever rise out of ss_ctrl's S_IDLE on save_req.
+wire ss_supported = |cpucfg;
+wire ss_save_req  = ss_save_req_osd & ss_supported;
+
+// Sweep the TG68K register file read port while the CPU is parked. Sixteen
+// cycles at 28 MHz is 560 ns, which is nothing against the dump itself.
+//
+// This runs *before* the freeze, not during it: ss_serdes latches the entire
+// state vector on the one cycle ss_ctrl asserts save_start, which is a single
+// clock after quiesced, so a sweep that only started at freeze time would
+// serialise sixteen uninitialised registers. ss_save_busy parks the CPU at
+// its next no-memaccess boundary (see cpu_wrapper's ss_arm), the sweep runs
+// there, and ss_regs_valid is what finally lets cpu_boundary go true.
+wire ss_cpu_parked = ss_save_busy & (cpu_state == 2'd1);
+
+always @(posedge clk_sys) begin
+	if (!ss_cpu_parked) begin
+		ss_reg_index  <= 4'd0;
+		ss_regs_valid <= 1'b0;
+	end
+	else if (!ss_regs_valid) begin
+		case (ss_reg_index)
+		4'd0:  ss_cpu_d0 <= ss_reg_data;
+		4'd1:  ss_cpu_d1 <= ss_reg_data;
+		4'd2:  ss_cpu_d2 <= ss_reg_data;
+		4'd3:  ss_cpu_d3 <= ss_reg_data;
+		4'd4:  ss_cpu_d4 <= ss_reg_data;
+		4'd5:  ss_cpu_d5 <= ss_reg_data;
+		4'd6:  ss_cpu_d6 <= ss_reg_data;
+		4'd7:  ss_cpu_d7 <= ss_reg_data;
+		4'd8:  ss_cpu_a0 <= ss_reg_data;
+		4'd9:  ss_cpu_a1 <= ss_reg_data;
+		4'd10: ss_cpu_a2 <= ss_reg_data;
+		4'd11: ss_cpu_a3 <= ss_reg_data;
+		4'd12: ss_cpu_a4 <= ss_reg_data;
+		4'd13: ss_cpu_a5 <= ss_reg_data;
+		4'd14: ss_cpu_a6 <= ss_reg_data;
+		4'd15: ss_cpu_a7 <= ss_reg_data;
+		endcase
+		if (ss_reg_index == 4'd15) ss_regs_valid <= 1'b1;
+		ss_reg_index <= ss_reg_index + 4'd1;
+	end
+end
+
+// Gary's memory map state, unpacked into the names ss_state.vh uses.
+wire ss_ovl                = ss_map[3];
+wire ss_rom_readonly       = ss_map[2];
+wire ss_sel_kick1mb        = ss_map[1];
+wire ss_sel_kick256kmirror = ss_map[0];
+
+wire [`SS_STATE_W-1:0] ss_state_in = `SS_STATE_LIST;
+
+// Quiesce timeout reference. vbl is minimig's raw vertical blank, so it stops
+// once the chipset freezes -- which is fine, the timeout only matters before
+// the freeze.
+reg ss_vbl_d;
+always @(posedge clk_114) ss_vbl_d <= vbl;
+wire ss_frame_tick = vbl & ~ss_vbl_d;
+
+// Save state window: 0x3E000000, four 4 MB slots. DDRAM_ADDR is a 64-bit word
+// address, so the byte base is shifted right by three.
+//
+// The byte address must be written as a 32-bit literal, not the 29-bit one
+// the plan used: 0x3E000000 has bit 29 set, so 29'h3E000000 is truncated to
+// 0x1E000000 before the shift and the window lands at byte 0xF000000 --
+// below DDR3's valid base, and squarely inside fast RAM. The shifted result
+// does fit in 29 bits, which is why the destination width is still 29.
+localparam [28:0] SS_SLOT_BASE   = 29'h07C00000;   // byte 0x3E000000 >> 3
+localparam [28:0] SS_SLOT_STRIDE = 29'h00080000;   // byte 0x00400000 >> 3
+
+ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
+(
+	.clk          (clk_114),
+	.rst_n        (~reset_d),
+	.slot_base    (SS_SLOT_BASE + SS_SLOT_STRIDE * ss_slot),
+
+	.save_req     (ss_save_req),
+	.save_busy    (ss_save_busy),
+	.save_ok      (),
+	.save_fail    (),
+
+	.state_in     (ss_state_in),
+	.state_out    (),
+	.state_we     (),
+
+	// cpu_boundary carries two extra conditions beyond "the CPU is parked".
+	// ss_regs_valid, because the register sweep must be complete before the
+	// vector is latched (see above). ss_ram_idle, because a DDR3 read already
+	// accepted for master 0 returns its data out of band, and taking master 0
+	// away in that window would lose the readdatavalid pulse -- see
+	// ddram_ctrl.v. Neither is a property of the CPU, but cpu_boundary is the
+	// only input ss_quiesce has left for "not yet".
+	.blit_busy    (ss_blit_busy),
+	.disk_busy    (ss_disk_busy),
+	.audio_busy   (ss_audio_busy),
+	.cpu_boundary (ss_cpu_parked & ss_regs_valid & ss_ram_idle),
+	.frame_tick   (ss_frame_tick),
+	.freeze       (ss_freeze),
+
+	.chip_base    (24'h000000),
+
+	.sd_addr      (ss_sd_addr),
+	.sd_cs        (ss_sd_cs),
+	.sd_state     (ss_sd_state),
+	.sd_uds_n     (ss_sd_uds_n),
+	.sd_lds_n     (ss_sd_lds_n),
+	.sd_cache_inhibit(ss_sd_cache_inhibit),
+	.sd_rd        (ram_dout1),
+	.sd_ready     (ram_ready1),
+
+	.ddr_address  (ss_ddr_address),
+	.ddr_writedata(ss_ddr_writedata),
+	.ddr_byteenable(ss_ddr_byteenable),
+	.ddr_write    (ss_ddr_write),
+	.ddr_read     (),
+	.ddr_readdata (64'd0),
+	.ddr_readdatavalid(1'b0),
+	.ddr_waitrequest(ss_ddr_waitrequest)
+);
+/////////////////////////////////////////////////////////////////////////////
+
 
 // power led control
 wire pwr_led;

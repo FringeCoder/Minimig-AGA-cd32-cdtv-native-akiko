@@ -38,8 +38,21 @@ module cpu_wrapper
 	input       [3:0] cachecfg,
 	input             bootrom,
 
+	// Park request. While high the CPU is allowed to finish whatever bus
+	// cycle it is in and is then held at the next busstate == 1 boundary --
+	// the same "no memaccess" point ss_quiesce calls cpu_boundary. It has to
+	// be a request that lands *before* the freeze rather than a consequence
+	// of it: ss_serdes samples the whole state vector on the single cycle
+	// ss_ctrl asserts save_start, one clock after quiesced, and the register
+	// file has only one read port, so the sixteen-cycle sweep that fills
+	// ss_cpu_d0..a7 must already have finished by then. Driven from
+	// ss_ctrl's save_busy, which rises the moment a save is requested and
+	// stays high until it completes, so this also holds the CPU for the
+	// whole dump.
+	input             ss_arm,
+
 	// Save state export. Read-only view of the TG68K architectural
-	// registers, valid while the CPU is frozen by the savestate controller.
+	// registers, valid while the CPU is parked by ss_arm.
 	input       [3:0] ss_reg_index,
 	output     [31:0] ss_reg_data,
 	output     [31:0] ss_pc,
@@ -381,7 +394,14 @@ wire stock_speed   = cachecfg[3];
 // combinationally with sel, so the data is available on the same cycle —
 // equivalent to fastchip_ready being asserted "immediately" alongside
 // fastchip_selack. We treat cdtv_selack as the bridge's "ready" signal.
-wire clkena_p_base = ~cpu_req | chipready | ramready | fastchip_ready | cdtv_selack;
+// ss_arm parks the CPU at the next no-memaccess boundary. cpu_req is low
+// exactly at that boundary, and cpustate cannot change without a clkena
+// tick, so blocking clkena there is self-latching: the CPU stops on that
+// cycle and stays there until ss_arm drops. Blocking it unconditionally
+// instead would strand the CPU mid-bus-cycle with a chip or RAM handshake
+// half done.
+wire ss_cpu_hold   = ss_arm & ~cpu_req;
+wire clkena_p_base = (~cpu_req | chipready | ramready | fastchip_ready | cdtv_selack) & ~ss_cpu_hold;
 
 reg [3:0] cooldown;
 always @(posedge clk) begin
