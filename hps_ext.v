@@ -281,7 +281,12 @@ always@(posedge clk_sys) begin : main_proc
 						io_dout  <= akiko_din;
 						akiko_rd <= 1;
 					end
-					if(byte_cnt >= 3 && (cdtv_cs | cdtv_cs_stch)) begin
+					// cdtv_cs_sec joins the read path so userspace can read
+					// back the sector FIFO free-space credit (sec_space) before
+					// streaming a sector. cdtv_hps_bridge muxes it in on cs_sec;
+					// the three cdtv cs_* are mutually exclusive, so this can
+					// neither pop the cmd FIFO nor clear the STCH ack.
+					if(byte_cnt >= 3 && (cdtv_cs | cdtv_cs_stch | cdtv_cs_sec)) begin
 						io_dout <= cdtv_din;
 						cdtv_rd <= 1;
 					end

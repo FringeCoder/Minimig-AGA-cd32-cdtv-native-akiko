@@ -108,6 +108,25 @@ module cdtv_bridge
 	input             sec_byte_push,
 	input       [7:0] sec_byte_data,
 
+	// Sector FIFO credit, read back by userspace over the 0xF820 UIO
+	// sub-channel. This is the CDTV mirror of akiko's hps_sec_req /
+	// hps_sec_status: the push path above is a fire-and-forget stream with
+	// no handshake, so without a credit to read, userspace has no way to
+	// know it is about to overrun the FIFO and the overflow guard in
+	// section 6 drops the excess bytes SILENTLY.
+	//
+	// sec_space is the free space in the FIFO expressed in 32-byte units,
+	// rounded DOWN, so it fits the single byte the sub-channel read
+	// carries and never over-promises. Range 0 (full) .. 255 (empty, 8191
+	// free bytes -> 255 whole units).
+	//
+	// sec_fifo_empty is the exact "nothing staged" flag. The save state
+	// sequencer in Minimig.sv uses it to prefer a freeze instant with the
+	// FIFO drained; sec_space's 32-byte rounding would report 255 with up
+	// to 31 bytes still parked, so the two are not interchangeable.
+	output      [7:0] sec_space,
+	output            sec_fifo_empty,
+
 	// Subchannel byte input — spec section 3.2. Bit-reversed on read of
 	// Port A.
 	input             subq_push,
@@ -387,6 +406,15 @@ assign sec_empty     = (sec_wr_p     == sec_rd_p);
 // natural 13-bit subtraction gives the correct fill count up to 8191. We
 // never push enough to wrap so a separate full-flag isn't needed.
 wire [12:0] sec_avail = sec_wr_p - sec_rd_p;
+
+// Free space, and the byte-wide credit userspace reads back. 13'h1FFF is the
+// same ceiling the push guard in section 6 enforces (one slot is left unused
+// so wr_p can never catch rd_p from behind), so free == 13'h1FFF - sec_avail
+// is exactly the number of bytes the guard will still accept. Truncating to
+// 32-byte units rounds DOWN, which keeps the reported credit conservative.
+wire [12:0] sec_free = 13'h1FFF - sec_avail;
+assign sec_space      = sec_free[12:5];
+assign sec_fifo_empty = sec_empty;
 
 // Spec section 6.1
 assign dmac_int2 = cntr[CNTR_INTEN_BIT] & (istr[ISTR_E_INT_BIT] | istr[ISTR_INTS_BIT]);

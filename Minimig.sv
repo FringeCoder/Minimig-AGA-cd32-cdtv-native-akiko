@@ -224,6 +224,8 @@ wire        cdtv_stch_ack;     // BIOS took the STCH interrupt
 wire        cdtv_stch_ack_clr;
 wire        cdtv_sec_byte_push_w; // 1-clk pulse per UIO sec byte
 wire  [7:0] cdtv_sec_byte_data_w;
+wire  [7:0] cdtv_sec_space_w;  // sector FIFO free space, 32-byte units
+wire        cdtv_sec_empty_w;  // sector FIFO exactly empty
 wire        cdtv_req;          // bit 6 of 0x63 status word
 
 // NVRAM load-from-disk via canonical SD-block path (the pattern SNES,
@@ -668,6 +670,7 @@ cdtv_hps_bridge cdtv_hps_bridge_inst
 	.cmd_out_data   (cdtv_cmd_out_data_w    ),
 	.sec_byte_push  (cdtv_sec_byte_push_w   ),
 	.sec_byte_data  (cdtv_sec_byte_data_w   ),
+	.sec_space      (cdtv_sec_space_w       ),
 	.stch_inject    (cdtv_stch_inject       ),
 	.stch_ack       (cdtv_stch_ack          ),
 	.stch_ack_clr   (cdtv_stch_ack_clr      ),
@@ -1260,6 +1263,8 @@ minimig minimig
 	.cdtv_cmd_out_data   (cdtv_cmd_out_data_w  ),
 	.cdtv_sec_byte_push  (cdtv_sec_byte_push_w ),
 	.cdtv_sec_byte_data  (cdtv_sec_byte_data_w ),
+	.cdtv_sec_space      (cdtv_sec_space_w     ),
+	.cdtv_sec_fifo_empty (cdtv_sec_empty_w     ),
 	.cdtv_subq_push      (1'b0                 ),
 	.cdtv_subq_byte      (8'h00                ),
 	.cdtv_stch_pulse     (cdtv_stch_inject     ),
@@ -1346,8 +1351,10 @@ wire [1:0] ss_slot         = status[53:52];
 // lands save states are refused rather than silently wrong. Gating the request
 // is enough: save_busy (and therefore freeze, the CPU park and every port
 // takeover below) can only ever rise out of ss_ctrl's S_IDLE on save_req.
-wire ss_supported = |cpucfg;
-wire ss_save_req  = ss_save_req_osd & ss_supported;
+wire ss_supported   = |cpucfg;
+// The raw request. ss_save_req itself is derived further down, after the
+// CDTV sector-FIFO hold-off (it needs ss_frame_tick, declared below).
+wire ss_save_req_raw = ss_save_req_osd & ss_supported;
 
 // Sweep the TG68K register file read port while the CPU is parked. Sixteen
 // cycles at 28 MHz is 560 ns, which is nothing against the dump itself.
@@ -1403,6 +1410,58 @@ wire [`SS_STATE_W-1:0] ss_state_in = `SS_STATE_LIST;
 reg ss_vbl_d;
 always @(posedge clk_114) ss_vbl_d <= vbl;
 wire ss_frame_tick = vbl & ~ss_vbl_d;
+
+// --- CDTV sector-FIFO hold-off on the save request ---------------------------
+//
+// The freeze holds chipdma_arb off for the whole ~0.2 s chip RAM dump
+// (dma_hold), so cdtv_bridge's 8 KB sector FIFO cannot drain a single byte
+// while a save is running. Userspace throttles against the FIFO's free-space
+// credit (cdtv_bridge.sec_space, read back over the 0xF820 sub-channel), which
+// is what actually prevents byte loss. This hold-off is the cheap second half:
+// starting the freeze with the FIFO already drained hands userspace the full
+// 8 KB of headroom before it has to block, which at 1x (~150 KB/s) covers the
+// first ~53 ms of the dump for free and keeps the CD stream from visibly
+// stalling on a short save.
+//
+// It is deliberately a PREFERENCE, not a precondition. cdtv_bridge carries
+// leftover bytes in sec_fifo between DMA chunks by design (see the "No
+// dmac_dma gate" comment there), so "FIFO empty" is a state a healthy CDTV can
+// sit out of indefinitely -- gating the request on it outright would make
+// saves fail forever on some titles. The hold expires after SS_SEC_HOLD_FRAMES
+// video frames and the save proceeds regardless; correctness at that point
+// rests entirely on the userspace credit throttle, which is where it belongs.
+//
+// Inert on every non-CDTV configuration: cdtv_bridge's sec_wr_p / sec_rd_p
+// both reset to 0 and only move on a UIO sector push, so cdtv_sec_empty_w is
+// constantly 1 when nothing is streaming, ss_sec_go is set on the first clock
+// after the request and the request passes through with no delay at all.
+// cdtv_sec_empty_w is a clk_sys signal sampled here in clk_114; the two clocks
+// come off the same PLL at 4:1, so this is a timed path, not a CDC -- the same
+// argument ss_dma_busy already relies on below.
+//
+// ss_sec_go LATCHES the moment the hold-off is satisfied and stays latched
+// until the request itself drops. It must not be a live comparison: once the
+// freeze is up the FIFO stops draining and userspace immediately refills it, so
+// a live term would go false mid-dump, drop save_req and abort the save it was
+// meant to protect.
+localparam [3:0] SS_SEC_HOLD_FRAMES = 4'd4;
+
+reg [3:0] ss_sec_wait;
+reg       ss_sec_go;
+always @(posedge clk_114) begin
+	if (reset_d || !ss_save_req_raw) begin
+		ss_sec_wait <= 4'd0;
+		ss_sec_go   <= 1'b0;
+	end
+	else begin
+		if (ss_frame_tick && (ss_sec_wait != SS_SEC_HOLD_FRAMES))
+			ss_sec_wait <= ss_sec_wait + 4'd1;
+		if (cdtv_sec_empty_w || (ss_sec_wait == SS_SEC_HOLD_FRAMES))
+			ss_sec_go   <= 1'b1;
+	end
+end
+
+wire ss_save_req = ss_save_req_raw & ss_sec_go;
 
 // Save state window: 0x3E000000, four 4 MB slots. DDRAM_ADDR is a 64-bit word
 // address, so the byte base is shifted right by three.

@@ -275,6 +275,10 @@ module minimig
 	input   [7:0] cdtv_cmd_out_data,
 	input         cdtv_sec_byte_push,
 	input   [7:0] cdtv_sec_byte_data,
+	// Sector FIFO credit out to cdtv_hps_bridge (free space, 32-byte units)
+	// and the exact empty flag used by the save state sequencer.
+	output  [7:0] cdtv_sec_space,
+	output        cdtv_sec_fifo_empty,
 	input         cdtv_subq_push,
 	input   [7:0] cdtv_subq_byte,
 	input         cdtv_stch_pulse,
@@ -1117,6 +1121,8 @@ cdtv_bridge cdtv_bridge_inst
 
 	.sec_byte_push   (cdtv_sec_byte_push   ),
 	.sec_byte_data   (cdtv_sec_byte_data   ),
+	.sec_space       (cdtv_sec_space       ),
+	.sec_fifo_empty  (cdtv_sec_fifo_empty  ),
 
 	.subq_push       (cdtv_subq_push       ),
 	.subq_byte       (cdtv_subq_byte       ),
