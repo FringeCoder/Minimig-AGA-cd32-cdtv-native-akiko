@@ -149,7 +149,19 @@ entity TG68KdotC_Kernel is
 		ss_reg_data				: out std_logic_vector(31 downto 0);
 		ss_pc						: out std_logic_vector(31 downto 0);
 		ss_sr						: out std_logic_vector(15 downto 0);
-		ss_usp					: out std_logic_vector(31 downto 0)
+		ss_usp					: out std_logic_vector(31 downto 0);
+
+		-- Save state restore. Write side of the same architectural registers,
+		-- driven only while the savestate controller has the CPU frozen. Index
+		-- mapping matches the read port above: 0-7 = D0-D7, 8-15 = A0-A7.
+		-- See the register file process for why these writes have to sit
+		-- OUTSIDE the clkena_lw guard.
+		ss_wr_index				: in  std_logic_vector( 3 downto 0) := (OTHERS => '0');
+		ss_wr_data				: in  std_logic_vector(31 downto 0) := (OTHERS => '0');
+		ss_wr_en					: in  std_logic := '0';
+		ss_pc_wr					: in  std_logic := '0';
+		ss_sr_wr					: in  std_logic := '0';
+		ss_usp_wr				: in  std_logic := '0'
 		);
 end TG68KdotC_Kernel;
 
@@ -430,6 +442,11 @@ ALU: TG68K_ALU
 		bf_ffo_offset => alu_bf_ffo_offset,
 		bf_loffset => alu_bf_loffset(4 downto 0),
 
+		-- Save state restore: the CCR half of SR. Flags is owned by the ALU
+		-- block, so the write has to be forwarded there.
+		ss_ccr_wr => ss_sr_wr,
+		ss_ccr => ss_wr_data(7 downto 0),
+
 		set_V_Flag => set_V_Flag,			--: buffer bit;
 		Flags => Flags,					 	--: buffer std_logic_vector(8 downto 0);
 		c_out => c_out,					 	--: buffer std_logic_vector(2 downto 0);
@@ -580,13 +597,31 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 				WR_AReg <= rf_dest_addr(3);
 				RDindex_A <= conv_integer(rf_dest_addr(3 downto 0));
 				RDindex_B <= conv_integer(rf_source_addr(3 downto 0));
-				IF Wwrena='1' THEN
-					regfile(RDindex_A) <= regin;
-				END IF;
-				
-				IF exec(to_USP)='1' THEN
-					USP <= reg_QA;
-				END IF;	
+			END IF;
+
+			-- Register file and USP writes: microcode and savestate together.
+			--
+			-- These deliberately sit OUTSIDE the clkena_lw guard above, and
+			-- inside rising_edge(clk). cpu_wrapper holds the CPU clock enable
+			-- low for the whole time the savestate controller has the core
+			-- parked (ss_cpu_hold gates clkena_p), and clkena_lw is
+			-- clkena_in AND memmaskmux(3), so clkena_lw is low across exactly
+			-- the window in which a restore drives ss_wr_en. A savestate write
+			-- placed inside the guard would silently never happen.
+			--
+			-- The microcode writes are unchanged: they keep clkena_lw='1' in
+			-- their own conditions. The savestate write is given explicit
+			-- priority rather than relying on the two never colliding.
+			IF ss_wr_en='1' THEN
+				regfile(conv_integer(ss_wr_index)) <= ss_wr_data;
+			ELSIF clkena_lw='1' AND Wwrena='1' THEN
+				regfile(RDindex_A) <= regin;
+			END IF;
+
+			IF ss_usp_wr='1' THEN
+				USP <= ss_wr_data;
+			ELSIF clkena_lw='1' AND exec(to_USP)='1' THEN
+				USP <= reg_QA;
 			END IF;
 		END IF;
 	END PROCESS;
@@ -1121,6 +1156,14 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						TG68_PC <= TG68_PC_add;
 					END IF;	
 				END IF;	
+				-- Save state restore: PC. Outside the clkena_in guard above for
+				-- the same reason the register file write is outside clkena_lw:
+				-- the CPU clock enable is held low for the whole restore window.
+				-- This is the last assignment to TG68_PC in the process, so it
+				-- also takes explicit priority over the microcode PC updates.
+				IF ss_pc_wr='1' THEN
+					TG68_PC <= ss_wr_data;
+				END IF;
 				IF clkena_lw='1' THEN
 					interrupt <= setinterrupt;
 					decodeOPC <= setopcode;
@@ -1441,6 +1484,18 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 					FlagsSR(6) <= '0';
 				END IF;
 				FlagsSR(3) <= '0';
+			END IF;
+			-- Save state restore: SR high byte (T.S.0III). Outside the
+			-- clkena_lw branch above -- see the register file process for why.
+			-- SVmode / preSVmode / FC(2) are this core's shadow copies of the
+			-- S bit; restoring FlagsSR(5) without them would leave the CPU
+			-- running in the wrong privilege mode with the wrong function
+			-- codes. SR bit 13 is FlagsSR(5).
+			IF ss_sr_wr='1' THEN
+				FlagsSR <= ss_wr_data(15 downto 8);
+				SVmode <= ss_wr_data(13);
+				preSVmode <= ss_wr_data(13);
+				FC(2) <= ss_wr_data(13);
 			END IF;
 		END IF;	
 	END PROCESS;

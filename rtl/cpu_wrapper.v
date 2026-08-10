@@ -61,6 +61,19 @@ module cpu_wrapper
 	output     [31:0] ss_vbr,
 	output      [3:0] ss_cacr,
 
+	// Save state restore. Write side of the same TG68K architectural
+	// registers, taken on the CPU clock while the core is parked by ss_arm.
+	// Inside the kernel these writes deliberately bypass the CPU clock
+	// enable, which is held low for the whole restore window (see
+	// ss_cpu_hold below). ss_wr_index follows the export mapping:
+	// 0-7 = D0-D7, 8-15 = A0-A7. ss_wr_data carries SR in [15:0].
+	input       [3:0] ss_wr_index,
+	input      [31:0] ss_wr_data,
+	input             ss_wr_en,
+	input             ss_pc_wr,
+	input             ss_sr_wr,
+	input             ss_usp_wr,
+
 	output reg [23:1] chip_addr,
 	input      [15:0] chip_dout,
 	output reg [15:0] chip_din,
@@ -313,7 +326,16 @@ cpu_inst_p
   .ss_reg_data(ss_reg_data),
   .ss_pc(ss_pc),
   .ss_sr(ss_sr),
-  .ss_usp(ss_usp)
+  .ss_usp(ss_usp),
+
+  // Restore path -- TG68K only. fx68k has no equivalent write port and is
+  // locked out of the savestate path in Minimig.sv.
+  .ss_wr_index(ss_wr_index),
+  .ss_wr_data(ss_wr_data),
+  .ss_wr_en(ss_wr_en),
+  .ss_pc_wr(ss_pc_wr),
+  .ss_sr_wr(ss_sr_wr),
+  .ss_usp_wr(ss_usp_wr)
 );
 
 // VBR and CACR are already brought out of the kernel for the memory map, so

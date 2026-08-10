@@ -718,6 +718,18 @@ cpu_wrapper cpu_wrapper
 	.ss_usp       (ss_usp          ),
 	.ss_vbr       (ss_vbr          ),
 	.ss_cacr      (ss_cacr         ),
+
+	// Restore write port into the TG68K register file. ss_ctrl can already
+	// validate and replay a window, but nothing drives these yet (the state
+	// vector is still write-only on the restore side), so they are tied off
+	// rather than left dangling -- same convention as ss_ctrl's load_req
+	// below. Wire all six together when the restore sequencer lands.
+	.ss_wr_index  (4'd0            ),
+	.ss_wr_data   (32'd0           ),
+	.ss_wr_en     (1'b0            ),
+	.ss_pc_wr     (1'b0            ),
+	.ss_sr_wr     (1'b0            ),
+	.ss_usp_wr    (1'b0            ),
 	.fastramcfg   (memcfg[6:4]     ),
 	.bootrom      (bootrom         ),
 
