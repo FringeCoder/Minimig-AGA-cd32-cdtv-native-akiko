@@ -541,6 +541,7 @@ wire  [1:0] ss_sd_state;
 wire        ss_sd_uds_n;
 wire        ss_sd_lds_n;
 wire        ss_sd_cache_inhibit;
+wire [15:0] ss_sd_wr;
 
 // Borrowed DDR3 arbiter master 0.
 wire [28:0] ss_ddr_address;
@@ -814,7 +815,14 @@ sdram_ctrl ram1
 	// cache_inhibit was previously unconnected (and so tied low); ss_dma
 	// asserts it for the whole dump because chip DMA writes do not pass
 	// through this cache and a cached read could return a stale word.
-	.cpuWR        (ram_din         ),
+	//
+	// cpuWR has to be muxed as well now that the restore direction exists:
+	// ss_dma drives cpustate 3 ("write data") and puts the word on ss_sd_wr.
+	// Leaving this tied to ram_din would write whatever the parked CPU
+	// happened to leave on its data bus into every chip RAM address the
+	// restore touched -- silently, since the addresses and the handshake
+	// would all still look correct.
+	.cpuWR        (ss_freeze ? ss_sd_wr : ram_din),
 	.cpuAddr      (ss_freeze ? ss_sd_addr  : {2'b00, ram_addr[22:1]}),
 	.cpuU         (ss_freeze ? ss_sd_uds_n : ram_uds),
 	.cpuL         (ss_freeze ? ss_sd_lds_n : ram_lds),
@@ -1532,9 +1540,11 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.save_ok      (),
 	.save_fail    (),
 
-	// Restore is not wired to the OSD yet: ss_ctrl can validate a window but
-	// not yet put it back into the machine, so the request is tied off rather
-	// than left dangling. load_fail_code is what the eventual toast will say.
+	// ss_ctrl can now validate a window AND put it back into the machine, but
+	// the OSD row that asks for it does not exist yet (Task 7), so the request
+	// is tied off rather than left dangling. load_fail_code is what the
+	// eventual toast will say. Do not untie this before the DDR3 read port
+	// below is real -- see the note there.
 	.load_req     (1'b0),
 	.load_busy    (),
 	.load_ok      (),
@@ -1582,6 +1592,7 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.sd_uds_n     (ss_sd_uds_n),
 	.sd_lds_n     (ss_sd_lds_n),
 	.sd_cache_inhibit(ss_sd_cache_inhibit),
+	.sd_wr        (ss_sd_wr),
 	.sd_rd        (ram_dout1),
 	.sd_ready     (ram_ready1),
 
