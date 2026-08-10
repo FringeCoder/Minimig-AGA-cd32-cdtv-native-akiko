@@ -1333,12 +1333,11 @@ minimig minimig
 
 //////////////////////////  SAVE STATES (phase 1A)  /////////////////////////
 
-// Request source. Nothing in the OSD drives these yet -- task 9 replaces
-// them with the minimig_config/UIO path. They are wired to spare status bits
-// rather than tied to constants so the controller is real logic that the
-// fitter has to place and the timing analyser has to close; a constant
-// request would let Quartus delete the whole feature and make the timing
-// gate meaningless.
+// Request source. menu.cpp's System page drives these: status[51] is the save
+// request, status[53:52] picks one of the four DDR3 slot windows the host maps
+// (user_io.cpp process_ss). The slot is written immediately before the request
+// and never while a save is running, so slot_base below is stable for the whole
+// dump.
 wire       ss_save_req_osd = status[51];
 wire [1:0] ss_slot         = status[53:52];
 
@@ -1352,9 +1351,57 @@ wire [1:0] ss_slot         = status[53:52];
 // is enough: save_busy (and therefore freeze, the CPU park and every port
 // takeover below) can only ever rise out of ss_ctrl's S_IDLE on save_req.
 wire ss_supported   = |cpucfg;
+// *** the request is an EDGE, and it is made one HERE, not in userspace ***
+// ss_ctrl re-arms out of S_IDLE on any clock where save_req is high, and it
+// drops back to S_IDLE the moment a save finishes. Feeding it status[51] as a
+// LEVEL therefore starts the next save on the cycle after the previous one
+// ends, forever: the machine spends ~0.2 s frozen out of every ~0.2 s and the
+// Amiga never runs again. Userspace does clear the bit after setting it, but
+// that clear must not be what stands between the user and a wedged machine --
+// one dropped SPI write, one stalled menu task, or one .cfg that happens to
+// carry bit 51 set would be enough. So the one-shot is enforced in RTL.
+//
+// ss_save_pending is SET by the 0->1 edge of status[51] and CLEARED as soon as
+// ss_ctrl has taken the request (save_busy). It cannot re-trigger:
+//  - Holding status[51] high yields exactly one edge and therefore exactly one
+//    save; ss_save_req_d is 1 on every subsequent cycle, so ss_save_edge is 0.
+//  - The clear branches are ahead of the set branch, so an edge arriving while
+//    a save is already running is dropped, not queued.
+//  - save_busy stays high for the whole ~0.2 s dump and pending is cleared one
+//    clock after it rises, so by the time ss_ctrl is back in S_IDLE the request
+//    has been low for millions of cycles. S_IDLE only ever sees a request it
+//    just got a fresh edge for.
+//  - ss_save_req_d is clocked unconditionally, INCLUDING while reset_d is
+//    asserted, so a status bit that is already high when reset releases reads
+//    as a level, not as an edge, and does not fire a save.
+//
+// The latch is also what makes the CDTV sector-FIFO hold-off below work: that
+// state machine needs a request that stays asserted across several video
+// frames, which a bare one-cycle pulse could not provide.
+//
+// !ss_supported clears the latch rather than merely masking it downstream, so
+// a request made in an unsupported configuration is discarded outright instead
+// of lying in wait for the CPU to be switched back to TG68K.
+//
+// status[] is an hps_io register in clk_sys and this samples it in clk_114.
+// The two come off the same PLL at 4:1, so this is a timed path, not a CDC --
+// the same argument ss_dma_busy and cdtv_sec_empty_w already rely on. One SPI
+// update of the bit therefore produces exactly one clk_114 edge, at worst one
+// clk_114 cycle late.
+reg  ss_save_req_d;
+reg  ss_save_pending;
+wire ss_save_edge = ss_save_req_osd & ~ss_save_req_d;
+
+always @(posedge clk_114) begin
+	ss_save_req_d <= ss_save_req_osd;
+	if (reset_d || !ss_supported) ss_save_pending <= 1'b0;
+	else if (ss_save_busy)        ss_save_pending <= 1'b0;
+	else if (ss_save_edge)        ss_save_pending <= 1'b1;
+end
+
 // The raw request. ss_save_req itself is derived further down, after the
 // CDTV sector-FIFO hold-off (it needs ss_frame_tick, declared below).
-wire ss_save_req_raw = ss_save_req_osd & ss_supported;
+wire ss_save_req_raw = ss_save_pending;
 
 // Sweep the TG68K register file read port while the CPU is parked. Sixteen
 // cycles at 28 MHz is 560 ns, which is nothing against the dump itself.
