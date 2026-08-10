@@ -543,13 +543,38 @@ wire        ss_sd_lds_n;
 wire        ss_sd_cache_inhibit;
 wire [15:0] ss_sd_wr;
 
-// Borrowed DDR3 arbiter master 0.
+// Borrowed DDR3 arbiter master 0. Both directions: the save path writes, the
+// restore path reads the window back out and checks it before touching
+// anything.
 wire [28:0] ss_ddr_address;
 wire [63:0] ss_ddr_writedata;
 wire  [7:0] ss_ddr_byteenable;
 wire        ss_ddr_write;
+wire        ss_ddr_read;
+wire [63:0] ss_ddr_readdata;
+wire        ss_ddr_readdatavalid;
 wire        ss_ddr_waitrequest;
 wire        ss_ram_idle;
+
+// Restore path.
+wire        ss_load_busy;
+wire [`SS_STATE_W-1:0] ss_state_out;
+wire        ss_state_we;
+
+// ss_state_fanout's outputs. It runs on clk_sys, which is both the CPU's
+// clock and minimig.v's, so nothing it drives needs a domain crossing.
+wire  [3:0] ss_fanout_wr_index;
+wire [31:0] ss_fanout_wr_data;
+wire        ss_fanout_wr_en;
+wire        ss_fanout_pc_wr;
+wire        ss_fanout_sr_wr;
+wire        ss_fanout_usp_wr;
+wire        ss_fanout_vbr_wr;
+wire        ss_fanout_cacr_wr;
+wire  [3:0] ss_fanout_map_in;
+wire        ss_fanout_map_we;
+wire        ss_fanout_busy;
+wire        ss_fanout_ack;
 /////////////////////////////////////////////////////////////////////////////
 
 
@@ -710,7 +735,20 @@ cpu_wrapper cpu_wrapper
 	.cachecfg     (cachecfg        ),
 
 	// Save state export, and the park request that makes it meaningful.
-	.ss_arm       (ss_save_busy    ),
+	//
+	// A restore parks the CPU too, and for longer: ss_load_busy rises the
+	// moment the request is taken and stays up through validation (a CRC scan
+	// of the whole payload) and the replay. Parking that early is not just
+	// tidiness -- the DDR3 read master the validation needs is master 0, the
+	// same port the CPU's fast RAM uses, and ddram_ctrl will not grant it
+	// until that port is idle.
+	//
+	// ss_fanout_busy extends the park past ss_load_busy's fall, over the
+	// handful of cycles in which the register file is actually being written.
+	// Releasing the CPU into a half-written register file is the one ordering
+	// error in this path that would look like a game bug rather than a save
+	// state bug.
+	.ss_arm       (ss_save_busy | ss_load_busy | ss_fanout_busy),
 	.ss_reg_index (ss_reg_index    ),
 	.ss_reg_data  (ss_reg_data     ),
 	.ss_pc        (ss_pc           ),
@@ -719,17 +757,19 @@ cpu_wrapper cpu_wrapper
 	.ss_vbr       (ss_vbr          ),
 	.ss_cacr      (ss_cacr         ),
 
-	// Restore write port into the TG68K register file. ss_ctrl can already
-	// validate and replay a window, but nothing drives these yet (the state
-	// vector is still write-only on the restore side), so they are tied off
-	// rather than left dangling -- same convention as ss_ctrl's load_req
-	// below. Wire all six together when the restore sequencer lands.
-	.ss_wr_index  (4'd0            ),
-	.ss_wr_data   (32'd0           ),
-	.ss_wr_en     (1'b0            ),
-	.ss_pc_wr     (1'b0            ),
-	.ss_sr_wr     (1'b0            ),
-	.ss_usp_wr    (1'b0            ),
+	// Restore write port into the TG68K register file, driven by
+	// ss_state_fanout at the bottom of this file. One shared data bus and one
+	// enable per destination, so the fan-out presents them one per cycle --
+	// the register file has a single write port and the sixteen registers go
+	// in one at a time, mirroring the Phase 1A read sweep above.
+	.ss_wr_index  (ss_fanout_wr_index),
+	.ss_wr_data   (ss_fanout_wr_data ),
+	.ss_wr_en     (ss_fanout_wr_en   ),
+	.ss_pc_wr     (ss_fanout_pc_wr   ),
+	.ss_sr_wr     (ss_fanout_sr_wr   ),
+	.ss_usp_wr    (ss_fanout_usp_wr  ),
+	.ss_vbr_wr    (ss_fanout_vbr_wr  ),
+	.ss_cacr_wr   (ss_fanout_cacr_wr ),
 	.fastramcfg   (memcfg[6:4]     ),
 	.bootrom      (bootrom         ),
 
@@ -970,12 +1010,19 @@ ddram_ctrl ram2
 	.ramshared    (ramshared       ),
 	.ramready     (ram_ready2      ),
 
-	// Save state writer, muxed onto DDR3 arbiter master 0 while frozen.
+	// Save state port, muxed onto DDR3 arbiter master 0. The write side is
+	// taken while frozen; the read side is taken for the whole of a restore,
+	// which starts well before the freeze because the window is validated
+	// against the running machine. ss_load_busy is what asks for it.
 	.ss_freeze    (ss_freeze          ),
+	.ss_load_busy (ss_load_busy       ),
 	.ss_address   (ss_ddr_address     ),
 	.ss_writedata (ss_ddr_writedata   ),
 	.ss_byteenable(ss_ddr_byteenable  ),
 	.ss_write     (ss_ddr_write       ),
+	.ss_read      (ss_ddr_read        ),
+	.ss_readdata  (ss_ddr_readdata    ),
+	.ss_readdatavalid(ss_ddr_readdatavalid),
 	.ss_waitrequest(ss_ddr_waitrequest),
 	.ss_ram_idle  (ss_ram_idle        ),
 
@@ -1348,7 +1395,12 @@ minimig minimig
 	.ss_blit_busy         (ss_blit_busy         ),
 	.ss_disk_busy         (ss_disk_busy         ),
 	.ss_audio_busy        (ss_audio_busy        ),
-	.ss_map               (ss_map               )
+	.ss_map               (ss_map               ),
+	// Restore side of the same four bits, in the same bit order. minimig.v
+	// applies [3] to ovl and [2] to gary's rom_readonly; [1:0] are
+	// combinational address decodes with no target -- see rtl/ss_state.vh.
+	.ss_map_in            (ss_fanout_map_in     ),
+	.ss_map_we            (ss_fanout_map_we     )
 );
 
 //////////////////////////  SAVE STATES (phase 1A)  /////////////////////////
@@ -1360,6 +1412,13 @@ minimig minimig
 // dump.
 wire       ss_save_req_osd = status[51];
 wire [1:0] ss_slot         = status[53:52];
+// The restore request. status[54] is the next free bit; the OSD row that sets
+// it is Task 7's, and until it exists this reads 0 and nothing happens. It is
+// wired now rather than tied off because tying it off makes the entire restore
+// datapath constant-foldable, which means synthesis proves nothing about it.
+// If Task 7 picks a different bit, change it here as well -- the two have to
+// agree or the row will do nothing.
+wire       ss_load_req_osd = status[54];
 
 // *** fx68k lockout ***
 // cpu_wrapper's ss_* export is taken from cpu_inst_p (TG68K) unconditionally,
@@ -1423,6 +1482,26 @@ end
 // CDTV sector-FIFO hold-off (it needs ss_frame_tick, declared below).
 wire ss_save_req_raw = ss_save_pending;
 
+// Restore request, latched by exactly the same rules and for exactly the same
+// reasons -- ss_ctrl re-arms out of S_IDLE on any clock where load_req is
+// high, so a level would restore over and over and the Amiga would never run
+// again. Cleared on load_busy, which ss_ctrl raises the cycle it takes the
+// request. The ss_supported lockout applies unchanged: there is no way to
+// write fx68k's registers, so a restore in that mode would put chip RAM back
+// underneath a CPU whose own state was never restored -- worse than refusing.
+reg  ss_load_req_d;
+reg  ss_load_pending;
+wire ss_load_edge = ss_load_req_osd & ~ss_load_req_d;
+
+always @(posedge clk_114) begin
+	ss_load_req_d <= ss_load_req_osd;
+	if (reset_d || !ss_supported) ss_load_pending <= 1'b0;
+	else if (ss_load_busy)        ss_load_pending <= 1'b0;
+	else if (ss_load_edge)        ss_load_pending <= 1'b1;
+end
+
+wire ss_load_req_raw = ss_load_pending;
+
 // Sweep the TG68K register file read port while the CPU is parked. Sixteen
 // cycles at 28 MHz is 560 ns, which is nothing against the dump itself.
 //
@@ -1432,7 +1511,15 @@ wire ss_save_req_raw = ss_save_pending;
 // serialise sixteen uninitialised registers. ss_save_busy parks the CPU at
 // its next no-memaccess boundary (see cpu_wrapper's ss_arm), the sweep runs
 // there, and ss_regs_valid is what finally lets cpu_boundary go true.
-wire ss_cpu_parked = ss_save_busy & (cpu_state == 2'd1);
+//
+// ss_load_busy is in here as well as ss_save_busy, and it has to be: it is
+// what makes cpu_boundary reachable at all on a restore. ss_quiesce will not
+// declare the machine quiesced without it, so a restore whose park condition
+// only looked at ss_save_busy would validate the file, request the freeze and
+// then time out with FAIL_QUIESCE every single time. The register sweep the
+// block below performs during a restore is harmless -- it is a read port, and
+// the values it lands in ss_cpu_d0..a7 are overwritten by the next save.
+wire ss_cpu_parked = (ss_save_busy | ss_load_busy) & (cpu_state == 2'd1);
 
 always @(posedge clk_sys) begin
 	if (!ss_cpu_parked) begin
@@ -1511,12 +1598,19 @@ wire ss_frame_tick = vbl & ~ss_vbl_d;
 // freeze is up the FIFO stops draining and userspace immediately refills it, so
 // a live term would go false mid-dump, drop save_req and abort the save it was
 // meant to protect.
+//
+// A RESTORE freezes the machine for the same reasons and for a comparable
+// length of time, so it is held off by the same latch. The two requests share
+// it because they cannot be pending together: ss_ctrl serves one at a time and
+// each pending latch is cleared the cycle its own busy rises.
 localparam [3:0] SS_SEC_HOLD_FRAMES = 4'd4;
+
+wire ss_ss_req_raw = ss_save_req_raw | ss_load_req_raw;
 
 reg [3:0] ss_sec_wait;
 reg       ss_sec_go;
 always @(posedge clk_114) begin
-	if (reset_d || !ss_save_req_raw) begin
+	if (reset_d || !ss_ss_req_raw) begin
 		ss_sec_wait <= 4'd0;
 		ss_sec_go   <= 1'b0;
 	end
@@ -1529,6 +1623,7 @@ always @(posedge clk_114) begin
 end
 
 wire ss_save_req = ss_save_req_raw & ss_sec_go;
+wire ss_load_req = ss_load_req_raw & ss_sec_go;
 
 // Save state window: 0x3E000000, four 4 MB slots. DDRAM_ADDR is a 64-bit word
 // address, so the byte base is shifted right by three.
@@ -1552,20 +1647,21 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.save_ok      (),
 	.save_fail    (),
 
-	// ss_ctrl can now validate a window AND put it back into the machine, but
-	// the OSD row that asks for it does not exist yet (Task 7), so the request
-	// is tied off rather than left dangling. load_fail_code is what the
-	// eventual toast will say. Do not untie this before the DDR3 read port
-	// below is real -- see the note there.
-	.load_req     (1'b0),
-	.load_busy    (),
+	// The restore path is live: the DDR3 read master below is real, and the
+	// state vector reaches the machine through ss_state_fanout at the bottom
+	// of this file. What is still missing is the OSD row that sets
+	// status[54] and the toast that reports load_fail_code -- both Task 7.
+	// Until then load_req only ever reads 0 in practice, but the datapath is
+	// connected, so synthesis and timing see it.
+	.load_req     (ss_load_req),
+	.load_busy    (ss_load_busy),
 	.load_ok      (),
 	.load_fail    (),
 	.load_fail_code(),
 
 	.state_in     (ss_state_in),
-	.state_out    (),
-	.state_we     (),
+	.state_out    (ss_state_out),
+	.state_we     (ss_state_we),
 
 	// cpu_boundary carries three extra conditions beyond "the CPU is parked".
 	// ss_regs_valid, because the register sweep must be complete before the
@@ -1612,15 +1708,60 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.ddr_writedata(ss_ddr_writedata),
 	.ddr_byteenable(ss_ddr_byteenable),
 	.ddr_write    (ss_ddr_write),
-	// ss_ctrl now has a real DDR3 read master, but nothing here grants it a
-	// read port yet, so readdatavalid can never arrive. That is safe only
-	// because load_req above is tied low: a restore that started against
-	// these stubs would park in its read step forever. Wire all three at the
-	// same time as load_req, not before.
-	.ddr_read     (),
-	.ddr_readdata (64'd0),
-	.ddr_readdatavalid(1'b0),
+	// The read master is real: ddram_ctrl grants master 0 to the savestate
+	// port for the whole of a restore (see its ss_port_own), and returns the
+	// beat on ss_readdatavalid. All three go together with load_req -- the
+	// read step in ss_ctrl has no watchdog, so a half-wiring parks the
+	// machine rather than failing it.
+	.ddr_read     (ss_ddr_read),
+	.ddr_readdata (ss_ddr_readdata),
+	.ddr_readdatavalid(ss_ddr_readdatavalid),
 	.ddr_waitrequest(ss_ddr_waitrequest)
+);
+
+// --- restore fan-out ---------------------------------------------------------
+//
+// ss_ctrl runs on clk_114; the CPU and minimig.v run on clk_sys, a quarter of
+// it. state_we is a single clk_114 pulse, which a clk_sys edge would miss
+// three times out of four, so it is turned into a level here and handed over
+// with a request/ack pair. The vector itself needs no latch: ss_serdes holds
+// state_out in a register until the next load.
+reg ss_fanout_req;
+always @(posedge clk_114) begin
+	if (reset_d)             ss_fanout_req <= 1'b0;
+	else if (ss_fanout_ack)  ss_fanout_req <= 1'b0;
+	else if (ss_state_we)    ss_fanout_req <= 1'b1;
+end
+
+// ORDERING NOTE. ss_ctrl does not wait for this fan-out; it goes straight from
+// the state vector to the chip RAM writeback. That is safe by a wide margin
+// rather than by construction: the fan-out is 23 clk_sys cycles (~0.8 us) and
+// the chip RAM pass that follows it is a million SDRAM word writes (~ms), so
+// the registers are always in place long before the freeze is released. The
+// property that actually matters -- the CPU must not execute against a
+// half-written register file -- is enforced independently, by ss_fanout_busy
+// holding cpu_wrapper's ss_arm past ss_ctrl's release.
+ss_state_fanout #(.STATE_W(`SS_STATE_W)) ss_fanout
+(
+	.clk          (clk_sys),
+	.rst_n        (~reset_d),
+	.req          (ss_fanout_req),
+	.ack          (ss_fanout_ack),
+	.state        (ss_state_out),
+
+	.cpu_wr_index (ss_fanout_wr_index),
+	.cpu_wr_data  (ss_fanout_wr_data),
+	.cpu_wr_en    (ss_fanout_wr_en),
+	.cpu_pc_wr    (ss_fanout_pc_wr),
+	.cpu_sr_wr    (ss_fanout_sr_wr),
+	.cpu_usp_wr   (ss_fanout_usp_wr),
+	.cpu_vbr_wr   (ss_fanout_vbr_wr),
+	.cpu_cacr_wr  (ss_fanout_cacr_wr),
+
+	.map_in       (ss_fanout_map_in),
+	.map_we       (ss_fanout_map_we),
+
+	.busy         (ss_fanout_busy)
 );
 /////////////////////////////////////////////////////////////////////////////
 
@@ -2076,5 +2217,208 @@ end
 assign AUDIO_S = 1;
 assign AUDIO_L = out_l;
 assign AUDIO_R = out_r;
+
+endmodule
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Restore fan-out: the state vector, back into the machine.
+//
+// This exists as a module rather than as a block inside Minimig.sv for one
+// reason: it lets the restore side reuse `SS_STATE_LIST as an LVALUE.
+//
+//     assign `SS_STATE_LIST = state;
+//
+// The names in that macro are declared below as nets of this module, so the
+// same ordered list that Minimig.sv packs into ss_state_in is what unpacks
+// here. There is no second list, so there is nothing to drift: adding a
+// register to the vector without giving it a home here is an undeclared
+// identifier, and removing one from the middle shifts BOTH directions
+// together. Writing the reverse concatenation out by hand -- the obvious
+// alternative -- would reintroduce exactly the ordering bug the macro exists
+// to prevent, and would do it invisibly: a machine restored with two fields
+// transposed resumes and then misbehaves.
+//
+// What a concatenation assignment does NOT catch is a wrong DECLARED WIDTH:
+// it truncates or zero-pads in silence, and every field above the mistake
+// shifts. The elaboration guard below closes that hole.
+//
+// Sequencing. The TG68K register file has one write port, so the sixteen
+// registers go in one per cycle, mirroring the Phase 1A read sweep. PC, SR,
+// USP, VBR and CACR share the same ss_wr_data bus and take one cycle each on
+// their own enable. The Gary map bits go last.
+//
+// Clock. This runs on clk_sys because everything it drives does: the TG68K
+// kernel takes these writes on the CPU clock, and minimig.v's ovl and gary's
+// rom_readonly are clk_sys registers. Running it on ss_ctrl's clk_114 instead
+// would emit one-cycle pulses that a clk_sys edge sees only one time in four.
+/////////////////////////////////////////////////////////////////////////////
+
+module ss_state_fanout
+#(
+	parameter STATE_W = 632
+)
+(
+	input                     clk,      // clk_sys
+	input                     rst_n,
+
+	// Level-based handshake with the clk_114 side. req is held until ack.
+	input                     req,
+	output reg                ack,
+	input      [STATE_W-1:0]  state,
+
+	// TG68K restore write port, via cpu_wrapper. One shared data bus.
+	output reg  [3:0]         cpu_wr_index,
+	output reg [31:0]         cpu_wr_data,
+	output reg                cpu_wr_en,
+	output reg                cpu_pc_wr,
+	output reg                cpu_sr_wr,
+	output reg                cpu_usp_wr,
+	output reg                cpu_vbr_wr,
+	output reg                cpu_cacr_wr,
+
+	// Gary memory map, via minimig.v. Bit order is ss_map's, both ways.
+	output reg  [3:0]         map_in,
+	output reg                map_we,
+
+	output                    busy
+);
+
+// The restore-side view of the vector. Widths here must match the capture
+// side's exactly; see the guard below.
+wire [31:0] ss_cpu_d0, ss_cpu_d1, ss_cpu_d2, ss_cpu_d3;
+wire [31:0] ss_cpu_d4, ss_cpu_d5, ss_cpu_d6, ss_cpu_d7;
+wire [31:0] ss_cpu_a0, ss_cpu_a1, ss_cpu_a2, ss_cpu_a3;
+wire [31:0] ss_cpu_a4, ss_cpu_a5, ss_cpu_a6, ss_cpu_a7;
+wire [31:0] ss_pc, ss_usp, ss_vbr;
+wire [15:0] ss_sr;
+wire  [3:0] ss_cacr;
+wire        ss_ovl, ss_rom_readonly, ss_sel_kick1mb, ss_sel_kick256kmirror;
+
+assign `SS_STATE_LIST = state;
+
+// Elaboration guard. A concatenation assignment silently truncates, so a
+// mistyped width above would shift every field beyond it and restore a
+// plausible-looking machine that is wrong everywhere. An unresolvable module
+// instance is a hard Quartus error, which is what this wants to be.
+localparam integer SS_LIST_W = $bits(`SS_STATE_LIST);
+generate
+	if (SS_LIST_W != STATE_W) begin : gen_ss_state_width_check
+		ss_state_list_width_does_not_match_STATE_W u_check ();
+	end
+endgenerate
+
+// Index order is the TG68K register file's, which is also the export sweep's:
+// 0-7 = D0-D7, 8-15 = A0-A7. Getting this wrong by eight restores the data
+// registers into the address registers, which is why Task 8 checks one of
+// each rather than only a D register.
+//
+// A plain combinational block rather than a function: Quartus's 10036 lint
+// does not count a read that happens only inside a function body, so the
+// function version synthesised correctly but reported all sixteen registers
+// as "assigned a value but never read", which is exactly the warning a real
+// mistake here would produce. Not worth losing.
+reg [3:0]  reg_sel_idx;
+reg [31:0] reg_sel;
+always @(*) begin
+	reg_sel_idx = step[3:0];
+	case (reg_sel_idx)
+	4'd0:  reg_sel = ss_cpu_d0;
+	4'd1:  reg_sel = ss_cpu_d1;
+	4'd2:  reg_sel = ss_cpu_d2;
+	4'd3:  reg_sel = ss_cpu_d3;
+	4'd4:  reg_sel = ss_cpu_d4;
+	4'd5:  reg_sel = ss_cpu_d5;
+	4'd6:  reg_sel = ss_cpu_d6;
+	4'd7:  reg_sel = ss_cpu_d7;
+	4'd8:  reg_sel = ss_cpu_a0;
+	4'd9:  reg_sel = ss_cpu_a1;
+	4'd10: reg_sel = ss_cpu_a2;
+	4'd11: reg_sel = ss_cpu_a3;
+	4'd12: reg_sel = ss_cpu_a4;
+	4'd13: reg_sel = ss_cpu_a5;
+	4'd14: reg_sel = ss_cpu_a6;
+	default: reg_sel = ss_cpu_a7;
+	endcase
+end
+
+localparam [4:0] STEP_PC   = 5'd16;
+localparam [4:0] STEP_SR   = 5'd17;
+localparam [4:0] STEP_USP  = 5'd18;
+localparam [4:0] STEP_VBR  = 5'd19;
+localparam [4:0] STEP_CACR = 5'd20;
+localparam [4:0] STEP_MAP  = 5'd21;
+localparam [4:0] STEP_LAST = STEP_MAP;
+
+reg [4:0] step;
+reg       running;
+
+assign busy = running;
+
+always @(posedge clk) begin
+	if (!rst_n) begin
+		running      <= 1'b0;
+		ack          <= 1'b0;
+		step         <= 5'd0;
+		cpu_wr_en    <= 1'b0;
+		cpu_pc_wr    <= 1'b0;
+		cpu_sr_wr    <= 1'b0;
+		cpu_usp_wr   <= 1'b0;
+		cpu_vbr_wr   <= 1'b0;
+		cpu_cacr_wr  <= 1'b0;
+		map_we       <= 1'b0;
+	end
+	else begin
+		// Every enable is a one-cycle pulse. The data bus and the index are
+		// registered in the same cycle as the enable that consumes them, so
+		// they arrive at the kernel's clock edge together.
+		cpu_wr_en   <= 1'b0;
+		cpu_pc_wr   <= 1'b0;
+		cpu_sr_wr   <= 1'b0;
+		cpu_usp_wr  <= 1'b0;
+		cpu_vbr_wr  <= 1'b0;
+		cpu_cacr_wr <= 1'b0;
+		map_we      <= 1'b0;
+
+		if (!running) begin
+			// ack is held until req drops, so the clk_114 side sees it
+			// regardless of the 4:1 ratio between the two clocks.
+			if (!req)     ack <= 1'b0;
+			else if (!ack) begin
+				running <= 1'b1;
+				step    <= 5'd0;
+			end
+		end
+		else begin
+			case (step)
+			STEP_PC:   begin cpu_wr_data <= ss_pc;                 cpu_pc_wr   <= 1'b1; end
+			// SR is taken from ss_wr_data[15:0] inside the kernel; the CCR
+			// half goes to the flags submodule from the same bus.
+			STEP_SR:   begin cpu_wr_data <= {16'd0, ss_sr};        cpu_sr_wr   <= 1'b1; end
+			STEP_USP:  begin cpu_wr_data <= ss_usp;                cpu_usp_wr  <= 1'b1; end
+			STEP_VBR:  begin cpu_wr_data <= ss_vbr;                cpu_vbr_wr  <= 1'b1; end
+			STEP_CACR: begin cpu_wr_data <= {28'd0, ss_cacr};      cpu_cacr_wr <= 1'b1; end
+			// Same bit order as minimig.v's ss_map output. Only [3] (ovl) and
+			// [2] (rom_readonly) have a target; [1:0] are combinational
+			// address decodes -- see rtl/ss_state.vh.
+			STEP_MAP:  begin
+				map_in <= {ss_ovl, ss_rom_readonly, ss_sel_kick1mb, ss_sel_kick256kmirror};
+				map_we <= 1'b1;
+			end
+			default: begin
+				cpu_wr_index <= step[3:0];
+				cpu_wr_data  <= reg_sel;
+				cpu_wr_en    <= 1'b1;
+			end
+			endcase
+
+			if (step == STEP_LAST) begin
+				running <= 1'b0;
+				ack     <= 1'b1;
+			end
+			else step <= step + 5'd1;
+		end
+	end
+end
 
 endmodule

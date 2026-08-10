@@ -48,7 +48,10 @@ module cpu_wrapper
 	// ss_cpu_d0..a7 must already have finished by then. Driven from
 	// ss_ctrl's save_busy, which rises the moment a save is requested and
 	// stays high until it completes, so this also holds the CPU for the
-	// whole dump.
+	// whole dump. Minimig.sv ORs load_busy and the restore fan-out's busy
+	// into it as well, so the same park covers a restore -- including the
+	// window in which the fan-out is writing the register file, which must
+	// not overlap the CPU executing again.
 	input             ss_arm,
 
 	// Save state export. Read-only view of the TG68K architectural
@@ -73,6 +76,11 @@ module cpu_wrapper
 	input             ss_pc_wr,
 	input             ss_sr_wr,
 	input             ss_usp_wr,
+	// VBR and CACR are exported above (from vbr_p / cacr_p) and are part of
+	// the state vector, so they need a write side as well. Both take their
+	// data from ss_wr_data; CACR uses [3:0], which is all the vector carries.
+	input             ss_vbr_wr,
+	input             ss_cacr_wr,
 
 	output reg [23:1] chip_addr,
 	input      [15:0] chip_dout,
@@ -335,7 +343,9 @@ cpu_inst_p
   .ss_wr_en(ss_wr_en),
   .ss_pc_wr(ss_pc_wr),
   .ss_sr_wr(ss_sr_wr),
-  .ss_usp_wr(ss_usp_wr)
+  .ss_usp_wr(ss_usp_wr),
+  .ss_vbr_wr(ss_vbr_wr),
+  .ss_cacr_wr(ss_cacr_wr)
 );
 
 // VBR and CACR are already brought out of the kernel for the memory map, so

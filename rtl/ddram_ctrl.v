@@ -82,11 +82,30 @@ module ddram_ctrl
 	// path, and for the same reason -- a bridge write landing mid-dump would
 	// tear the snapshot. The bridges hold req until ack, so nothing is lost,
 	// only deferred.
+	// The RESTORE direction needs the port before the freeze, not during it.
+	// ss_ctrl validates a window -- magic, version, length and a CRC over the
+	// whole payload -- with the Amiga still running, because a rejected
+	// restore must be a no-op. Those reads are master-0 traffic issued while
+	// ss_freeze is still low, so the takeover condition here is ss_load_busy
+	// OR ss_freeze, not ss_freeze alone. Minimig.sv parks the CPU on the same
+	// ss_load_busy, so the port is not being fought over -- it is idle by the
+	// time the grant below fires.
+	//
+	// The grant (ss_port_own) is registered and waits for ss_ram_idle. That
+	// is what makes the takeover safe rather than merely convenient: it must
+	// not happen with a master-0 read already accepted, because that read's
+	// readdatavalid returns out of band and would be routed to ss instead of
+	// to the cache fill that asked for it. Once granted, ram_busy is pinned
+	// and the state machine below can arm nothing new, so idle stays idle.
 	input             ss_freeze,
+	input             ss_load_busy,
 	input      [28:0] ss_address,
 	input      [63:0] ss_writedata,
 	input       [7:0] ss_byteenable,
 	input             ss_write,
+	input             ss_read,
+	output     [63:0] ss_readdata,
+	output            ss_readdatavalid,
 	output            ss_waitrequest,
 	// High when no master-0 read is outstanding and nothing is queued, i.e.
 	// when it is safe to take the port away. See ss_rd_outstanding below.
@@ -329,8 +348,39 @@ wire        m0_waitrequest_int;
 // pending request is held and re-issued once the freeze lifts rather than
 // being dropped on the floor. It also stalls the fast-RAM path outright if
 // a future change makes it ask for something mid-save.
-assign ram_busy       = ss_freeze ? 1'b1               : m0_waitrequest_int;
-assign ss_waitrequest = ss_freeze ? m0_waitrequest_int : 1'b1;
+// The port is wanted for the whole of a save's freeze and for the whole of a
+// restore, validation included. The grant waits for the port to be quiet; see
+// the port declaration for why that wait is mandatory and not just polite.
+// Note the grant condition is sampled while ram_busy still follows the
+// arbiter, so ram_rd / ram_we can still clear and idle is reachable; pinning
+// ram_busy on the request instead would freeze them high and never let the
+// grant fire.
+wire ss_port_req = ss_freeze | ss_load_busy;
+reg  ss_port_own;
+always @(posedge sysclk) begin
+	if (~reset_n)          ss_port_own <= 1'b0;
+	else if (~ss_port_req) ss_port_own <= 1'b0;
+	else if (ss_ram_idle)  ss_port_own <= 1'b1;
+end
+
+// ss_freeze appears here as well as ss_port_own so that the pin goes up on
+// the same cycle the freeze does. ss_port_own is registered and can lag it by
+// a cycle, and a single unpinned cycle at the freeze instant is enough for the
+// state machine below to arm a bridge DMA write -- exactly the write this pin
+// exists to keep out of a snapshot. (At the freeze instant ss_ram_idle is
+// already true, because Minimig.sv puts it in cpu_boundary, so the grant
+// follows on the very next edge.) During a restore ss_freeze is low until the
+// payload has been checked, so the pin is driven by ss_port_own alone up to
+// that point, which is what lets the port go idle in the first place.
+assign ram_busy       = (ss_freeze | ss_port_own) ? 1'b1 : m0_waitrequest_int;
+assign ss_waitrequest = ss_port_own ? m0_waitrequest_int : 1'b1;
+
+// Read return. Only ss can have a master-0 read outstanding while it owns the
+// port (nothing else can arm one), so this needs no tag of its own. The cache
+// fill path is not disturbed: it only advances under ~ram_busy, which is
+// pinned for the whole of the ownership.
+assign ss_readdata      = ram_dout;
+assign ss_readdatavalid = ss_port_own & ram_dout_ready;
 
 // A read that has already been accepted by the arbiter is a different
 // problem: its readdatavalid comes back out of band, state 1 below waits
@@ -354,14 +404,18 @@ a2065_ddram_arbiter arbiter
 	.clk             (sysclk),
 	.rst             (~reset_n),
 
-	.m0_address      (ss_freeze ? ss_address    : ram_addr),
+	// Muxed on the GRANT, not on ss_freeze: the restore path reads through
+	// here before the freeze exists. ram_rd / ram_we are zero for the whole
+	// of a grant (that is what ss_ram_idle checked), so the two sides never
+	// both want the port.
+	.m0_address      (ss_port_own ? ss_address    : ram_addr),
 	.m0_burstcount   (8'd1),
-	.m0_read         (ss_freeze ? 1'b0          : ram_rd),
+	.m0_read         (ss_port_own ? ss_read       : ram_rd),
 	.m0_readdata     (),
 	.m0_readdatavalid(ram_dout_ready),
-	.m0_writedata    (ss_freeze ? ss_writedata  : ram_din),
-	.m0_byteenable   (ss_freeze ? ss_byteenable : ram_be),
-	.m0_write        (ss_freeze ? ss_write      : ram_we),
+	.m0_writedata    (ss_port_own ? ss_writedata  : ram_din),
+	.m0_byteenable   (ss_port_own ? ss_byteenable : ram_be),
+	.m0_write        (ss_port_own ? ss_write      : ram_we),
 	.m0_waitrequest  (m0_waitrequest_int),
 
 	.m1_address      (mem2_address),

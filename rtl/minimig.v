@@ -363,7 +363,21 @@ module minimig
 	output        ss_audio_busy,
 	// Gary's memory map state, in the order ss_state.vh expects:
 	// {ovl, rom_readonly, sel_kick1mb, sel_kick256kmirror}.
-	output  [3:0] ss_map
+	output  [3:0] ss_map,
+	// Restore side of the same four bits, in the SAME bit order -- the two
+	// are written next to each other here and nowhere else so they cannot be
+	// numbered differently. ss_map_we is a one-clk_sys-cycle pulse; both the
+	// ovl register below and gary's rom_readonly run on this clock, so no
+	// widening is needed (Minimig.sv's fan-out sequencer runs on clk_sys for
+	// exactly that reason).
+	//
+	// Only bits [3] (ovl) and [2] (rom_readonly) have a target. Bits [1:0]
+	// are gary's combinational sel_kick1mb / sel_kick256kmirror address
+	// decodes, which are not state and cannot be written -- see
+	// rtl/ss_state.vh. They are accepted here so that the two directions
+	// stay the same four-bit field.
+	input   [3:0] ss_map_in,
+	input         ss_map_we
 );
 
 
@@ -955,6 +969,9 @@ gary GARY1
 	.reset(reset),
 	.clk(clk),
 	.rom_readonly(rom_readonly),
+	// Restore side of ss_map[2]. Same pulse as ovl's above.
+	.ss_rom_readonly_in(ss_map_in[2]),
+	.ss_rom_readonly_we(ss_map_we),
 	.bootrom(bootrom)
 );
 
@@ -992,14 +1009,24 @@ minimig_syscontrol CONTROL1
 	.reset(sys_reset)
 );
 
+// ovl is the one map bit that lives here rather than in gary. Reset keeps
+// priority over the restore write for the same reason it does in gary: a
+// machine being reset must land in its reset state. Below reset, the restore
+// write outranks the normal CIA-A-write clear, which cannot fire anyway while
+// the CPU is parked for the restore.
 reg ovl; //kickstart overlay enable
 always @(posedge clk) begin
 	if(~_cpu_reset | ~_cpu_reset_in)       ovl <= 1;
+	else if(ss_map_we)                     ovl <= ss_map_in[3];
 	else if(sel_cia_a & (cpu_lwr|cpu_hwr)) ovl <= 0;
 end
 
 // Save state observation taps. Purely combinational reads of signals that
 // already exist -- nothing here loads or perturbs the machine.
+//
+// The bit order here is the one ss_map_in is decoded with (ovl is [3] in both
+// directions). Swapping two bits between the two would put the wrong thing at
+// address zero after a restore and would not show up until the machine ran.
 assign ss_map        = {ovl, rom_readonly, sel_kick1mb, sel_kick256kmirror};
 assign ss_disk_busy  = disk_dmal;
 assign ss_audio_busy = |audio_dmal;

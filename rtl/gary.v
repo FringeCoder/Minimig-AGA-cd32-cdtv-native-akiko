@@ -116,7 +116,14 @@ module gary
 	output       sel_cdtv,
 	output       sel_cdtv_nvram,
 
-	output reg   rom_readonly = 0 //when zero allows to write to $fc-$ff, blocks effect of kick256kmirror.  
+	output reg   rom_readonly = 0, //when zero allows to write to $fc-$ff, blocks effect of kick256kmirror.
+
+	// Save state restore. rom_readonly is one of the two genuinely stateful
+	// bits behind minimig.v's ss_map export (the other is ovl); the two
+	// sel_kick* bits next to it in the vector are combinational decodes and
+	// have no restore target at all -- see rtl/ss_state.vh.
+	input        ss_rom_readonly_in,
+	input        ss_rom_readonly_we
 );
 
 wire	[2:0] t_sel_slow;
@@ -157,8 +164,13 @@ assign ram_address_out  = dbr ? {3'b000, dma_address_in[20:1]} : {cpu_addr_hi_re
    
 //--------------------------------------------------------------------------------------
 
+// Reset keeps priority over the restore write: a machine being reset must end
+// up in its reset state, not in the state of a file that happened to be
+// half-loaded. The restore write can only fire while the CPU is parked and the
+// chipset frozen, so it never races the cpu_hwr/cpu_lwr branch below.
 always @ (posedge clk) begin
 	if (reset) rom_readonly <= ~bootrom;
+	else if (ss_rom_readonly_we) rom_readonly <= ss_rom_readonly_in;
 	else if ((cpu_hwr || cpu_lwr) && (cpu_address_in[23:18]==6'b1111_10)) rom_readonly <= 1;
 end
 

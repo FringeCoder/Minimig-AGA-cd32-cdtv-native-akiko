@@ -161,7 +161,17 @@ entity TG68KdotC_Kernel is
 		ss_wr_en					: in  std_logic := '0';
 		ss_pc_wr					: in  std_logic := '0';
 		ss_sr_wr					: in  std_logic := '0';
-		ss_usp_wr				: in  std_logic := '0'
+		ss_usp_wr				: in  std_logic := '0';
+		-- VBR and CACR are exported through cpu_wrapper's VBR_out / CACR_out
+		-- and are part of the save state vector, so they need a write side
+		-- too. Without these two a restored machine would keep the running
+		-- machine's exception vector base -- every trap and interrupt would
+		-- dispatch through the wrong table, which does not fail where the
+		-- bug is. ss_cacr_wr takes CACR(3 downto 0) only, which is all the
+		-- vector carries; CACR_DC / CACR_DC_owned are a local D-cache
+		-- heuristic and are deliberately left alone.
+		ss_vbr_wr				: in  std_logic := '0';
+		ss_cacr_wr				: in  std_logic := '0'
 		);
 end TG68KdotC_Kernel;
 
@@ -4097,6 +4107,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		CACR <= (others => '0');
 		CACR_DC <= '1';
 		CACR_DC_owned <= '0';
+	  -- Savestate restore. Outside the clkena_lw guard for the same reason
+	  -- the register file write is (see that process): the CPU's clock
+	  -- enable is held low for the whole restore window, so a write placed
+	  -- inside the guard would silently never happen. Reset keeps priority.
+	  elsif ss_vbr_wr = '1' then
+		VBR <= ss_wr_data;
+	  elsif ss_cacr_wr = '1' then
+		CACR <= ss_wr_data(3 downto 0);
 	  elsif clkena_lw = '1' and exec(movec_wr) = '1' then
 		case brief(11 downto 0) is
 		  when X"000" => SFC <= reg_QA(2 downto 0); -- SFC -- 68010+
