@@ -1532,6 +1532,15 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.save_ok      (),
 	.save_fail    (),
 
+	// Restore is not wired to the OSD yet: ss_ctrl can validate a window but
+	// not yet put it back into the machine, so the request is tied off rather
+	// than left dangling. load_fail_code is what the eventual toast will say.
+	.load_req     (1'b0),
+	.load_busy    (),
+	.load_ok      (),
+	.load_fail    (),
+	.load_fail_code(),
+
 	.state_in     (ss_state_in),
 	.state_out    (),
 	.state_we     (),
@@ -1580,6 +1589,11 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.ddr_writedata(ss_ddr_writedata),
 	.ddr_byteenable(ss_ddr_byteenable),
 	.ddr_write    (ss_ddr_write),
+	// ss_ctrl now has a real DDR3 read master, but nothing here grants it a
+	// read port yet, so readdatavalid can never arrive. That is safe only
+	// because load_req above is tied low: a restore that started against
+	// these stubs would park in its read step forever. Wire all three at the
+	// same time as load_req, not before.
 	.ddr_read     (),
 	.ddr_readdata (64'd0),
 	.ddr_readdatavalid(1'b0),
