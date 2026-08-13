@@ -53,7 +53,24 @@ localparam CONF_STR = {
 	"MT32-pi: MT-32 v1,",
 	"MT32-pi: MT-32 v2,",
 	"MT32-pi: CM-32L,",
-	"MT32-pi: Unknown mode;",
+	"MT32-pi: Unknown mode,",
+	// Save state outcomes. These are indices 13..22 of this list, which is what
+	// SS_INFO_BASE names; user_io.cpp's show_core_info() counts substrings from
+	// 1, so inserting anything above here shifts them and must shift
+	// SS_INFO_BASE with it. Order after "restored" is ss_ctrl's load_fail_code
+	// 1..6, in order, then the unknown-code fallback.
+	"Save state: saved,",
+	"Save state: FAILED,",
+	"State restored,",
+	"Restore: not a save state,",
+	"Restore: wrong version,",
+	"Restore: not for this core,",
+	"Restore: corrupt file,",
+	"Restore: wrong Kickstart,",
+	// No comma inside a message: substrcpy() (user_io.cpp:512) splits this line
+	// on commas, so one here would truncate the toast at "Restore: busy".
+	"Restore: busy - try again,",
+	"Restore: FAILED;",
 	"V,v",`BUILD_DATE
 };
 
@@ -148,8 +165,14 @@ hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0), .VDNUM(2), .BLKSZ(3)) hps_io
 	.status(status),
 	.status_menumask({mister_floppy_status,mt32_cfg,mt32_available}),
 	.snac_state(snac_state),
-	.info_req(mt32_info_req),
-	.info(mt32_info_disp),
+	// Two producers, one channel. hps_io latches `info` on the rising edge of
+	// `info_req`, so the mux has to present the right code on the same cycle
+	// the request rises -- hence selecting on ss_info_req rather than latching
+	// a winner. A simultaneous MT32-pi mode change would lose its message;
+	// that costs a soundfont name once, against a save state outcome that has
+	// no other way to be seen at all.
+	.info_req(mt32_info_req | ss_info_req),
+	.info(ss_info_req ? ss_info_code : {4'd0, mt32_info_disp}),
 
 	.joystick_0(JOY0),
 	.joystick_1(JOY1),
@@ -543,6 +566,66 @@ wire        ss_sd_lds_n;
 wire        ss_sd_cache_inhibit;
 wire [15:0] ss_sd_wr;
 
+// ss_ctrl raises this whenever it is walking the Kickstart ROM for the
+// fingerprint. On a SAVE that pass runs inside the freeze and ss_freeze alone
+// would have covered it. On a RESTORE it runs before the freeze, deliberately:
+// the fingerprint is the last gate, and a gate that stopped the Amiga in order
+// to refuse a file would be worse than the file it was guarding against. So
+// there is a window where ss_ctrl needs this port with ss_freeze low, and
+// ss_rom_scan is what announces it.
+wire        ss_rom_scan;
+
+// Who owns sdram_ctrl's CPU port this cycle. One expression, used for all
+// seven of the port's signals at the ram1 instance below.
+//
+// The 68k is off the port for both windows, by cpu_wrapper's ss_arm rather
+// than by anything here: ss_arm is tied to (save_busy | load_busy | fan-out
+// busy) at the cpu_wrapper instance, and it parks the CPU at its next
+// no-memaccess boundary, which drops ram_cs. Both busies are high for
+// milliseconds before ss_rom_scan can rise (a restore has an entire payload
+// CRC pass to get through first, a save is already frozen), so the CPU is long
+// since parked. Even in the impossible case where it were not, the failure is
+// benign: the CPU's chip select stops being routed, its ramready never
+// arrives, and it resumes the same cycle the scan gives the port back. That is
+// the bus stall this design accepts -- ~20 ms once per restore, with the
+// chipset still running -- not a freeze.
+wire        ss_port_own = ss_freeze | ss_rom_scan;
+
+// Where the Kickstart ROM physically lives in SDRAM, as the CPU port's own
+// word address -- DERIVED, not assumed. Amiga $F80000 goes through
+// memory_router.v (the CPU-side map, which minimig_sram_bridge.v:70-74 mirrors
+// for the DMA side):
+//
+//   ramaddr[26:23] = 4'b0000       -- not z3/rtg/dd, so bit 23 is DROPPED
+//                                     ("map a0-ff to 20-7f", memory_router:93)
+//   ramaddr[22:19] = cpu_addr[22:19] = 4'b1111
+//   ramaddr[18]    = cpu_addr[18]  = 0   at $F80000
+//   ramaddr[17:1]  = 0
+//
+// so the byte address is $F80000 with bit 23 cleared = $780000, and ram1's
+// cpuAddr is {2'b00, ram_addr[22:1]}, a WORD address: $780000 >> 1 =
+// $3C0000. ss_sd_addr[24:1] is that same vector, so kick_base is 24'h3C0000
+// and the 512 KB (0x40000-word) default scan covers $F80000-$FFFFFF.
+//
+// This is right for every ROM size the uploader supports, which is what makes
+// the fingerprint reproducible across a power cycle:
+//   512 KB and 1 MB images  -- minimig_config.cpp:286,315 send $F80000, so
+//                              the whole 512 KB region is written.
+//   256 KB images           -- minimig_config.cpp:336-338 send the image TWICE,
+//                              to $F80000 and again to $FC0000, so both halves
+//                              of the region hold it. The fingerprint is then a
+//                              CRC of the image twice over: still deterministic
+//                              and still distinguishing, which is all it has to
+//                              be.
+// The one gap is an 8 KB A1000 boot ROM (minimig_config.cpp:301,308), where
+// only the first 8 KB is ever written and the rest of the region is whatever
+// SDRAM powered up holding. A state saved in that configuration will not
+// restore across a power cycle -- it refuses with "wrong Kickstart", which is
+// a safe direction to be wrong in, and that configuration boots its Kickstart
+// off a floppy anyway.
+// 24 bits, matching ss_ctrl's kick_base[24:1] port by width.
+localparam [23:0] SS_KICK_BASE = 24'h3C0000;
+
 // Borrowed DDR3 arbiter master 0. Both directions: the save path writes, the
 // restore path reads the window back out and checks it before touching
 // anything.
@@ -560,6 +643,13 @@ wire        ss_ram_idle;
 wire        ss_load_busy;
 wire [`SS_STATE_W-1:0] ss_state_out;
 wire        ss_state_we;
+
+// Outcomes, for the OSD toast. Levels held by ss_ctrl until the next attempt.
+wire        ss_save_ok;
+wire        ss_save_fail;
+wire        ss_load_ok;
+wire        ss_load_fail;
+wire  [3:0] ss_load_fail_code;
 
 // ss_state_fanout's outputs. It runs on clk_sys, which is both the CPU's
 // clock and minimig.v's, so nothing it drives needs a domain crossing.
@@ -874,13 +964,21 @@ sdram_ctrl ram1
 	// happened to leave on its data bus into every chip RAM address the
 	// restore touched -- silently, since the addresses and the handshake
 	// would all still look correct.
-	.cpuWR        (ss_freeze ? ss_sd_wr : ram_din),
-	.cpuAddr      (ss_freeze ? ss_sd_addr  : {2'b00, ram_addr[22:1]}),
-	.cpuU         (ss_freeze ? ss_sd_uds_n : ram_uds),
-	.cpuL         (ss_freeze ? ss_sd_lds_n : ram_lds),
-	.cpustate     (ss_freeze ? ss_sd_state : cpu_state),
-	.cpuCS        (ss_freeze ? ss_sd_cs    : (~zram_sel & ram_cs)),
-	.cache_inhibit(ss_freeze & ss_sd_cache_inhibit),
+	//
+	// ss_port_own, not ss_freeze. See its declaration above: the Kickstart
+	// fingerprint pass on the RESTORE side needs this port while ss_freeze is
+	// still low, by design, and every one of the seven signals has to move
+	// together -- a mux that switched the address but not the chip select, or
+	// the state but not the address, would issue the scan's reads against the
+	// CPU's address or the CPU's cycle against the scan's, and both of those
+	// corrupt a running machine rather than merely failing a restore.
+	.cpuWR        (ss_port_own ? ss_sd_wr     : ram_din),
+	.cpuAddr      (ss_port_own ? ss_sd_addr   : {2'b00, ram_addr[22:1]}),
+	.cpuU         (ss_port_own ? ss_sd_uds_n  : ram_uds),
+	.cpuL         (ss_port_own ? ss_sd_lds_n  : ram_lds),
+	.cpustate     (ss_port_own ? ss_sd_state  : cpu_state),
+	.cpuCS        (ss_port_own ? ss_sd_cs     : (~zram_sel & ram_cs)),
+	.cache_inhibit(ss_port_own & ss_sd_cache_inhibit),
 	.cpuRD        (ram_dout1       ),
 	.ramready     (ram_ready1      ),
 
@@ -1412,12 +1510,10 @@ minimig minimig
 // dump.
 wire       ss_save_req_osd = status[51];
 wire [1:0] ss_slot         = status[53:52];
-// The restore request. status[54] is the next free bit; the OSD row that sets
-// it is Task 7's, and until it exists this reads 0 and nothing happens. It is
-// wired now rather than tied off because tying it off makes the entire restore
-// datapath constant-foldable, which means synthesis proves nothing about it.
-// If Task 7 picks a different bit, change it here as well -- the two have to
-// agree or the row will do nothing.
+// The restore request. status[54] is set by the "Restore state" row on
+// menu.cpp's AmigaCD Settings page (MENU_AMIGACD_SETTINGS1/2, menusub 6). The
+// two have to agree on the bit number or the row does nothing at all and says
+// nothing about it.
 wire       ss_load_req_osd = status[54];
 
 // *** fx68k lockout ***
@@ -1644,20 +1740,22 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 
 	.save_req     (ss_save_req),
 	.save_busy    (ss_save_busy),
-	.save_ok      (),
-	.save_fail    (),
+	// Outcomes. All five are levels, held until the next attempt starts, and
+	// all five reach the user as an OSD toast -- see the ss_info_* block after
+	// this instance. An unconnected outcome makes a refusal silent, which is
+	// the exact failure mode the fail codes exist to remove.
+	.save_ok      (ss_save_ok),
+	.save_fail    (ss_save_fail),
 
-	// The restore path is live: the DDR3 read master below is real, and the
-	// state vector reaches the machine through ss_state_fanout at the bottom
-	// of this file. What is still missing is the OSD row that sets
-	// status[54] and the toast that reports load_fail_code -- both Task 7.
-	// Until then load_req only ever reads 0 in practice, but the datapath is
-	// connected, so synthesis and timing see it.
+	// The restore path is live end to end: the OSD's "Restore state" row sets
+	// status[54], the edge latch above turns it into one request, the DDR3
+	// read master below is real, and the state vector reaches the machine
+	// through ss_state_fanout at the bottom of this file.
 	.load_req     (ss_load_req),
 	.load_busy    (ss_load_busy),
-	.load_ok      (),
-	.load_fail    (),
-	.load_fail_code(),
+	.load_ok      (ss_load_ok),
+	.load_fail    (ss_load_fail),
+	.load_fail_code(ss_load_fail_code),
 
 	.state_in     (ss_state_in),
 	.state_out    (ss_state_out),
@@ -1694,6 +1792,13 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 
 	.chip_base    (24'h000000),
 
+	// Kickstart fingerprint. See SS_KICK_BASE for the derivation and
+	// ss_port_own for the mux this output drives. KICK_WORDS keeps its 512 KB
+	// default, which is exactly the $F80000-$FFFFFF region SS_KICK_BASE points
+	// at.
+	.kick_base    (SS_KICK_BASE),
+	.rom_scan     (ss_rom_scan),
+
 	.sd_addr      (ss_sd_addr),
 	.sd_cs        (ss_sd_cs),
 	.sd_state     (ss_sd_state),
@@ -1718,6 +1823,66 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.ddr_readdatavalid(ss_ddr_readdatavalid),
 	.ddr_waitrequest(ss_ddr_waitrequest)
 );
+
+// --- outcome toast -----------------------------------------------------------
+//
+// Every save and every restore ends by naming what happened, in words, on the
+// OSD. Without this a refusal is a no-op the user cannot tell from a row that
+// did nothing: the fail codes exist precisely so that "it didn't work" can be
+// "this state was made under a different Kickstart", and a code that reaches no
+// display is a code that was never computed.
+//
+// The transport is the framework's own: hps_io latches `info` on a rising edge
+// of `info_req` and holds it until user_io.cpp's once-a-second UIO_INFO_GET
+// poll reads and clears it (hps_io.sv:296,337); show_core_info() then indexes
+// the CONF_STR "I" line by that number and calls Info(). So the strings live in
+// CONF_STR at the top of this file and no host code changes at all -- which
+// matters, because there is no local ARM toolchain to compile host changes
+// against.
+//
+// This runs in clk_sys, hps_io's domain, sampling ss_ctrl's clk_114 levels.
+// Same-PLL 4:1, so these are timed paths and not CDCs -- the same argument
+// ss_dma_busy and cdtv_sec_empty_w already rely on. Levels, not pulses, is what
+// makes sampling at the slower rate sound: each one is held until the next
+// request starts, which is millions of cycles.
+localparam [7:0] SS_INFO_BASE = 8'd13;   // "Save state saved" -- see CONF_STR
+
+reg  [7:0] ss_info_code;
+reg        ss_info_req;
+reg        ss_save_ok_d, ss_save_fail_d, ss_load_ok_d, ss_load_fail_d;
+
+always @(posedge clk_sys) begin
+	ss_info_req    <= 1'b0;
+	ss_save_ok_d   <= ss_save_ok;
+	ss_save_fail_d <= ss_save_fail;
+	ss_load_ok_d   <= ss_load_ok;
+	ss_load_fail_d <= ss_load_fail;
+
+	// At most one of the four can rise on a given cycle: ss_ctrl serves one
+	// request at a time and clears the previous attempt's outcomes when it
+	// takes the next, so the priority below never actually arbitrates.
+	if (ss_save_ok & ~ss_save_ok_d) begin
+		ss_info_code <= SS_INFO_BASE;
+		ss_info_req  <= 1'b1;
+	end
+	else if (ss_save_fail & ~ss_save_fail_d) begin
+		ss_info_code <= SS_INFO_BASE + 8'd1;
+		ss_info_req  <= 1'b1;
+	end
+	else if (ss_load_ok & ~ss_load_ok_d) begin
+		ss_info_code <= SS_INFO_BASE + 8'd2;
+		ss_info_req  <= 1'b1;
+	end
+	else if (ss_load_fail & ~ss_load_fail_d) begin
+		// Codes 1..6 map straight onto the six strings after "restored"; a code
+		// this build does not know about still says something rather than
+		// indexing off the end of the list into silence.
+		ss_info_code <= (ss_load_fail_code >= 4'd1 && ss_load_fail_code <= 4'd6)
+		                ? (SS_INFO_BASE + 8'd2 + {4'd0, ss_load_fail_code})
+		                : (SS_INFO_BASE + 8'd9);
+		ss_info_req  <= 1'b1;
+	end
+end
 
 // --- restore fan-out ---------------------------------------------------------
 //
