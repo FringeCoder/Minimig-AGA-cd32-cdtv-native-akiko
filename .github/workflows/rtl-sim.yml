@@ -21,8 +21,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Icarus Verilog
-        run: sudo apt-get update && sudo apt-get install -y iverilog
+      - name: Install Icarus Verilog and GHDL
+        run: sudo apt-get update && sudo apt-get install -y iverilog ghdl
 
       # sdram_ctrl's chip-read burst path, store-to-load forwarding and byte-enable
       # merging. Waits on dut.sdram_state == 0, so it also covers the registered
@@ -62,3 +62,18 @@ jobs:
           iverilog -g2012 -o tb_ssdiag ../../../hps_ext.v tb_hps_ext_ssdiag.sv
           vvp tb_ssdiag | tee out.log
           grep -q "RUN: PASS" out.log
+
+      # TG68KdotC_Kernel's savestate restore. VHDL, so GHDL rather than Icarus.
+      # The bench boots the kernel from reset vectors, freezes it at 80
+      # successive clocks across one pass of a test program, restores the whole
+      # architectural state through the ss_* write ports and checks that the
+      # CPU comes back at the restored PC. Without ss_resume only a fifth of
+      # those freeze points survive, which is the bug this covers; the run
+      # prints the per-freeze-point map either way.
+      #
+      # Runs from the repo root: the testbench opens its program image by a
+      # path relative to the working directory.
+      - name: TG68K savestate restore
+        run: |
+          set -euo pipefail
+          bash rtl/sim/tg68k/run.sh

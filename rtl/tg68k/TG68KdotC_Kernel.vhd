@@ -171,7 +171,24 @@ entity TG68KdotC_Kernel is
 		-- vector carries; CACR_DC / CACR_DC_owned are a local D-cache
 		-- heuristic and are deliberately left alone.
 		ss_vbr_wr				: in  std_logic := '0';
-		ss_cacr_wr				: in  std_logic := '0'
+		ss_cacr_wr				: in  std_logic := '0';
+
+		-- Save state restore: sequencer re-seed. Pulse for one clock after
+		-- the architectural registers above have been written and before the
+		-- CPU clock enable is released.
+		--
+		-- Those registers are the programmer's model. They are not the CPU.
+		-- state / opcode / last_opc_read / decodeOPC / endOPC / execOPC /
+		-- nextpass / micro_state and friends say which part of which
+		-- instruction is in flight; a restore that leaves them alone resumes
+		-- in the middle of an instruction belonging to a different moment,
+		-- with a register file and a PC from yet another one.
+		--
+		-- Reset has the same problem and solves it by seeding a known
+		-- sequencer state rather than restoring one. ss_resume does the same
+		-- thing with a different seed; see the Reset branch of the "PC Calc +
+		-- fetch opcode" process for how, and why the seed differs.
+		ss_resume				: in  std_logic := '0'
 		);
 end TG68KdotC_Kernel;
 
@@ -821,6 +838,17 @@ PROCESS (clk)
 				use_direct_data <= '0';
 				Z_error <= '0';
 				writePCnext <= '0';
+			-- Save state restore: see the sequencer re-seed in the "PC Calc +
+			-- fetch opcode" process. These stage an operand across the clocks
+			-- of one instruction, so they mean nothing once the instruction
+			-- they belonged to is abandoned.
+			ELSIF ss_resume='1' THEN
+				store_in_tmp    <= '0';
+				direct_data     <= '0';
+				use_direct_data <= '0';
+				useStackframe2  <= '0';
+				Z_error         <= '0';
+				writePCnext     <= '0';
 			ELSIF clkena_lw='1' THEN
 				useStackframe2<='0';
 				direct_data <= '0';
@@ -1331,10 +1359,74 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					END IF;
 				END IF;	
 			END IF;	
+			-- Save state restore: sequencer re-seed.
+			--
+			-- Everything the savestate vector carries -- D0-D7, A0-A7, PC, SR,
+			-- USP, VBR, CACR -- is architectural state. None of it says where the
+			-- CPU is inside an instruction. state, opcode, last_opc_read,
+			-- decodeOPC, endOPC, execOPC, nextpass, micro_state and exec do, and
+			-- after a restore they are still describing whichever instruction was
+			-- in flight when the machine was frozen -- an instruction belonging to
+			-- a different moment than the register file and the PC now do.
+			--
+			-- Reset has the same problem and does not solve it by restoring those
+			-- signals: it seeds a synthesised "movea.l (0).l,a7 / jmp nn.l" with
+			-- PC=4, so the CPU starts from a sequencer state the designer picked
+			-- rather than one it happened to be in. This is the same trick with
+			-- the one seed a restore needs: reset's seed goes where the long at
+			-- address 4 points, and a restore has to go to the restored PC.
+			--
+			-- The seed is a nop that has just been fetched:
+			--
+			--   state="01"   no bus cycle this clock. The fetch address is not
+			--                TG68_PC but memaddr_delta_rega, which is loaded from
+			--                TG68_PC_add one clock earlier (and only while
+			--                clkena_in is high, so the restore window cannot have
+			--                loaded it). Spending a clock in "01" is what gives it
+			--                time to be recomputed from the restored PC. Reset
+			--                spends its first clock in "01" for exactly this.
+			--
+			--   opcode and last_opc_read = nop
+			--                decoding a nop asks for nothing, so the next step is
+			--                setstate="00": fetch code at the restored PC. Because
+			--                state/="00" on that clock the kernel takes its next
+			--                opcode from last_opc_read rather than from the bus,
+			--                which is why that has to be a nop as well -- the same
+			--                reason reset puts its jmp in last_opc_read.
+			--
+			--   the rest    cleared to exactly what reset clears it to.
+			--
+			-- TG68_PC is deliberately not written here. ss_pc_wr above already
+			-- holds the restored PC and the controller strobes it first; driving
+			-- it from two places would just be a second thing to keep in step.
+			IF Reset='0' AND ss_resume='1' THEN
+				state           <= "01";
+				addrvalue       <= '0';
+				opcode          <= X"4E71";			--nop
+				last_opc_read   <= X"4E71";			--nop
+				decodeOPC       <= '0';
+				endOPC          <= '0';
+				execOPC         <= '0';
+				nextpass        <= '0';
+				interrupt       <= '0';
+				trap_interrupt  <= '0';
+				trap_trace      <= '0';
+				trap_berr       <= '0';
+				make_berr       <= '0';
+				stop            <= '0';
+				rot_cnt         <= "000001";
+				TG68_PC_word    <= '0';
+				writePCbig      <= '0';
+				Suppress_Base   <= '0';
+				memmask         <= "111111";
+				exec_write_back <= '0';
+			END IF;
 		END IF;	
 	
 		IF rising_edge(clk) THEN
 			IF Reset = '1' THEN
+				PCbase <= '1';
+			ELSIF ss_resume='1' THEN
 				PCbase <= '1';
 			ELSIF clkena_lw='1' THEN
 				PCbase <= set_PCbase OR PCbase;
@@ -1356,6 +1448,16 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				END IF;	
 				exec(get_2ndOPC) <= set(get_2ndOPC) OR setopcode;
 			END IF;	
+			-- Save state restore: see the sequencer re-seed above. exec holds
+			-- the decoded microcode of the instruction that was in flight.
+			-- Reset gets away with leaving it alone because at power-on it is
+			-- don't-care; after a restore it is not. exec(directPC) or
+			-- exec(ea_to_pc) still set would overwrite the restored PC on the
+			-- first enabled clock, before a single instruction had run.
+			IF Reset='0' AND ss_resume='1' THEN
+				exec     <= (OTHERS => '0');
+				exec_tas <= '0';
+			END IF;
 		END IF;	
 	END PROCESS;
 	
@@ -3333,6 +3435,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		IF rising_edge(clk) THEN
 	        IF Reset='1' THEN
 				micro_state <= ld_nn;
+			-- Save state restore: see the sequencer re-seed in the "PC Calc +
+			-- fetch opcode" process. Reset seeds ld_nn because its seed opcode
+			-- is part-way through an absolute-long operand fetch. The nop seed
+			-- used for a restore is not part-way through anything.
+			ELSIF ss_resume='1' THEN
+				micro_state <= idle;
 			ELSIF clkena_lw='1' THEN
 				trapd <= trapmake;
 				micro_state <= next_micro_state;
