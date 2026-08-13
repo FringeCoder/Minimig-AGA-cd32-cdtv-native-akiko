@@ -346,7 +346,15 @@ wire        arb_chip_dma;
 wire [15:0] arb_chip_wr;
 
 wire [35:0] EXT_BUS;
-hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata));
+
+// Save state diagnostics, published on hps_ext's 0xF600 UIO read
+// sub-channel. Assembled at the bottom of the save state section below;
+// declared here because the `.*` connection needs the net to exist, and
+// connected by name rather than left to `.*` so the instance says out loud
+// that this port is wired.
+wire [127:0] ss_diag;
+
+hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata), .ss_diag(ss_diag));
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
@@ -650,6 +658,11 @@ wire        ss_save_fail;
 wire        ss_load_ok;
 wire        ss_load_fail;
 wire  [3:0] ss_load_fail_code;
+
+// ss_ctrl's diagnostic ports. Observation only; see the ss_diag block at
+// the end of this section.
+wire  [5:0] ss_dbg_state;
+wire [23:0] ss_dbg_idx;
 
 // ss_state_fanout's outputs. It runs on clk_sys, which is both the CPU's
 // clock and minimig.v's, so nothing it drives needs a domain crossing.
@@ -1821,7 +1834,10 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.ddr_read     (ss_ddr_read),
 	.ddr_readdata (ss_ddr_readdata),
 	.ddr_readdatavalid(ss_ddr_readdatavalid),
-	.ddr_waitrequest(ss_ddr_waitrequest)
+	.ddr_waitrequest(ss_ddr_waitrequest),
+
+	.dbg_state    (ss_dbg_state),
+	.dbg_idx      (ss_dbg_idx)
 );
 
 // --- outcome toast -----------------------------------------------------------
@@ -1901,6 +1917,145 @@ always @(posedge clk_sys) begin
 		ss_info_req  <= 1'b1;
 	end
 end
+
+// --- diagnostic readback -----------------------------------------------------
+//
+// Everything above this line is invisible from userspace. A save that never
+// started, a restore refused at its first gate, a restore that ran the whole
+// sequence and then crashed the Amiga, and a toast that was raised and never
+// displayed all present identically: nothing on screen and nothing in any log.
+// This block publishes enough of ss_ctrl's internals -- and of this file's own
+// toast request -- to tell those apart, on hps_ext's 0xF600 UIO read
+// sub-channel. support/minimig/minimig_ssdiag.cpp polls it and logs changes to
+// /tmp/ss_dbg.log.
+//
+// WHY THE AGGREGATION IS IN RTL. ss_ctrl runs at 113.5 MHz and most of the
+// states it passes through last a handful of clocks. A poller sampling
+// dbg_state alone would see S_IDLE essentially always, and would report
+// "nothing happened" for a restore that ran to the last gate and was refused
+// there. So the last non-idle state and a state-change counter are latched
+// here, at the rate the events actually happen. The counter is what separates a
+// stalled controller (state stuck, counter stuck) from a busy one (state stuck,
+// counter climbing) from one that was never asked (both at their reset values).
+//
+// It is deliberately independent of info_req. That path is one of the things
+// being diagnosed, and a diagnostic carried on the channel it is meant to
+// diagnose cannot tell its own silence from the fault.
+//
+// Cheap enough to leave in: two counters, two latches, one 64-bit
+// synchroniser, no logic in any path ss_ctrl depends on, and a read that
+// hps_ext answers from a byte_cnt mux with no side effects at all.
+
+// --- clk_114 side ---
+reg  [5:0]  ss_dbg_last;      // last state that was not S_IDLE
+reg  [5:0]  ss_dbg_state_d;
+reg  [15:0] ss_dbg_seq;       // one increment per ss_ctrl state change
+reg  [7:0]  ss_dbg_ffall;     // falling edges of freeze
+reg         ss_dbg_freeze_d;
+
+always @(posedge clk_114) begin
+	if (reset_d) begin
+		ss_dbg_last     <= 6'd0;
+		ss_dbg_state_d  <= 6'd0;
+		ss_dbg_seq      <= 16'd0;
+		ss_dbg_ffall    <= 8'd0;
+		ss_dbg_freeze_d <= 1'b0;
+	end
+	else begin
+		ss_dbg_state_d  <= ss_dbg_state;
+		ss_dbg_freeze_d <= ss_freeze;
+
+		if (ss_dbg_state != ss_dbg_state_d) ss_dbg_seq <= ss_dbg_seq + 16'd1;
+
+		// S_IDLE is 0, and ss_ctrl returns to it whether it finished, refused
+		// or failed -- so the live state says nothing at all once an attempt is
+		// over. This is the register that makes a refusal legible after the
+		// fact.
+		if (ss_dbg_state != 6'd0) ss_dbg_last <= ss_dbg_state;
+
+		// The restore's own invariant, counted rather than assumed: the freeze
+		// must fall exactly once per restore (see ss_ctrl.v's S_L_RELEASE). More
+		// than once means the Amiga ran for a few instructions against a machine
+		// that was half old and half new, which is a live candidate explanation
+		// for a restore that completes and then crashes.
+		if (!ss_freeze && ss_dbg_freeze_d) ss_dbg_ffall <= ss_dbg_ffall + 8'd1;
+	end
+end
+
+// --- clk_sys side ---
+//
+// The toast path, watched from inside hps_io's own clock domain. ss_info_cnt
+// counts every request this file has raised since reset and ss_info_last holds
+// the code the most recent one carried: that is the "did the core ever ask?"
+// half of the toast question. The other half -- did the host see it -- is
+// answered by minimig_ssdiag.cpp logging what UIO_INFO_GET returned, into the
+// same file on the same timeline.
+//
+// ss_info_code is assigned on the same clk_sys edge that raises ss_info_req, so
+// by the time this block sees the request high, the code beside it is the one
+// that request carries.
+reg [7:0] ss_info_cnt   = 8'd0;
+reg [7:0] ss_info_last  = 8'd0;
+
+// ss_state_fanout completions. A restore whose register writeback never
+// finished leaves the CPU running with someone else's PC, which the state
+// vector's own progress cannot show. ack is a LEVEL held until req drops (see
+// ss_state_fanout below), so this counts its rising edge, not its cycles.
+reg [7:0] ss_fanout_cnt = 8'd0;
+reg       ss_fanout_ack_d = 1'b0;
+
+always @(posedge clk_sys) begin
+	ss_fanout_ack_d <= ss_fanout_ack;
+	if (ss_info_req) begin
+		ss_info_cnt  <= ss_info_cnt + 8'd1;
+		ss_info_last <= ss_info_code;
+	end
+	if (ss_fanout_ack && !ss_fanout_ack_d) ss_fanout_cnt <= ss_fanout_cnt + 8'd1;
+end
+
+// --- crossing ---
+//
+// clk_114 to clk_sys, the same 4:1 same-PLL relationship the outcome sampler
+// above documents. Double-registered anyway, and as ONE vector rather than
+// field by field, so a sample taken across a change is at worst one stale
+// snapshot of a consistent set rather than a mixture of two moments. These are
+// diagnostics: a stale sample costs one log line, and the poller only logs on
+// change, so a torn value could not be mistaken for a sequence.
+wire [63:0] ss_dbg114 = { ss_rom_scan, ss_freeze, ss_load_busy, ss_save_busy,
+                          ss_dbg_ffall, ss_dbg_idx, ss_dbg_seq,
+                          ss_dbg_last, ss_dbg_state };
+
+reg [63:0] ss_dbg_meta = 64'd0;
+reg [63:0] ss_dbg_sync = 64'd0;
+always @(posedge clk_sys) begin
+	ss_dbg_meta <= ss_dbg114;
+	ss_dbg_sync <= ss_dbg_meta;
+end
+
+wire [5:0]  ss_dg_state = ss_dbg_sync[5:0];
+wire [5:0]  ss_dg_last  = ss_dbg_sync[11:6];
+wire [15:0] ss_dg_seq   = ss_dbg_sync[27:12];
+wire [23:0] ss_dg_idx   = ss_dbg_sync[51:28];
+wire [7:0]  ss_dg_ffall = ss_dbg_sync[59:52];
+wire [3:0]  ss_dg_flags = ss_dbg_sync[63:60];  // {rom_scan, freeze, load_busy, save_busy}
+
+// The window, low word first. hps_ext presents ss_diag[15:0] as the first word
+// after the signature, so the last term of this concatenation is word 0.
+// minimig_ssdiag.cpp decodes exactly this layout; SS_DIAG_VERSION is bumped if
+// it ever changes, so a poller and a core that disagree say so instead of
+// printing a confident wrong answer.
+localparam [15:0] SS_DIAG_VERSION = 16'h0001;
+
+assign ss_diag = {
+	SS_DIAG_VERSION,                                    // w7: layout version
+	ss_info_cnt, ss_info_last,                          // w6: toast requests / last code
+	ss_dg_ffall, ss_fanout_cnt,                         // w5: freeze falls / fanout completions
+	{8'd0, ss_dg_idx[23:16]},                           // w4: progress index, high
+	ss_dg_idx[15:0],                                    // w3: progress index, low
+	ss_dg_seq,                                          // w2: state-change counter
+	{4'd0, ss_dg_flags, ss_code_sync, ss_out_sync},     // w1: flags / fail code / outcomes
+	{2'd0, ss_dg_last, 2'd0, ss_dg_state}               // w0: last state / live state
+};
 
 // --- restore fan-out ---------------------------------------------------------
 //

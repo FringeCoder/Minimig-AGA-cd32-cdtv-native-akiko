@@ -104,7 +104,24 @@ module hps_ext
 	output reg        cdtv_cs,
 	output reg        cdtv_cs_sec,     // sector-push sub-channel
 	output reg        cdtv_cs_stch,    // STCH-inject sub-channel
-	input             cdtv_req         // bit 6 of status word
+	input             cdtv_req,        // bit 6 of status word
+
+	// Save state diagnostics -- UIO class 0xF600 = io_din[15:9] == 7'b1111011.
+	//
+	// A read-only status window, eight 16-bit words wide, assembled in
+	// Minimig.sv from ss_ctrl's diagnostic ports and its own outcome
+	// synchronisers. support/minimig/minimig_ssdiag.cpp polls it and logs
+	// every change to /tmp/ss_dbg.log.
+	//
+	// It deliberately does NOT ride the info_req / UIO_INFO_GET path the OSD
+	// toast uses, because that path is one of the things being diagnosed. A
+	// window that shared it could not tell "the core never raised the
+	// request" from "the core raised it and no toast appeared", which is the
+	// first question it has to answer.
+	//
+	// 7'b1111011 is the one free class in the range: ide is 1111000, cdda
+	// 1111001, akiko 1111010 and cdtv 1111100.
+	input     [127:0] ss_diag
 );
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
@@ -128,6 +145,11 @@ localparam UIO_SET_VPOS  = 'h2D;
 reg [15:0] io_dout;
 reg        dout_en;
 reg  [4:0] byte_cnt;
+// Save state diagnostics chip select. Module level rather than local to
+// main_proc below only so it needs no declaration initialiser: the ~io_uio
+// branch clears it at the end of every transaction, which is before any read
+// can reach it.
+reg        ss_diag_cs;
 
 always@(posedge clk_sys) begin : main_proc
 	reg [15:0] cmd;
@@ -155,6 +177,7 @@ always@(posedge clk_sys) begin : main_proc
 		cdtv_cs <= 0;
 		cdtv_cs_sec <= 0;
 		cdtv_cs_stch <= 0;
+		ss_diag_cs <= 0;
 		if(cmd == 'h2D) sset <= 1;
 	end
 	else if(io_strobe) begin
@@ -183,6 +206,9 @@ always@(posedge clk_sys) begin : main_proc
 			cdtv_cs_sec      <= (io_din[15:9] == 7'b1111100) && !io_din[7] && !io_din[6] &&  io_din[5];
 			// CDTV STCH inject sub-channel — io_din[7]=0, io_din[6]=1.
 			cdtv_cs_stch     <= (io_din[15:9] == 7'b1111100) && !io_din[7] &&  io_din[6];
+			// Save state diagnostics. Read-only, so there is no write-side
+			// counterpart and no sub-channel bit to be exclusive against.
+			ss_diag_cs       <= (io_din[15:9] == 7'b1111011);
 		end
 
 		if(byte_cnt == 0) begin
@@ -289,6 +315,34 @@ always@(posedge clk_sys) begin : main_proc
 					if(byte_cnt >= 3 && (cdtv_cs | cdtv_cs_stch | cdtv_cs_sec)) begin
 						io_dout <= cdtv_din;
 						cdtv_rd <= 1;
+					end
+					// Save state diagnostics. No strobe and no state of its own:
+					// the words are muxed straight off byte_cnt the way
+					// UIO_GET_VMODE is, so a read cannot disturb what it is
+					// observing. That matters more here than it would elsewhere --
+					// this channel exists to watch a save state, and a readback
+					// that perturbed ss_ctrl would be measuring itself.
+					//
+					// Word 0 is a fixed signature rather than data. Against a core
+					// built before this channel existed, cmd 'h62 still raises
+					// dout_en and io_dout simply reads back zero -- so a poller with
+					// nothing to check would log a plausible all-zero state forever
+					// instead of saying the channel is absent. It is also how
+					// userspace proves its own read alignment rather than assuming
+					// it: see minimig_ssdiag.cpp's signature search.
+					if(byte_cnt >= 3 && ss_diag_cs) begin
+						case(byte_cnt)
+							5'd3:  io_dout <= 16'h55AA;
+							5'd4:  io_dout <= ss_diag[15:0];
+							5'd5:  io_dout <= ss_diag[31:16];
+							5'd6:  io_dout <= ss_diag[47:32];
+							5'd7:  io_dout <= ss_diag[63:48];
+							5'd8:  io_dout <= ss_diag[79:64];
+							5'd9:  io_dout <= ss_diag[95:80];
+							5'd10: io_dout <= ss_diag[111:96];
+							5'd11: io_dout <= ss_diag[127:112];
+							default: io_dout <= 16'd0;
+						endcase
 					end
 				end
 			endcase

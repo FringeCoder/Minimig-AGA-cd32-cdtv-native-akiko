@@ -50,3 +50,15 @@ jobs:
             dpram_sim.v ../../cpu_cache_new.v tb_cache_snoop.sv
           vvp tb_snoop | tee out.log
           grep -q "RUN: PASS" out.log
+
+      # hps_ext's save state diagnostic sub-channel (UIO class 0xF600). Drives
+      # EXT_BUS the way sys/hps_io.sv does and checks the word order and class
+      # decode against the real module, because the byte_cnt alignment the host
+      # poller depends on is a convention that appears nowhere in the source.
+      - name: hps_ext save state diagnostics
+        run: |
+          set -euo pipefail
+          cd rtl/sim/hps_ext
+          iverilog -g2012 -o tb_ssdiag ../../../hps_ext.v tb_hps_ext_ssdiag.sv
+          vvp tb_ssdiag | tee out.log
+          grep -q "RUN: PASS" out.log
