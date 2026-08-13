@@ -1849,36 +1849,54 @@ localparam [7:0] SS_INFO_BASE = 8'd13;   // "Save state saved" -- see CONF_STR
 
 reg  [7:0] ss_info_code;
 reg        ss_info_req;
-reg        ss_save_ok_d, ss_save_fail_d, ss_load_ok_d, ss_load_fail_d;
+// ss_ctrl runs on clk_114; this block runs on clk_sys at 28.6 MHz, so its four
+// outcome signals are a clock-domain crossing. They used to be sampled straight
+// into the edge-detect flops with no synchroniser at all.
+//
+// Two things had to be true for a toast to appear and neither was. The outcome
+// had to be a LEVEL -- a single 8.8 ns clk_114 pulse is invisible to a 35 ns
+// sampler, and ss_ctrl's save_ok was exactly that until it was changed to hold
+// until the next save. And the crossing had to be synchronised. Measured on
+// hardware: the core's toast never fired for either a save or a restore, so a
+// restore that validated and refused looked identical to one that never ran.
+//
+// The fail code comes from its own synchronised copy. It is set in the same
+// clk_114 cycle as load_fail and held just as long, so by the time the
+// synchronised flag edge arrives it has been stable for two clk_sys cycles.
+reg  [3:0] ss_out_meta, ss_out_sync, ss_out_d;
+reg  [3:0] ss_code_meta, ss_code_sync;
 
 always @(posedge clk_sys) begin
-	ss_info_req    <= 1'b0;
-	ss_save_ok_d   <= ss_save_ok;
-	ss_save_fail_d <= ss_save_fail;
-	ss_load_ok_d   <= ss_load_ok;
-	ss_load_fail_d <= ss_load_fail;
+	ss_info_req  <= 1'b0;
+
+	ss_out_meta  <= {ss_load_fail, ss_load_ok, ss_save_fail, ss_save_ok};
+	ss_out_sync  <= ss_out_meta;
+	ss_out_d     <= ss_out_sync;
+
+	ss_code_meta <= ss_load_fail_code;
+	ss_code_sync <= ss_code_meta;
 
 	// At most one of the four can rise on a given cycle: ss_ctrl serves one
 	// request at a time and clears the previous attempt's outcomes when it
 	// takes the next, so the priority below never actually arbitrates.
-	if (ss_save_ok & ~ss_save_ok_d) begin
+	if (ss_out_sync[0] & ~ss_out_d[0]) begin
 		ss_info_code <= SS_INFO_BASE;
 		ss_info_req  <= 1'b1;
 	end
-	else if (ss_save_fail & ~ss_save_fail_d) begin
+	else if (ss_out_sync[1] & ~ss_out_d[1]) begin
 		ss_info_code <= SS_INFO_BASE + 8'd1;
 		ss_info_req  <= 1'b1;
 	end
-	else if (ss_load_ok & ~ss_load_ok_d) begin
+	else if (ss_out_sync[2] & ~ss_out_d[2]) begin
 		ss_info_code <= SS_INFO_BASE + 8'd2;
 		ss_info_req  <= 1'b1;
 	end
-	else if (ss_load_fail & ~ss_load_fail_d) begin
+	else if (ss_out_sync[3] & ~ss_out_d[3]) begin
 		// Codes 1..6 map straight onto the six strings after "restored"; a code
 		// this build does not know about still says something rather than
 		// indexing off the end of the list into silence.
-		ss_info_code <= (ss_load_fail_code >= 4'd1 && ss_load_fail_code <= 4'd6)
-		                ? (SS_INFO_BASE + 8'd2 + {4'd0, ss_load_fail_code})
+		ss_info_code <= (ss_code_sync >= 4'd1 && ss_code_sync <= 4'd6)
+		                ? (SS_INFO_BASE + 8'd2 + {4'd0, ss_code_sync})
 		                : (SS_INFO_BASE + 8'd9);
 		ss_info_req  <= 1'b1;
 	end
