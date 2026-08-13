@@ -674,6 +674,7 @@ wire        ss_fanout_sr_wr;
 wire        ss_fanout_usp_wr;
 wire        ss_fanout_vbr_wr;
 wire        ss_fanout_cacr_wr;
+wire        ss_fanout_resume;
 wire  [3:0] ss_fanout_map_in;
 wire        ss_fanout_map_we;
 wire        ss_fanout_busy;
@@ -873,6 +874,7 @@ cpu_wrapper cpu_wrapper
 	.ss_usp_wr    (ss_fanout_usp_wr  ),
 	.ss_vbr_wr    (ss_fanout_vbr_wr  ),
 	.ss_cacr_wr   (ss_fanout_cacr_wr ),
+	.ss_resume    (ss_fanout_resume  ),
 	.fastramcfg   (memcfg[6:4]     ),
 	.bootrom      (bootrom         ),
 
@@ -2095,6 +2097,7 @@ ss_state_fanout #(.STATE_W(`SS_STATE_W)) ss_fanout
 	.cpu_usp_wr   (ss_fanout_usp_wr),
 	.cpu_vbr_wr   (ss_fanout_vbr_wr),
 	.cpu_cacr_wr  (ss_fanout_cacr_wr),
+	.cpu_resume   (ss_fanout_resume),
 
 	.map_in       (ss_fanout_map_in),
 	.map_we       (ss_fanout_map_we),
@@ -2614,6 +2617,13 @@ module ss_state_fanout
 	output reg                cpu_usp_wr,
 	output reg                cpu_vbr_wr,
 	output reg                cpu_cacr_wr,
+	// Sequencer re-seed. Strobed once, after every register above has
+	// landed and while cpu_wrapper still has the CPU parked (busy is still
+	// high on this cycle). Restoring the programmer's model without this
+	// resumes the CPU part-way through whatever instruction it was frozen
+	// in -- see TG68KdotC_Kernel.vhd's ss_resume comment, and the freeze
+	// point scan in rtl/sim/tg68k/tg68k_ss_tb.vhd for what that does.
+	output reg                cpu_resume,
 
 	// Gary memory map, via minimig.v. Bit order is ss_map's, both ways.
 	output reg  [3:0]         map_in,
@@ -2686,7 +2696,8 @@ localparam [4:0] STEP_USP  = 5'd18;
 localparam [4:0] STEP_VBR  = 5'd19;
 localparam [4:0] STEP_CACR = 5'd20;
 localparam [4:0] STEP_MAP  = 5'd21;
-localparam [4:0] STEP_LAST = STEP_MAP;
+localparam [4:0] STEP_RES  = 5'd22;
+localparam [4:0] STEP_LAST = STEP_RES;
 
 reg [4:0] step;
 reg       running;
@@ -2705,6 +2716,7 @@ always @(posedge clk) begin
 		cpu_vbr_wr   <= 1'b0;
 		cpu_cacr_wr  <= 1'b0;
 		map_we       <= 1'b0;
+		cpu_resume   <= 1'b0;
 	end
 	else begin
 		// Every enable is a one-cycle pulse. The data bus and the index are
@@ -2717,6 +2729,7 @@ always @(posedge clk) begin
 		cpu_vbr_wr  <= 1'b0;
 		cpu_cacr_wr <= 1'b0;
 		map_we      <= 1'b0;
+		cpu_resume  <= 1'b0;
 
 		if (!running) begin
 			// ack is held until req drops, so the clk_114 side sees it
@@ -2743,6 +2756,9 @@ always @(posedge clk) begin
 				map_in <= {ss_ovl, ss_rom_readonly, ss_sel_kick1mb, ss_sel_kick256kmirror};
 				map_we <= 1'b1;
 			end
+			// Last, and after STEP_PC: the re-seed leaves TG68_PC alone and
+			// starts the CPU fetching from whatever it already holds.
+			STEP_RES:  cpu_resume <= 1'b1;
 			default: begin
 				cpu_wr_index <= step[3:0];
 				cpu_wr_data  <= reg_sel;

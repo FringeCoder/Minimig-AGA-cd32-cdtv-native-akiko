@@ -81,6 +81,10 @@ module cpu_wrapper
 	// data from ss_wr_data; CACR uses [3:0], which is all the vector carries.
 	input             ss_vbr_wr,
 	input             ss_cacr_wr,
+	// Sequencer re-seed, pulsed once after the writes above and before the
+	// hold is released. The architectural registers on their own are not a
+	// restore -- see the ss_resume comment in TG68KdotC_Kernel.vhd.
+	input             ss_resume,
 
 	output reg [23:1] chip_addr,
 	input      [15:0] chip_dout,
@@ -345,7 +349,8 @@ cpu_inst_p
   .ss_sr_wr(ss_sr_wr),
   .ss_usp_wr(ss_usp_wr),
   .ss_vbr_wr(ss_vbr_wr),
-  .ss_cacr_wr(ss_cacr_wr)
+  .ss_cacr_wr(ss_cacr_wr),
+  .ss_resume(ss_resume)
 );
 
 // VBR and CACR are already brought out of the kernel for the memory map, so
