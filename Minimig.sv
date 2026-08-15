@@ -245,6 +245,7 @@ wire        arb_chip_u;
 wire        arb_chip_rw;
 wire        arb_chip_dma;
 wire [15:0] arb_chip_wr;
+wire        cpu_chip_slot_req;  // prevent-the-steal: CPU owns an SRAM chip slot (minimig -> chipdma_arb)
 
 wire [35:0] EXT_BUS;
 
@@ -1211,6 +1212,7 @@ sdram_ctrl ram1
 chipdma_arb chipdma_arb
 (
 	.clk             (clk_sys              ),
+	.cpu_chip_slot_req(cpu_chip_slot_req   ),  // prevent-the-steal: do not preempt CPU chip slot
 	.reset           (reset_d              ),
 	.c_7m            (c1                   ),
 
@@ -1721,7 +1723,9 @@ minimig minimig
 	.ss_vbl_int           (ss_beam_vbl_int      ),
 	.ss_htotal            (ss_beam_htotal       ),
 	.ss_varbeamen         (ss_beam_varbeamen    ),
-	.ss_harddis           (ss_beam_harddis      )
+	.ss_harddis           (ss_beam_harddis      ),
+
+	.cpu_chip_slot_req    (cpu_chip_slot_req    )  // prevent-the-steal -> chipdma_arb
 );
 
 //////////////////////////  SAVE STATES (phase 1A)  /////////////////////////

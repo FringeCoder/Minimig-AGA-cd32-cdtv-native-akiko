@@ -430,7 +430,12 @@ module minimig
 	output         ss_vbl_int,
 	output   [8:0] ss_htotal,
 	output         ss_varbeamen,
-	output         ss_harddis
+	output         ss_harddis,
+
+	// prevent-the-steal (D-Cache-OFF chipRD read race): CPU-owns-an-SRAM-slot
+	// intent, phase-stable at c_7m_rise. chipdma_arb masks its arm with this so
+	// it never preempts the chip slot the cacheless CPU is about to read.
+	output        cpu_chip_slot_req
 );
 
 
@@ -621,6 +626,11 @@ wire        host_ack;
 
 wire        sys_reset;    		//reset output from minimig_syscontrol.v
 wire        rom_readonly; 		//writeprotect $f8-ff in gary.v
+
+// prevent-the-steal: assert when the CPU owns the bus (~dbr) and is running an
+// address cycle (~_cpu_as) into an SRAM-backed bank (|bank). Phase-stable across
+// the c_7m_rise arming instant, unlike the cck-phase strobes minimig_idle keys on.
+assign cpu_chip_slot_req = ~dbr & ~_cpu_as & (|bank);
 
 wire        reset = sys_reset | ~_cpu_reset_in; // both tg68k and minimig_syscontrol hold the reset signal for some clicks
 
