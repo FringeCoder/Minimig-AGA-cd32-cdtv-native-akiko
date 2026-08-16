@@ -42,6 +42,7 @@ set_global_assignment -name VERILOG_FILE rtl/ss_quiesce.v
 set_global_assignment -name VERILOG_FILE rtl/ss_serdes.v
 set_global_assignment -name VERILOG_FILE rtl/ss_dma.v
 set_global_assignment -name VERILOG_FILE rtl/ss_ctrl.v
+set_global_assignment -name VERILOG_FILE rtl/ss_regshadow.v
 set_global_assignment -name VERILOG_FILE hps_ext.v
 set_global_assignment -name VERILOG_FILE rtl/cdda.v
 set_global_assignment -name SDC_FILE Minimig.sdc

@@ -564,6 +564,50 @@ wire        ss_audio_busy;
 // raised by hardware as well as by the CPU, so it has to be read, not inferred.
 wire [14:0] ss_intreq;
 
+// Custom chipset register shadow. Most Amiga custom registers are write-only in
+// hardware and this core is faithful about that, so they cannot be exported the
+// way the CPU's register file was -- but every write to them passes through the
+// two wires minimig.v routes to agnus, paula, denise and both CIAs. The shadow
+// snoops those and replays them back through the same buses.
+//
+// Instantiated here rather than inside minimig.v so all the save state logic
+// stays next to ss_ctrl, which owns the freeze and the ordering.
+wire  [8:1] ss_rga_addr;
+wire [15:0] ss_rga_data;
+wire        ss_replay_we;
+wire  [8:1] ss_replay_addr;
+wire [15:0] ss_replay_data;
+wire        ss_replay_active;
+wire        ss_replay_done;
+wire [15:0] ss_shadow_data;
+wire        ss_shadow_writable;
+wire        ss_shadow_setclear;
+
+// Driven by ss_ctrl once the payload carries the shadow section; tied off until
+// then so the module is snoop-only and cannot drive the bus.
+wire        ss_replay_start = 1'b0;
+wire  [7:0] ss_shadow_rd    = 8'd0;
+
+ss_regshadow ss_regshadow_inst
+(
+	.clk            (clk_sys           ),
+	.clk7_en        (clk7_en           ),
+	.rst_n          (~reset_d          ),
+	.reg_address_in (ss_rga_addr       ),
+	.data_in        (ss_rga_data       ),
+	.rd_addr        (ss_shadow_rd      ),
+	.rd_data        (ss_shadow_data    ),
+	.rd_writable    (ss_shadow_writable),
+	.rd_setclear    (ss_shadow_setclear),
+	.replay_start   (ss_replay_start   ),
+	.intreq_in      (ss_intreq         ),
+	.replay_active  (ss_replay_active  ),
+	.replay_we      (ss_replay_we      ),
+	.replay_addr    (ss_replay_addr    ),
+	.replay_data    (ss_replay_data    ),
+	.replay_done    (ss_replay_done    )
+);
+
 // From chipdma_arb: a bridge (Akiko / CDTV) chip-RAM slot is armed or in
 // flight. Joins cpu_boundary so the freeze is never taken with a bridge
 // write half-committed; the ss_freeze_7m hold on the arbiter keeps new ones
@@ -1526,6 +1570,11 @@ minimig minimig
 	.ss_disk_busy         (ss_disk_busy         ),
 	.ss_audio_busy        (ss_audio_busy        ),
 	.ss_intreq            (ss_intreq            ),
+	.ss_rga_addr          (ss_rga_addr          ),
+	.ss_rga_data          (ss_rga_data          ),
+	.ss_replay_we         (ss_replay_we         ),
+	.ss_replay_addr       (ss_replay_addr       ),
+	.ss_replay_data       (ss_replay_data       ),
 	.ss_map               (ss_map               ),
 	// Restore side of the same four bits, in the same bit order. minimig.v
 	// applies [3] to ovl and [2] to gary's rom_readonly; [1:0] are

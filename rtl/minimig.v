@@ -366,6 +366,16 @@ module minimig
 	// from bus writes, but not this one: Paula raises its bits in hardware, so
 	// an accumulator built from writes drifts within a frame.
 	output [14:0] ss_intreq,
+
+	// Save state: the custom chipset register bus, tapped and overridable.
+	// Every chipset register write in the machine is ss_rga_data on ss_rga_addr
+	// at a clk7_en tick; ss_regshadow (instantiated up in Minimig.sv, next to
+	// ss_ctrl) records them and drives the replay inputs to write them back.
+	output  [8:1] ss_rga_addr,
+	output [15:0] ss_rga_data,
+	input         ss_replay_we,
+	input   [8:1] ss_replay_addr,
+	input  [15:0] ss_replay_data,
 	// Gary's memory map state, in the order ss_state.vh expects:
 	// {ovl, rom_readonly, sel_kick1mb, sel_kick256kmirror}.
 	output  [3:0] ss_map,
@@ -391,7 +401,18 @@ wire [15:0] cpu_data_in;		//cpu data bus in
 wire [15:0] cpu_data_out;	   //cpu data bus out
 wire [15:0] ram_data_in;		//ram data bus in
 wire [15:0] ram_data_out;	   //ram data bus out
-wire [15:0] custom_data_in;	//custom chips data bus in
+wire [15:0] custom_data_in_gary;	//custom chips data bus in, as gary drives it
+
+// The two buses every chipset module sees. Normally straight through from
+// agnus and gary; during a save state replay ss_regshadow drives them instead,
+// which is indistinguishable to the chipset because an address and a value on
+// a clk7_en tick is exactly what a CPU or copper write is.
+//
+// Muxed on ss_replay_we, NOT on a replay-active level: the replay sequencer
+// skips every excluded address, and while it skips, its registered outputs
+// still hold the last value driven. Muxing on a level would put those stale
+// addresses on the bus for the skipped cycles.
+wire [15:0] custom_data_in = ss_replay_we ? ss_replay_data : custom_data_in_gary;
 wire [15:0] custom_data_out;	//custom chips data bus out
 wire [15:0] agnus_data_out;	//agnus data out
 wire [15:0] paula_data_out;	//paula data bus out
@@ -417,7 +438,11 @@ wire        cpu_hwr;				//cpu high byte write enable
 wire        cpu_lwr;				//cpu low byte write enable
 
 //register address bus
-wire  [8:1] reg_address; 		//main register address bus
+wire  [8:1] reg_address_agnus;	//main register address bus, as agnus drives it
+wire  [8:1] reg_address = ss_replay_we ? ss_replay_addr : reg_address_agnus;
+
+assign ss_rga_addr = reg_address;
+assign ss_rga_data = custom_data_in;
 
 //rest of local signals
 wire        cpu_custom;
@@ -584,7 +609,7 @@ agnus AGNUS1
 	.data_out(agnus_data_out),
 	.address_in(cpu_address_out[8:1]),
 	.address_out(dma_address_out),
-	.reg_address_out(reg_address),
+	.reg_address_out(reg_address_agnus),
 	.cpu_custom(cpu_custom),
 	.dbr(dbr),
 	.dbwe(dbwe),
@@ -932,7 +957,7 @@ gary GARY1
 	.cpu_data_out(cpu_data_out),
 	.cpu_data_in(gary_data_out),
 	.custom_data_out(custom_data_out),
-	.custom_data_in(custom_data_in),
+	.custom_data_in(custom_data_in_gary),
 	.ram_data_out(ram_data_out),
 	.ram_data_in(ram_data_in),
 	.cpu_rd(cpu_rd),
