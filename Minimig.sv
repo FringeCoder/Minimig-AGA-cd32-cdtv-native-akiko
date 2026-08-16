@@ -583,6 +583,18 @@ wire [15:0] ss_sd_wr;
 // ss_rom_scan is what announces it.
 wire        ss_rom_scan;
 
+// Invalidate the 68020's cache at the end of a restore, while the machine is
+// still frozen. ORed into cpu_cache_ctrl[3] below -- the CACR clear bit, which
+// cpu_cache_new edge-detects -- so this reuses the machine's own invalidate
+// instead of adding a second mechanism.
+//
+// It is needed because the restore writes chip RAM through the borrowed SDRAM
+// CPU port, while the cache's snoop port is tied to chipWE, the chip DMA write
+// path (sdram_ctrl.v:135). DMA writes update the cache; the restore's 2 MB do
+// not go near it, so without this the CPU resumes against a cache still
+// describing the memory that was there before the restore.
+wire        ss_cache_flush;
+
 // Who owns sdram_ctrl's CPU port this cycle. One expression, used for all
 // seven of the port's signals at the ram1 instance below.
 //
@@ -953,7 +965,7 @@ sdram_ctrl ram1
 	.c_7m         (c1              ),
 
 	.cache_rst    (cpu_rst         ),
-	.cpu_cache_ctrl(cpu_cacr       ),
+	.cpu_cache_ctrl(cpu_cacr | {ss_cache_flush, 3'b000}),
 	.dcache_sw_en (dcache_sw_en_w  ),
 
 	.sd_data      (SDRAM_DQ        ),
@@ -1089,7 +1101,7 @@ ddram_ctrl ram2
 	.reset_n      (~reset_d        ),
 
 	.cache_rst    (cpu_rst         ),
-	.cpu_cache_ctrl(cpu_cacr       ),
+	.cpu_cache_ctrl(cpu_cacr | {ss_cache_flush, 3'b000}),
 	.dcache_sw_en (dcache_sw_en_w  ),
 
 	.DDRAM_CLK    (DDRAM_CLK       ),
@@ -1813,6 +1825,7 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	// at.
 	.kick_base    (SS_KICK_BASE),
 	.rom_scan     (ss_rom_scan),
+	.cache_flush  (ss_cache_flush),
 
 	.sd_addr      (ss_sd_addr),
 	.sd_cs        (ss_sd_cs),
