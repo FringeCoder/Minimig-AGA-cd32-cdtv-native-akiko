@@ -583,10 +583,13 @@ wire [15:0] ss_shadow_data;
 wire        ss_shadow_writable;
 wire        ss_shadow_setclear;
 
-// Driven by ss_ctrl once the payload carries the shadow section; tied off until
-// then so the module is snoop-only and cannot drive the bus.
-wire        ss_replay_start = 1'b0;
-wire  [7:0] ss_shadow_rd    = 8'd0;
+// Driven by ss_ctrl: it reads the shadow out into the payload on a save, loads
+// it back on a restore, and starts the replay once chip RAM is in place.
+wire        ss_replay_start;
+wire  [7:0] ss_shadow_rd;
+wire        ss_shadow_ld_we;
+wire  [7:0] ss_shadow_ld_addr;
+wire [15:0] ss_shadow_ld_data;
 
 ss_regshadow ss_regshadow_inst
 (
@@ -596,6 +599,9 @@ ss_regshadow ss_regshadow_inst
 	.reg_address_in (ss_rga_addr       ),
 	.data_in        (ss_rga_data       ),
 	.rd_addr        (ss_shadow_rd      ),
+	.ld_we          (ss_shadow_ld_we   ),
+	.ld_addr        (ss_shadow_ld_addr ),
+	.ld_data        (ss_shadow_ld_data ),
 	.rd_data        (ss_shadow_data    ),
 	.rd_writable    (ss_shadow_writable),
 	.rd_setclear    (ss_shadow_setclear),
@@ -1881,6 +1887,15 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.kick_base    (SS_KICK_BASE),
 	.rom_scan     (ss_rom_scan),
 	.cache_flush  (ss_cache_flush),
+
+	// Chipset register shadow. See ss_regshadow above.
+	.shadow_rd_addr (ss_shadow_rd      ),
+	.shadow_rd_data (ss_shadow_data    ),
+	.shadow_ld_we   (ss_shadow_ld_we   ),
+	.shadow_ld_addr (ss_shadow_ld_addr ),
+	.shadow_ld_data (ss_shadow_ld_data ),
+	.replay_start   (ss_replay_start   ),
+	.replay_done    (ss_replay_done    ),
 
 	.sd_addr      (ss_sd_addr),
 	.sd_cs        (ss_sd_cs),
