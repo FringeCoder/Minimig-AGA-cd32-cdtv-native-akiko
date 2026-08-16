@@ -559,6 +559,11 @@ wire        ss_blit_busy;
 wire        ss_disk_busy;
 wire        ss_audio_busy;
 
+// INTREQ by value, straight out of paula_intcontroller. The register shadow
+// rebuilds the other three set/clear registers from bus writes; this one is
+// raised by hardware as well as by the CPU, so it has to be read, not inferred.
+wire [14:0] ss_intreq;
+
 // From chipdma_arb: a bridge (Akiko / CDTV) chip-RAM slot is armed or in
 // flight. Joins cpu_boundary so the freeze is never taken with a bridge
 // write half-committed; the ss_freeze_7m hold on the arbiter keeps new ones
@@ -1520,6 +1525,7 @@ minimig minimig
 	.ss_blit_busy         (ss_blit_busy         ),
 	.ss_disk_busy         (ss_disk_busy         ),
 	.ss_audio_busy        (ss_audio_busy        ),
+	.ss_intreq            (ss_intreq            ),
 	.ss_map               (ss_map               ),
 	// Restore side of the same four bits, in the same bit order. minimig.v
 	// applies [3] to ovl and [2] to gary's rom_readonly; [1:0] are

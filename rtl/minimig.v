@@ -361,6 +361,11 @@ module minimig
 	output        ss_blit_busy,
 	output        ss_disk_busy,
 	output        ss_audio_busy,
+
+	// INTREQ by value. The register shadow rebuilds DMACON, INTENA and ADKCON
+	// from bus writes, but not this one: Paula raises its bits in hardware, so
+	// an accumulator built from writes drifts within a frame.
+	output [14:0] ss_intreq,
 	// Gary's memory map state, in the order ss_state.vh expects:
 	// {ovl, rom_readonly, sel_kick1mb, sel_kick256kmirror}.
 	output  [3:0] ss_map,
@@ -668,6 +673,7 @@ paula PAULA1
 
 	.enable_mister_floppy(user_port_mode == 2'd1),
 	.mister_floppy_status(mister_floppy_status),
+	.ss_intreq(ss_intreq),
 
 	.USER_IN(USER_IN),
 	.USER_OUT(USER_OUT)

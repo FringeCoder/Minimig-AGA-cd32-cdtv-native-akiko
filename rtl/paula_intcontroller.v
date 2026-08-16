@@ -20,7 +20,12 @@ module paula_intcontroller
 	input	[3:0] audint,		//audio channels 0,1,2,3 interrupts
 	output	[3:0] audpen,		//mirror of audio interrupts for audio controller
 	output	rbfmirror,			//mirror of serial receive interrupt for uart SERDATR register
-	output	reg [2:0] _ipl		//m68k interrupt request
+	output	reg [2:0] _ipl,		//m68k interrupt request
+
+	// Save state. INTREQ is the one set/clear register the register shadow
+	// cannot rebuild from bus writes: hardware raises these bits, not only the
+	// CPU, so an accumulator drifts from the real register within a frame.
+	output	[14:0] ss_intreq
 );
 
 //register names and addresses		
@@ -137,6 +142,8 @@ always @(posedge clk) begin
 end						  
 
 //create m68k interrupt request signals
+assign ss_intreq = intreq;
+
 reg	[14:0]intreqena;
 always @(*) begin
 	//and int enable and request signals together

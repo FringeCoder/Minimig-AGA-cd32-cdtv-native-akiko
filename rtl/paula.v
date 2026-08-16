@@ -119,7 +119,10 @@ module paula
 	output        floppy_frd,
 	input   [6:0] USER_IN,
 	output  [6:0] USER_OUT,
-	output [2:0] mister_floppy_status
+	output [2:0] mister_floppy_status,
+
+	// Save state. See paula_intcontroller's ss_intreq.
+	output [14:0] ss_intreq
 );
 //--------------------------------------------------------------------------------------
 
@@ -239,7 +242,8 @@ paula_intcontroller pi1
 	.audint(audint),
 	.audpen(audpen),
 	.rbfmirror(rbfmirror),
-	._ipl(_ipl)
+	._ipl(_ipl),
+	.ss_intreq(ss_intreq)
 );
 
 //instantiate floppy controller / flashdrive host interface
