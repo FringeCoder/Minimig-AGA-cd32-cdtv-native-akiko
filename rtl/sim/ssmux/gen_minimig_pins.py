@@ -143,11 +143,13 @@ def main():
 
     if args.check:
         try:
+            # Newline-insensitive: git checks this file out with CRLF on
+            # Windows, and a line ending is not a stale port list.
             with open(OUT_VH, "r", encoding="utf-8") as fh:
-                current = fh.read()
+                current = fh.read().splitlines()
         except FileNotFoundError:
             current = None
-        if current != text:
+        if current != text.splitlines():
             sys.stderr.write(
                 "minimig_pins.vh is stale -- minimig.v's port list has changed.\n"
                 "Run: python3 rtl/sim/ssmux/gen_minimig_pins.py\n")
