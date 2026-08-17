@@ -88,6 +88,14 @@ wire        cdtv_req = 1'b0;
 wire [127:0] ss_diag = { 16'h8877, 16'h7766, 16'h6655, 16'h5544,
                          16'h4433, 16'h3322, 16'h2211, 16'h1100 };
 
+// The live peek shares this class. Its data is another unmistakable pattern,
+// and the address/request outputs are observed below.
+wire [24:1]  ss_peek_addr;
+wire         ss_peek_req;
+wire [127:0] ss_peek_data = { 16'hFEDC, 16'hBA98, 16'h7654, 16'h3210,
+                              16'hDEAD, 16'hBEEF, 16'hCAFE, 16'hBABE };
+wire         ss_peek_valid = 1'b1;
+
 hps_ext dut (.*);
 
 // --- bus helpers -------------------------------------------------------------
@@ -128,6 +136,11 @@ always @(posedge clk_sys)
 	if (ide_rd | ide_wr | akiko_rd | akiko_wr | cdtv_rd | cdtv_wr | cdda_wr) leaked <= 1'b1;
 
 reg [15:0] w [0:8];
+// ss_peek_req is one cycle wide; latch it so the check below can see it.
+reg ss_peek_req_seen = 1'b0;
+// ss_diag_cs lives inside the DUT; sample it rather than infer it.
+wire ss_diag_cs_probe = dut.ss_diag_cs;
+always @(posedge clk_sys) if (ss_peek_req) ss_peek_req_seen <= 1'b1;
 integer k;
 
 initial begin
@@ -200,6 +213,44 @@ initial begin
 
 	@(negedge clk_sys); hps_uio = 1'b0;
 	@(negedge clk_sys);
+
+	// ------------------------------------------------------------ live peek
+	//
+	// Same class, io_din[5] set. The address is split across the two words of
+	// the UIO address -- [24:17] in the spare bits of the class word, [16:1]
+	// in the second -- so this checks the split as well as the readback. Get
+	// it wrong and a peek reads a plausible but wrong address, which is the
+	// worst possible failure for a debugging tool.
+	// A fresh transaction: hps_uio must fall and rise, as it does between the
+	// cases above, or byte_cnt keeps counting from the previous one.
+	@(negedge clk_sys); hps_uio = 1'b0;
+	@(negedge clk_sys); hps_uio = 1'b1;
+
+	xfer(16'h0062);
+	// Class word 0xF6A3: class 1111011, io_din[5] = peek, and the address high
+	// byte scattered through the spare bits as {io_din[8:6], io_din[4:0]},
+	// which for 0xF6A3 is {3'b010, 5'b00011} = 8'h43.
+	xfer(16'hF6A3);
+	xfer(16'h5678);              // addr[16:1]
+
+	// The request is one clock wide and the latch above needs an edge to see
+	// it; xfer returns on a negedge, so give it that edge before asking.
+	repeat (2) @(posedge clk_sys);
+
+	check("peek address high", {24'd0, ss_peek_addr[24:17]}, 32'h00000043);
+	check("peek address low",  {16'd0, ss_peek_addr[16:1]},  32'h00005678);
+	check("peek request pulsed", {31'd0, ss_peek_req_seen}, 32'd1);
+
+	for (k = 0; k < 9; k = k + 1) xfer_rd(w[k]);
+	check("peek signature",  {16'd0, w[0]}, 32'h00005A5A);
+	check("peek longword 0 low",  {16'd0, w[1]}, 32'h0000BABE);
+	check("peek longword 0 high", {16'd0, w[2]}, 32'h0000CAFE);
+	check("peek longword 3 high", {16'd0, w[8]}, 32'h0000FEDC);
+
+	// io_din[5] picks the peek, so the status window's own chip select must
+	// have stayed low through all of that -- a decode that let both through
+	// would have two muxes driving the same read.
+	check("status window not selected during a peek", {31'd0, ss_diag_cs_probe}, 32'd0);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);
