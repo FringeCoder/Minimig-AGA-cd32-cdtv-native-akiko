@@ -617,7 +617,13 @@ ss_regshadow ss_regshadow_inst
 	.rd_writable    (ss_shadow_writable),
 	.rd_setclear    (ss_shadow_setclear),
 	.replay_start   (ss_replay_start   ),
-	.intreq_in      (ss_intreq         ),
+	// The RESTORED INTREQ, not Paula's live one. The shadow cannot
+	// accumulate this register from bus writes -- Paula raises its bits in
+	// hardware too -- so it is carried by value in the state vector and
+	// comes back out of ss_state_fanout. Wired to ss_intreq, a restore
+	// reinstalled the pending interrupts of the machine it was replacing.
+	// ss_intreq itself is still the CAPTURE side: it feeds the vector.
+	.intreq_in      (ss_restored_intreq),
 	.replay_active  (ss_replay_active  ),
 	.replay_we      (ss_replay_we      ),
 	.replay_addr    (ss_replay_addr    ),
@@ -755,6 +761,9 @@ wire        ss_fanout_cacr_wr;
 wire        ss_fanout_resume;
 wire  [3:0] ss_fanout_map_in;
 wire        ss_fanout_map_we;
+// The INTREQ that came out of the file, as opposed to the one Paula is
+// holding right now. ss_regshadow's replay writes this into Paula.
+wire [14:0] ss_restored_intreq;
 wire        ss_fanout_busy;
 wire        ss_fanout_ack;
 /////////////////////////////////////////////////////////////////////////////
@@ -2196,6 +2205,7 @@ ss_state_fanout #(.STATE_W(`SS_STATE_W)) ss_fanout
 
 	.map_in       (ss_fanout_map_in),
 	.map_we       (ss_fanout_map_we),
+	.intreq_out   (ss_restored_intreq),
 
 	.busy         (ss_fanout_busy)
 );

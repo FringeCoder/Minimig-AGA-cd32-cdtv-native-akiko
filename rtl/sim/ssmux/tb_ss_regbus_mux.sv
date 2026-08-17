@@ -137,6 +137,7 @@ reg        sh_ld_we    = 1'b0;
 reg  [7:0] sh_ld_addr  = 8'd0;
 reg [15:0] sh_ld_data  = 16'd0;
 reg        sh_start    = 1'b0;
+reg [14:0] restored_intreq = 15'd0;
 
 wire        sh_replay_active;
 wire        sh_replay_done;
@@ -159,7 +160,10 @@ ss_regshadow shadow
 	.ld_addr        (sh_ld_addr       ),
 	.ld_data        (sh_ld_data       ),
 	.replay_start   (sh_start         ),
-	.intreq_in      (ss_intreq        ),
+	// The RESTORED INTREQ, as Minimig.sv now wires it -- ss_state_fanout's
+	// unpacked field, not Paula's live output. Driven by the test so the two
+	// can be told apart.
+	.intreq_in      (restored_intreq  ),
 	.replay_active  (sh_replay_active ),
 	.replay_we      (ss_replay_we     ),
 	.replay_addr    (ss_replay_addr   ),
@@ -340,6 +344,12 @@ initial begin
 	shadow_load(IDX_INTENA,  16'h0028);
 	shadow_load(IDX_VHPOSW,  16'h0055);   // vpos[7:0]=$00, hpos[8:1]=$55
 
+	// The value the restore is carrying, and a live register set to something
+	// else entirely. Poked rather than driven: Paula's INTREQ has no write path
+	// from this bench that does not go through the replay itself.
+	restored_intreq = 15'h2841;
+	dut.PAULA1.pi1.intreq = 15'h7FFF;
+
 	freeze_machine();
 	run_replay();
 
@@ -366,6 +376,30 @@ initial begin
 	            {3'b000, dut.AGNUS1.dmacon}, 16'h0060);
 	expect_eq16("frozen replay -> paula intena",
 	            {1'b0, dut.PAULA1.pi1.intena}, 16'h0028);
+
+	// INTREQ, the one chipset register carried by VALUE rather than rebuilt
+	// from bus writes: Paula raises its bits in hardware as well as by write,
+	// so an accumulator drifts within a frame. The replay writes it back with
+	// the set/clear dance from ss_regshadow's intreq_in, which Minimig.sv now
+	// drives from the RESTORED vector rather than from Paula's live output --
+	// wired live, a restore reinstalled the pending interrupts of the machine
+	// it was replacing.
+	//
+	// Not an equality check, because Paula's hardware request lines are ORed
+	// into intreq on every clk7_en and some of them are asserted in a machine
+	// sitting idle like this one -- the four audio channels here. That is not
+	// the replay leaking: those lines re-raise the moment the machine runs
+	// again, restore or no restore, and they were asserted at save time too.
+	// What must hold is that the saved bits are back and the bits that were
+	// in Paula beforehand and nowhere else are gone. Paula was poked to
+	// 0x7FFF -- every bit -- so SOFT and COPER below can only be clear if the
+	// clearing half of the dance ran against the register.
+	expect_eq16("frozen replay -> saved intreq bits are back",
+	            {1'b0, dut.PAULA1.pi1.intreq} & 16'h2841, 16'h2841);
+	expect_eq16("frozen replay -> INTREQ bit 2 (SOFT) cleared",
+	            {15'd0, dut.PAULA1.pi1.intreq[2]}, 16'h0000);
+	expect_eq16("frozen replay -> INTREQ bit 4 (COPER) cleared",
+	            {15'd0, dut.PAULA1.pi1.intreq[4]}, 16'h0000);
 
 	// ---------------------------------------------------------------------
 	// 2. The same replay with the machine running, which isolates the mux
