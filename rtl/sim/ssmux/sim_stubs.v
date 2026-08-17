@@ -37,7 +37,13 @@ module altsyncram
 	parameter outdata_aclr_b = "NONE",
 	parameter outdata_reg_b = "UNREGISTERED",
 	parameter power_up_uninitialized = "FALSE",
-	parameter read_during_write_mode_mixed_ports = "OLD_DATA"
+	parameter read_during_write_mode_mixed_ports = "OLD_DATA",
+	// Not used by the model, but cdtv_nvram defparams it, and a defparam onto
+	// a parameter the module does not declare is a warning in Icarus 11 and an
+	// ERROR in Icarus 12 -- which is why this bench passed here and failed on
+	// CI. Any parameter the real megafunction accepts has to be declared here
+	// whether or not this model reads it.
+	parameter ram_block_type = "AUTO"
 )
 (
 	input      [widthad_a-1:0] address_a,
