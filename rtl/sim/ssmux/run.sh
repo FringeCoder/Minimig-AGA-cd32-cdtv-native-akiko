@@ -29,6 +29,7 @@ iverilog -g2012 -o "$OUT/tb_ss_regbus_mux" -I"$HERE" -s tb_ss_regbus_mux \
 	"$RTL/sim/cache/dpram_sim.v" \
 	"$RTL/amiga_clk.v" \
 	"$RTL/ss_regshadow.v" \
+	"$RTL/ss_freeze_phase.v" \
 	"$RTL/minimig.v" \
 	"$RTL"/agnus*.v \
 	"$RTL"/paula*.v \

@@ -512,42 +512,29 @@ wire        am_c3;
 wire        am_cck;
 wire  [9:0] am_eclk;
 
-// The two timebases must come back in phase, because minimig's chip bus and
-// sdram_ctrl's chip slots are both aligned to their own c1 and chipdma_arb
-// samples one with the other. Sampling ss_freeze only on the master's
-// clk7_en pulse makes the pause an exact multiple of four clk_sys cycles --
-// one full c1/c3 period -- so the slave resumes on the phase it stopped on.
-// This is also where ss_freeze crosses from clk_114 into clk_sys; the two
-// come from the same PLL at 4:1 so it is a timed path, not a CDC.
-//
-// Sampled on clk7_en AND cck, not on clk7_en alone, so the machine always
-// parks with the colour clock LOW. That matters because of the replay tick
-// below: the tick re-enables the chipset's register decode while the generator
-// is stopped, and agnus_beamcounter increments hpos under `clk7_en && cck`.
-// Parked with cck high, the ~490 ticks of a replay would walk the beam a
-// couple of raster lines forward; parked with cck low they cannot move it.
-//
-// The polarity reads backwards and is not: clk7_en is high on the cycle where
-// amiga_clk's phase counter holds 2'b01, which is the same edge that toggles
-// cck, and the freeze only takes effect on the edge after it. Sampling with
-// cck high therefore parks it low. tb_ss_regbus_mux checks the beam position
-// across a frozen replay rather than the polarity, so getting this wrong shows
-// up as the beam moving.
-//
-// The pause stays a whole number of c1/c3 periods either way; it is now a
-// multiple of eight clk_sys cycles rather than four.
-reg ss_freeze_7m;
-always @(posedge clk_sys) begin
-	if (reset_d)                ss_freeze_7m <= 1'b0;
-	else if (clk7_en && cck)    ss_freeze_7m <= ss_freeze;
-end
+// The freeze's two clk_sys-domain signals: the enable that stops the Amiga's
+// timebase, and the register-decode tick a replay needs while it is stopped.
+// Both live in rtl/ss_freeze_phase.v rather than here, because the core repo's
+// rtl/sim/ssmux bench instantiates the same module around a real minimig --
+// written out twice, the sampling phase in particular would drift between the
+// hardware and the bench that is supposed to check it. The reasoning for the
+// phase, and why its polarity reads backwards, is in that file.
+wire ss_freeze_7m;
+wire ss_replay_tick;
 
-// The replay's register-decode tick. See minimig.v's ss_replay_tick port: the
-// Amiga's generator is stopped for the whole restore, so without this the
-// replay drives both buses and nothing decodes them. Gated by ss_replay_we so
-// only the cycles carrying a write produce a tick -- the skipped addresses
-// step nothing.
-wire ss_replay_tick = clk7_en & ss_replay_we;
+ss_freeze_phase ss_freeze_phase_inst
+(
+	.clk         ( clk_sys       ),
+	.rst_n       ( ~reset_d      ),
+	// The MASTER generator's outputs, not am_*: the Amiga's stop when the
+	// freeze takes hold.
+	.clk7_en     ( clk7_en       ),
+	.cck         ( cck           ),
+	.freeze      ( ss_freeze     ),
+	.replay_we   ( ss_replay_we  ),
+	.freeze_7m   ( ss_freeze_7m  ),
+	.replay_tick ( ss_replay_tick)
+);
 
 amiga_clk amiga_clk_am
 (

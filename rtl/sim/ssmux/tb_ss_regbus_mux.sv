@@ -84,15 +84,25 @@ amiga_clk master_clk
 	.reset_n  (rst_n      )
 );
 
-// The freeze, sampled exactly as Minimig.sv samples it: on the master's
-// clk7_en with cck HIGH, which parks the Amiga with cck low -- that same edge
-// toggles cck, and the freeze lands on the edge after it.
-reg ss_freeze    = 1'b0;
-reg ss_freeze_7m = 1'b0;
-always @(posedge clk_r) begin
-	if (!rst_n)                    ss_freeze_7m <= 1'b0;
-	else if (m_clk7_en && m_cck)   ss_freeze_7m <= ss_freeze;
-end
+// The freeze and the replay tick, from the same module Minimig.sv instantiates
+// rather than a copy of its logic. That is the point of the module: the
+// sampling phase decides whether a replay's ticks move the beam, and a bench
+// carrying its own copy of the rule would agree with itself while the hardware
+// drifted.
+reg  ss_freeze = 1'b0;
+wire ss_freeze_7m;
+
+ss_freeze_phase freeze_phase
+(
+	.clk         (clk_r          ),
+	.rst_n       (rst_n          ),
+	.clk7_en     (m_clk7_en      ),
+	.cck         (m_cck          ),
+	.freeze      (ss_freeze      ),
+	.replay_we   (ss_replay_we   ),
+	.freeze_7m   (ss_freeze_7m   ),
+	.replay_tick (ss_replay_tick )
+);
 
 // The Amiga's generator: held by the freeze. Its outputs are minimig.v's
 // clock inputs, which the generated pin file leaves for us to drive.
@@ -118,10 +128,6 @@ amiga_clk amiga_clock
 assign clk = clk_r;
 
 `include "minimig_pins.vh"
-
-// The replay's register-decode tick, as Minimig.sv derives it. Declared by
-// the include above, driven here.
-assign ss_replay_tick = m_clk7_en & ss_replay_we;
 
 // ------------------------------------------------------------- the shadow
 //
