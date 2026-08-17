@@ -404,7 +404,21 @@ module minimig
 	// rtl/ss_state.vh. They are accepted here so that the two directions
 	// stay the same four-bit field.
 	input   [3:0] ss_map_in,
-	input         ss_map_we
+	input         ss_map_we,
+
+	// The CIAs, by value in both directions. They sit on the CPU bus rather
+	// than the RGA bus, so the chipset register shadow never sees them, and
+	// they cannot be read back over their own bus either: reading ICR clears
+	// the pending interrupts and reading TOD moves its latch, so a capture
+	// through the register interface would damage the machine every save.
+	// ciaa.v and ciab.v carry the bit layouts.
+	output [190:0] ss_cia_a,
+	output [202:0] ss_cia_b,
+	input  [190:0] ss_cia_a_in,
+	input  [202:0] ss_cia_b_in,
+	// One clk_sys pulse, like ss_map_we, and for the same reason: everything
+	// it writes is a clk_sys register and the Amiga's timebase is stopped.
+	input          ss_cia_we
 );
 
 
@@ -840,7 +854,10 @@ ciaa CIAA1
 	.kms_level(kms_level),
 	.kbd_mouse_data(kbd_mouse_data), 
 	.freeze(freeze),
-	.hrtmon_en (memory_config[6])
+	.hrtmon_en (memory_config[6]),
+	.ss_state(ss_cia_a),
+	.ss_ld(ss_cia_we),
+	.ss_ld_data(ss_cia_a_in)
 );
 
 //instantiate cia B
@@ -861,6 +878,9 @@ ciab CIAB1
 	.flag(index),
 	.porta_in({cd,cts,dsr,ri&_joy3[4],1'b1,_joy4[4]}),
 	.porta_out({dtr,rts}),
+	.ss_state(ss_cia_b),
+	.ss_ld(ss_cia_we),
+	.ss_ld_data(ss_cia_b_in),
 	.portb_out({_motor,_sel3,_sel2,_sel1,_sel0,side,direc,_step})
 );
 

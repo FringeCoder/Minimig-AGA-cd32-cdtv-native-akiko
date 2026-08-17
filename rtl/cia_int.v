@@ -18,7 +18,18 @@ module cia_int
 
   input   [7:0] data_in,    // CPU data bus input
   output   [7:0] data_out,   // CPU data bus output
-  output  irq               // Combined interrupt request output to CPU
+  output  irq,              // Combined interrupt request output to CPU
+
+  // Save state. Exported directly rather than read over the bus, because
+  // reading a CIA's ICR CLEARS the pending flags -- a capture with that side
+  // effect would damage the machine on every save. See the phase 1B-2 plan.
+  //
+  // ss_ld is a one-cycle pulse in the clk domain, taken outside the clk7_en
+  // gate: the restore runs with the Amiga's timebase stopped, so a load that
+  // waited for clk7_en would wait forever.
+  output   [9:0] ss_state,  // {icrmask, icr}
+  input          ss_ld,
+  input    [9:0] ss_ld_data
 );
 
 // ICR - Interrupt Control Register (Read: status, Write: mask control)
@@ -43,7 +54,9 @@ assign data_out[7:0] = icrs && !wr ? {irq,2'b00,icr[4:0]} : 8'b0000_0000;
 // Bit 7 = 0: Clear mask bits (disable interrupts)
 // Only bits specified as 1 in data_in[4:0] are affected
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    icrmask[4:0] <= ss_ld_data[9:5];
+  else if (clk7_en) begin
     if (reset)
       icrmask[4:0] <= 5'b0_0000;  // All interrupts disabled on reset
     else if (icrs && wr)
@@ -59,7 +72,9 @@ always @(posedge clk)
 // Flags remain set until ICR is read
 // New interrupts can be latched even while previous ones are pending
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    icr[4:0] <= ss_ld_data[4:0];
+  else if (clk7_en) begin
     if (reset)
       icr[4:0] <= 5'b0_0000;  // Clear all interrupt flags
     else if (icrs && !wr)     // Reading ICR
@@ -91,5 +106,7 @@ assign irq   = (icrmask[0] & icr[0])    // Timer A interrupt enabled and pending
       | (icrmask[3] & icr[3])          // Serial interrupt enabled and pending
       | (icrmask[4] & icr[4]);         // FLAG interrupt enabled and pending
 
+
+assign ss_state = {icrmask[4:0], icr[4:0]};
 
 endmodule

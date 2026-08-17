@@ -456,6 +456,88 @@ initial begin
 	expect_eq1("ss_map_in[2]=0 -> rom_readonly clears",
 	           dut.GARY1.rom_readonly, 1'b0);
 
+	// ---------------------------------------------------------------------
+	// 4. The CIAs, which the register shadow cannot reach: they are on the CPU
+	//    bus, and reading them back over it would clear ICR's pending flags and
+	//    move TOD's latch. So they are exported straight out of the flip-flops
+	//    and written back the same way, on one pulse.
+	//
+	//    The check is a round trip through the real registers: drive a pattern
+	//    in, read the export out, and require the two to match bit for bit. A
+	//    field wired to the wrong slice in either direction shows up as a
+	//    mismatch here rather than as a machine that misbehaves later.
+	// ---------------------------------------------------------------------
+	$display("--- CIA capture and restore ---");
+
+	freeze_machine();
+
+	// Distinguishable per field rather than a walking pattern: a swap between
+	// two fields of the same width is exactly what a slice mistake looks like,
+	// and a walking pattern would hide it.
+	drv_ss_cia_a_in <= { 75'h2A_AAAA_AAAA_AAAA_AAAA,   // timer D
+	                     39'h33_3333_3333,             // timer B
+	                     39'h11_1111_1111,             // timer A
+	                     10'h155,                      // int: mask + pending
+	                      8'hC3,                       // sdr
+	                      8'h0F,                       // ddrportb
+	                      8'hF0,                       // ddrporta
+	                      4'h9 };                      // regporta
+	drv_ss_cia_b_in <= { 75'h55_5555_5555_5555_5555,   // timer D
+	                     39'h44_4444_4444,             // timer B
+	                     39'h22_2222_2222,             // timer A
+	                     10'h2AA,                      // int: mask + pending
+	                      8'h3C,                       // sdr
+	                      8'hAA,                       // ddrportb
+	                      8'h55,                       // regportb
+	                      8'hCC,                       // ddrporta
+	                      8'h81 };                     // regporta
+	@(posedge clk_r);
+	drv_ss_cia_we <= 1'b1;
+	@(posedge clk_r);
+	drv_ss_cia_we <= 1'b0;
+	repeat (4) @(posedge clk_r);
+
+	if (ss_cia_a !== drv_ss_cia_a_in) begin
+		$display("FAIL CIA A round trip: got %h want %h", ss_cia_a, drv_ss_cia_a_in);
+		errs = errs + 1;
+	end
+	else $display("ok   CIA A restored and exported identically");
+
+	if (ss_cia_b !== drv_ss_cia_b_in) begin
+		$display("FAIL CIA B round trip: got %h want %h", ss_cia_b, drv_ss_cia_b_in);
+		errs = errs + 1;
+	end
+	else $display("ok   CIA B restored and exported identically");
+
+	// And the same values seen from inside, at three registers picked because
+	// each is reached by a different path: a sub-module counter, a sub-module
+	// mask, and one of the CIA's own port registers. A round trip that agreed
+	// with itself through a pair of matching slice errors would still fail
+	// these.
+	// Expected values are written as slices of the word that was driven in,
+	// spelling out where each field is meant to sit. That is the claim being
+	// tested: ciaa.v and ciab.v document a layout in a comment, and this is
+	// what says the wiring agrees with it.
+	//
+	//   CIA A: timer A at [76:38], and within it {tmr, tmlh, tmll, tmcr},
+	//          so the counter is the top sixteen bits of that field.
+	expect_eq16("CIA A timer A counter",
+	            dut.CIAA1.tmra.tmr, drv_ss_cia_a_in[76:61]);
+	//   CIA A: cia_int at [37:28] as {icrmask, icr}.
+	expect_eq16("CIA A interrupt mask",
+	            {11'd0, dut.CIAA1.cnt.icrmask}, {11'd0, drv_ss_cia_a_in[37:33]});
+	//   CIA B: port A direction at [15:8].
+	expect_eq16("CIA B port A direction",
+	            {8'd0, dut.CIAB1.ddrporta}, {8'd0, drv_ss_cia_b_in[15:8]});
+
+	// The CIAs run on clk7_en, which is stopped: a write that had been left
+	// inside that gate would never land at all while frozen, which is the
+	// mistake gary's rom_readonly restore avoids in the same way.
+	//   CIA A: timer D at [190:116], and within it {tod, alarm, tod_latch, ...},
+	//          so the TOD counter is the top twenty-four bits of that field.
+	expect_eq16("CIA A TOD counter, low half",
+	            dut.CIAA1.tmrd.tod[15:0], drv_ss_cia_a_in[182:167]);
+
 	thaw_machine();
 	repeat (100) @(posedge clk_r);
 

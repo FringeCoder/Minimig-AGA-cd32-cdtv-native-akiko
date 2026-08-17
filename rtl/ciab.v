@@ -40,6 +40,22 @@ module ciab
   // Bit 6: /DTR - RS-232 Data Terminal Ready (output)
   // Bit 7: /RE  - RS-232 Ring Indicator (output)
 
+  // Save state. Same reasoning as ciaa.v: the CIAs are on the CPU bus, and
+  // reading ICR or TOD to capture them would change the machine. Layout,
+  // low bits first:
+  //   [7:0]     regporta      port A output register
+  //   [15:8]    ddrporta      port A direction
+  //   [23:16]   regportb      port B output register
+  //   [31:24]   ddrportb      port B direction
+  //   [39:32]   sdr_latch     serial data register
+  //   [49:40]   cia_int       {icrmask, icr}
+  //   [88:50]   cia_timera    {tmr, tmlh, tmll, tmcr}
+  //   [127:89]  cia_timerb    same shape as timer A
+  //   [202:128] cia_timerd    {tod, alarm, tod_latch, crb7, count_ena, latch_ena}
+  output [202:0] ss_state,
+  input          ss_ld,
+  input  [202:0] ss_ld_data,
+
   // Port B - Disk drive control signals
   output  [7:0] portb_out   // Port B outputs
   // Bit 0: /STEP - Disk head step pulse
@@ -117,7 +133,9 @@ assign data_out = icr_out | tmra_out | tmrb_out | tmrd_out | sdr_out | pb_out | 
 // Dummy serial port data register
 // CIA B's serial port is not implemented in this simplified version
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    sdr_latch[7:0] <= ss_ld_data[39:32];
+  else if (clk7_en) begin
     if (reset)
       sdr_latch[7:0] <= 8'h00;
     else if (wr & sdr)
@@ -142,7 +160,9 @@ always @(posedge clk)
 
 // Port A output register
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    regporta[7:0] <= ss_ld_data[7:0];
+  else if (clk7_en) begin
     if (reset)
       regporta[7:0] <= 8'd0;
     else if (wr && pra)
@@ -151,7 +171,9 @@ always @(posedge clk)
 
 // Port A direction register
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    ddrporta[7:0] <= ss_ld_data[15:8];
+  else if (clk7_en) begin
     if (reset)
       ddrporta[7:0] <= 8'd0;
     else if (wr && ddra)
@@ -181,7 +203,9 @@ reg [7:0] ddrportb;         // Port B direction register
 
 // Port B output register
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    regportb[7:0] <= ss_ld_data[23:16];
+  else if (clk7_en) begin
     if (reset)
       regportb[7:0] <= 8'd0;
     else if (wr && prb)
@@ -190,7 +214,9 @@ always @(posedge clk)
 
 // Port B direction register
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    ddrportb[7:0] <= ss_ld_data[31:24];
+  else if (clk7_en) begin
     if (reset)
       ddrportb[7:0] <= 8'd0;
     else if (wr && ddrb)
@@ -237,7 +263,10 @@ cia_int cnt
   .ser(1'b0),               // Serial port not implemented
   .data_in(data_in),
   .data_out(icr_out),
-  .irq(irq)
+  .irq(irq),
+  .ss_state(ss_cnt),
+  .ss_ld(ss_ld),
+  .ss_ld_data(ss_ld_data[49:40])
 );
 
 // Timer A - General purpose timer
@@ -254,7 +283,10 @@ cia_timera tmra
   .data_out(tmra_out),
   .eclk(eclk),
   .tmra_ovf(tmra_ovf),
-  .irq(ta)
+  .irq(ta),
+  .ss_state(ss_tmra),
+  .ss_ld(ss_ld),
+  .ss_ld_data(ss_ld_data[88:50])
 );
 
 // Timer B - General purpose timer, can cascade with Timer A
@@ -271,7 +303,10 @@ cia_timerb tmrb
   .data_out(tmrb_out),
   .eclk(eclk),
   .tmra_ovf(tmra_ovf),
-  .irq(tb)
+  .irq(tb),
+  .ss_state(ss_tmrb),
+  .ss_ld(ss_ld),
+  .ss_ld_data(ss_ld_data[127:89])
 );
 
 // Timer D - Time of Day clock with alarm
@@ -288,7 +323,20 @@ cia_timerd tmrd
   .data_in(data_in),
   .data_out(tmrd_out),
   .count(tick & ~tick_del),  // Count on rising edge of tick
-  .irq(alrm)
+  .irq(alrm),
+  .ss_state(ss_tmrd),
+  .ss_ld(ss_ld),
+  .ss_ld_data(ss_ld_data[202:128])
 );
+
+
+// Save state: the sub-modules' state, gathered.
+wire  [9:0] ss_cnt;
+wire [38:0] ss_tmra;
+wire [38:0] ss_tmrb;
+wire [74:0] ss_tmrd;
+
+assign ss_state = {ss_tmrd, ss_tmrb, ss_tmra, ss_cnt, sdr_latch[7:0],
+                   ddrportb[7:0], regportb[7:0], ddrporta[7:0], regporta[7:0]};
 
 endmodule

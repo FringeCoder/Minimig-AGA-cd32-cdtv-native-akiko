@@ -764,6 +764,15 @@ wire        ss_fanout_map_we;
 // The INTREQ that came out of the file, as opposed to the one Paula is
 // holding right now. ss_regshadow's replay writes this into Paula.
 wire [14:0] ss_restored_intreq;
+
+// The CIAs. ss_cia_a/ss_cia_b are the capture side, straight out of minimig;
+// the _restored pair and the pulse are the restore side. Both CIAs take their
+// whole word on one clk_sys edge, so there is no sequence here to get wrong.
+wire [190:0] ss_cia_a;
+wire [202:0] ss_cia_b;
+wire [190:0] ss_restored_cia_a;
+wire [202:0] ss_restored_cia_b;
+wire         ss_restored_cia_we;
 wire        ss_fanout_busy;
 wire        ss_fanout_ack;
 /////////////////////////////////////////////////////////////////////////////
@@ -1607,7 +1616,12 @@ minimig minimig
 	// applies [3] to ovl and [2] to gary's rom_readonly; [1:0] are
 	// combinational address decodes with no target -- see rtl/ss_state.vh.
 	.ss_map_in            (ss_fanout_map_in     ),
-	.ss_map_we            (ss_fanout_map_we     )
+	.ss_map_we            (ss_fanout_map_we     ),
+	.ss_cia_a             (ss_cia_a             ),
+	.ss_cia_b             (ss_cia_b             ),
+	.ss_cia_a_in          (ss_restored_cia_a    ),
+	.ss_cia_b_in          (ss_restored_cia_b    ),
+	.ss_cia_we            (ss_restored_cia_we   )
 );
 
 //////////////////////////  SAVE STATES (phase 1A)  /////////////////////////
@@ -2206,6 +2220,9 @@ ss_state_fanout #(.STATE_W(`SS_STATE_W)) ss_fanout
 	.map_in       (ss_fanout_map_in),
 	.map_we       (ss_fanout_map_we),
 	.intreq_out   (ss_restored_intreq),
+	.cia_a_out    (ss_restored_cia_a),
+	.cia_b_out    (ss_restored_cia_b),
+	.cia_we       (ss_restored_cia_we),
 
 	.busy         (ss_fanout_busy)
 );
