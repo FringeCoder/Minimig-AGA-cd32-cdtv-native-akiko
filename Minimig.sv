@@ -354,7 +354,30 @@ wire [35:0] EXT_BUS;
 // that this port is wired.
 wire [127:0] ss_diag;
 
-hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata), .ss_diag(ss_diag));
+// Live memory peek: hps_ext (clk_sys) asks, ss_ctrl (clk_114) answers.
+//
+// The request is a single clk_sys pulse and clk_114 is four times faster, so
+// it cannot be missed -- but it would be sampled on several clk_114 edges, and
+// ss_ctrl must act once. Carried as a toggle and edge-detected on the far side.
+wire [24:1]  ss_peek_addr;
+wire         ss_peek_req_sys;
+wire [127:0] ss_peek_data;
+wire         ss_peek_valid;
+
+reg  ss_peek_tgl = 1'b0;
+always @(posedge clk_sys) if (ss_peek_req_sys) ss_peek_tgl <= ~ss_peek_tgl;
+
+reg  ss_peek_tgl_meta, ss_peek_tgl_sync, ss_peek_tgl_d;
+always @(posedge clk_114) begin
+	ss_peek_tgl_meta <= ss_peek_tgl;
+	ss_peek_tgl_sync <= ss_peek_tgl_meta;
+	ss_peek_tgl_d    <= ss_peek_tgl_sync;
+end
+wire ss_peek_req_114 = ss_peek_tgl_sync ^ ss_peek_tgl_d;
+
+hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata), .ss_diag(ss_diag),
+	.ss_peek_addr(ss_peek_addr), .ss_peek_req(ss_peek_req_sys),
+	.ss_peek_data(ss_peek_data), .ss_peek_valid(ss_peek_valid));
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
@@ -1997,7 +2020,13 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	// Advisory: a restore ran with a Kickstart fingerprint that did not
 	// match the file's. The gate is off while the scan is untrustworthy;
 	// this is how the host still hears about it.
-	.dbg_kick_warn(ss_dbg_kick_warn)
+	.dbg_kick_warn(ss_dbg_kick_warn),
+	// Live peek. The address is stable for as long as the request stands,
+	// so it crosses without synchronising; only the pulse needs care.
+	.peek_req(ss_peek_req_114),
+	.peek_addr(ss_peek_addr),
+	.peek_data(ss_peek_data),
+	.peek_valid(ss_peek_valid)
 );
 
 // --- outcome toast -----------------------------------------------------------

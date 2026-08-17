@@ -121,7 +121,21 @@ module hps_ext
 	//
 	// 7'b1111011 is the one free class in the range: ide is 1111000, cdda
 	// 1111001, akiko 1111010 and cdtv 1111100.
-	input     [127:0] ss_diag
+	input     [127:0] ss_diag,
+
+	// Live memory peek. Same UIO class as the diagnostics (0xF600) with
+	// io_din[5] as the sub-channel bit, so it costs no new class and cannot be
+	// confused with the read-only status window.
+	//
+	// The request rides in the 32-bit UIO address the host already sends: the
+	// class word carries the high eight address bits in its spare bits, the
+	// second word carries the low sixteen. One transaction asks; a later one
+	// reads the answer back, so the host never has to wait on the SDRAM
+	// inside a transaction.
+	output reg [24:1] ss_peek_addr,
+	output reg        ss_peek_req,
+	input     [127:0] ss_peek_data,
+	input             ss_peek_valid
 );
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
@@ -150,6 +164,7 @@ reg  [4:0] byte_cnt;
 // branch clears it at the end of every transaction, which is before any read
 // can reach it.
 reg        ss_diag_cs;
+reg        ss_peek_cs;
 
 always@(posedge clk_sys) begin : main_proc
 	reg [15:0] cmd;
@@ -178,6 +193,8 @@ always@(posedge clk_sys) begin : main_proc
 		cdtv_cs_sec <= 0;
 		cdtv_cs_stch <= 0;
 		ss_diag_cs <= 0;
+		ss_peek_cs <= 0;
+		ss_peek_req <= 0;
 		if(cmd == 'h2D) sset <= 1;
 	end
 	else if(io_strobe) begin
@@ -206,9 +223,24 @@ always@(posedge clk_sys) begin : main_proc
 			cdtv_cs_sec      <= (io_din[15:9] == 7'b1111100) && !io_din[7] && !io_din[6] &&  io_din[5];
 			// CDTV STCH inject sub-channel — io_din[7]=0, io_din[6]=1.
 			cdtv_cs_stch     <= (io_din[15:9] == 7'b1111100) && !io_din[7] &&  io_din[6];
-			// Save state diagnostics. Read-only, so there is no write-side
-			// counterpart and no sub-channel bit to be exclusive against.
-			ss_diag_cs       <= (io_din[15:9] == 7'b1111011);
+			// Save state diagnostics, and the peek sub-channel beside it.
+			// io_din[5] picks between them, so the status window is unchanged
+			// for any host that never asks for a peek.
+			ss_diag_cs       <= (io_din[15:9] == 7'b1111011) && !io_din[5];
+			ss_peek_cs       <= (io_din[15:9] == 7'b1111011) &&  io_din[5];
+			// Address bits [24:17] out of the spare bits of the class word.
+			if (io_din[15:9] == 7'b1111011 && io_din[5])
+				ss_peek_addr[24:17] <= {io_din[8:6], io_din[4:0]};
+		end
+
+		// One cycle wide: ss_ctrl edge-detects it after a domain crossing.
+		ss_peek_req <= 1'b0;
+
+		// Low sixteen address bits, then go. The address is complete here --
+		// the high bits landed with the class word on the previous byte.
+		if(byte_cnt == 2 && ss_peek_cs) begin
+			ss_peek_addr[16:1] <= io_din;
+			ss_peek_req        <= 1'b1;
 		end
 
 		if(byte_cnt == 0) begin
@@ -330,6 +362,26 @@ always@(posedge clk_sys) begin : main_proc
 					// instead of saying the channel is absent. It is also how
 					// userspace proves its own read alignment rather than assuming
 					// it: see minimig_ssdiag.cpp's signature search.
+					// Peek readback. Word 0 is its own signature so a host can
+					// tell a core with the window from one without, exactly as
+					// the status window does; word 9 carries the valid flag, so
+					// a host that reads too early sees stale data marked stale
+					// rather than fresh data it cannot trust.
+					if(byte_cnt >= 3 && ss_peek_cs) begin
+						case(byte_cnt)
+							5'd3:  io_dout <= 16'h5A5A;
+							5'd4:  io_dout <= ss_peek_data[15:0];
+							5'd5:  io_dout <= ss_peek_data[31:16];
+							5'd6:  io_dout <= ss_peek_data[47:32];
+							5'd7:  io_dout <= ss_peek_data[63:48];
+							5'd8:  io_dout <= ss_peek_data[79:64];
+							5'd9:  io_dout <= ss_peek_data[95:80];
+							5'd10: io_dout <= ss_peek_data[111:96];
+							5'd11: io_dout <= ss_peek_data[127:112];
+							5'd12: io_dout <= {15'd0, ss_peek_valid};
+							default: io_dout <= 16'd0;
+						endcase
+					end
 					if(byte_cnt >= 3 && ss_diag_cs) begin
 						case(byte_cnt)
 							5'd3:  io_dout <= 16'h55AA;
