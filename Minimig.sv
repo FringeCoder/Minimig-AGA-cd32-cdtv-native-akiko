@@ -793,6 +793,22 @@ end
 wire [190:0] ss_restored_cia_a;
 wire [202:0] ss_restored_cia_b;
 wire         ss_restored_cia_we;
+
+// Registered into clk_sys before they reach the CIAs, for the same reason the
+// capture side is registered into clk_114: ss_state_fanout unpacks these
+// combinationally from ss_ctrl's clk_114 state_out, so raw they are ~400 timed
+// crossings landing directly in CIA flip-flops. One of them failed hold by
+// 0.318 ns -- state_out[324] into CIAA1's TOD read latch.
+//
+// Safe for the same reason too. ss_state_out is loaded once and held, and the
+// fan-out does not pulse cia_we until step 22 of its sequence, so these have
+// been stable for twenty-odd cycles by the time anything samples them.
+reg  [190:0] ss_restored_cia_a_q;
+reg  [202:0] ss_restored_cia_b_q;
+always @(posedge clk_sys) begin
+	ss_restored_cia_a_q <= ss_restored_cia_a;
+	ss_restored_cia_b_q <= ss_restored_cia_b;
+end
 wire        ss_fanout_busy;
 wire        ss_fanout_ack;
 /////////////////////////////////////////////////////////////////////////////
@@ -1639,8 +1655,8 @@ minimig minimig
 	.ss_map_we            (ss_fanout_map_we     ),
 	.ss_cia_a             (ss_cia_a_raw         ),
 	.ss_cia_b             (ss_cia_b_raw         ),
-	.ss_cia_a_in          (ss_restored_cia_a    ),
-	.ss_cia_b_in          (ss_restored_cia_b    ),
+	.ss_cia_a_in          (ss_restored_cia_a_q  ),
+	.ss_cia_b_in          (ss_restored_cia_b_q  ),
 	.ss_cia_we            (ss_restored_cia_we   )
 );
 
