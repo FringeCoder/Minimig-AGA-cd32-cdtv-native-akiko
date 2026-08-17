@@ -747,6 +747,7 @@ wire  [3:0] ss_load_fail_code;
 // the end of this section.
 wire  [5:0] ss_dbg_state;
 wire [23:0] ss_dbg_idx;
+wire        ss_dbg_kick_warn;
 
 // ss_state_fanout's outputs. It runs on clk_sys, which is both the CPU's
 // clock and minimig.v's, so nothing it drives needs a domain crossing.
@@ -1976,7 +1977,11 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.ddr_waitrequest(ss_ddr_waitrequest),
 
 	.dbg_state    (ss_dbg_state),
-	.dbg_idx      (ss_dbg_idx)
+	.dbg_idx      (ss_dbg_idx),
+	// Advisory: a restore ran with a Kickstart fingerprint that did not
+	// match the file's. The gate is off while the scan is untrustworthy;
+	// this is how the host still hears about it.
+	.dbg_kick_warn(ss_dbg_kick_warn)
 );
 
 // --- outcome toast -----------------------------------------------------------
@@ -2020,6 +2025,10 @@ reg        ss_info_req;
 // synchronised flag edge arrives it has been stable for two clk_sys cycles.
 reg  [3:0] ss_out_meta, ss_out_sync, ss_out_d;
 reg  [3:0] ss_code_meta, ss_code_sync;
+// Sticky advisory bit from ss_ctrl (clk_114), two-flopped into clk_sys like
+// the outcomes beside it. It only ever goes 0 -> 1, so there is nothing to
+// miss between samples.
+reg        ss_kick_warn_meta, ss_kick_warn_sync;
 
 always @(posedge clk_sys) begin
 	ss_info_req  <= 1'b0;
@@ -2030,6 +2039,9 @@ always @(posedge clk_sys) begin
 
 	ss_code_meta <= ss_load_fail_code;
 	ss_code_sync <= ss_code_meta;
+
+	ss_kick_warn_meta <= ss_dbg_kick_warn;
+	ss_kick_warn_sync <= ss_kick_warn_meta;
 
 	// At most one of the four can rise on a given cycle: ss_ctrl serves one
 	// request at a time and clears the previous attempt's outcomes when it
@@ -2192,7 +2204,8 @@ assign ss_diag = {
 	{8'd0, ss_dg_idx[23:16]},                           // w4: progress index, high
 	ss_dg_idx[15:0],                                    // w3: progress index, low
 	ss_dg_seq,                                          // w2: state-change counter
-	{4'd0, ss_dg_flags, ss_code_sync, ss_out_sync},     // w1: flags / fail code / outcomes
+	{3'd0, ss_kick_warn_sync, ss_dg_flags,
+	       ss_code_sync, ss_out_sync},                  // w1: flags / fail code / outcomes
 	{2'd0, ss_dg_last, 2'd0, ss_dg_state}               // w0: last state / live state
 };
 
