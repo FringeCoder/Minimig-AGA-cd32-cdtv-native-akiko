@@ -96,6 +96,10 @@ wire [127:0] ss_peek_data = { 16'hFEDC, 16'hBA98, 16'h7654, 16'h3210,
                               16'hDEAD, 16'hBEEF, 16'hCAFE, 16'hBABE };
 wire         ss_peek_valid = 1'b1;
 
+// The restore post-mortem, behind the peek data in the same window.
+wire [127:0] ss_pc_snapshot = { 32'h00FC0004, 32'h00003210, 32'h00002200, 32'h00001100 };
+wire  [63:0] ss_kick_pair   = { 32'hFEEDFACE, 32'hC0FFEE00 };
+
 hps_ext dut (.*);
 
 // --- bus helpers -------------------------------------------------------------
@@ -254,9 +258,17 @@ initial begin
 	check("peek signature",  {16'd0, w[0]}, 32'h00005A5A);
 	check("a read does not re-arm",   {31'd0, ss_peek_req_seen}, 32'd0);
 	check("a read leaves the address", {16'd0, ss_peek_addr[16:1]}, 32'h00005678);
+
 	check("peek longword 0 low",  {16'd0, w[1]}, 32'h0000BABE);
 	check("peek longword 0 high", {16'd0, w[2]}, 32'h0000CAFE);
 	check("peek longword 3 high", {16'd0, w[8]}, 32'h0000FEDC);
+	// Past the peek data: the post-mortem. Read as a continuation of the same
+	// transaction, which is how the poller takes it.
+	for (k = 0; k < 4; k = k + 1) xfer_rd(w[k]);   // valid flag, then PC[0] lo/hi
+	check("valid flag word",     {16'd0, w[0]}, 32'h00000001);
+	check("PC sample 0 low",     {16'd0, w[1]}, 32'h00001100);
+	check("PC sample 0 high",    {16'd0, w[2]}, 32'h00000000);
+	check("PC sample 1 low",     {16'd0, w[3]}, 32'h00002200);
 
 	// io_din[5] picks the peek, so the status window's own chip select must
 	// have stayed low through all of that -- a decode that let both through

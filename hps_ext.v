@@ -135,7 +135,13 @@ module hps_ext
 	output reg [24:1] ss_peek_addr,   // [24] unused; the arm bit took its place
 	output reg        ss_peek_req,
 	input     [127:0] ss_peek_data,
-	input             ss_peek_valid
+	input             ss_peek_valid,
+
+	// Restore post-mortem, published in the same peek window past the data:
+	// four PC samples taken after the freeze dropped, and the two fingerprints
+	// the last restore compared.
+	input     [127:0] ss_pc_snapshot,
+	input      [63:0] ss_kick_pair
 );
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
@@ -388,6 +394,21 @@ always@(posedge clk_sys) begin : main_proc
 							5'd10: io_dout <= ss_peek_data[111:96];
 							5'd11: io_dout <= ss_peek_data[127:112];
 							5'd12: io_dout <= {15'd0, ss_peek_valid};
+							// The post-mortem rides behind the peek data rather
+							// than in a class of its own: it is read at the same
+							// moments, by the same poller.
+							5'd13: io_dout <= ss_pc_snapshot[15:0];
+							5'd14: io_dout <= ss_pc_snapshot[31:16];
+							5'd15: io_dout <= ss_pc_snapshot[47:32];
+							5'd16: io_dout <= ss_pc_snapshot[63:48];
+							5'd17: io_dout <= ss_pc_snapshot[79:64];
+							5'd18: io_dout <= ss_pc_snapshot[95:80];
+							5'd19: io_dout <= ss_pc_snapshot[111:96];
+							5'd20: io_dout <= ss_pc_snapshot[127:112];
+							5'd21: io_dout <= ss_kick_pair[15:0];
+							5'd22: io_dout <= ss_kick_pair[31:16];
+							5'd23: io_dout <= ss_kick_pair[47:32];
+							5'd24: io_dout <= ss_kick_pair[63:48];
 							default: io_dout <= 16'd0;
 						endcase
 					end

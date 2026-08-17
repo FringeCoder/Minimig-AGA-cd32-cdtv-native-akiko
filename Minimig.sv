@@ -365,6 +365,8 @@ wire [127:0] ss_peek_data;
 wire         ss_peek_valid;
 wire         ss_peek_busy;
 wire         ss_peek_scan;
+wire [127:0] ss_pc_snapshot;
+wire  [63:0] ss_kick_pair;
 
 reg  ss_peek_tgl = 1'b0;
 always @(posedge clk_sys) if (ss_peek_req_sys) ss_peek_tgl <= ~ss_peek_tgl;
@@ -379,7 +381,8 @@ wire ss_peek_req_114 = ss_peek_tgl_sync ^ ss_peek_tgl_d;
 
 hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata), .ss_diag(ss_diag),
 	.ss_peek_addr(ss_peek_addr), .ss_peek_req(ss_peek_req_sys),
-	.ss_peek_data(ss_peek_data), .ss_peek_valid(ss_peek_valid));
+	.ss_peek_data(ss_peek_data), .ss_peek_valid(ss_peek_valid),
+	.ss_pc_snapshot(ss_pc_snapshot), .ss_kick_pair(ss_kick_pair));
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
@@ -777,6 +780,7 @@ wire  [3:0] ss_load_fail_code;
 wire  [5:0] ss_dbg_state;
 wire [23:0] ss_dbg_idx;
 wire        ss_dbg_kick_warn;
+wire        ss_dbg_kick_unstable;
 
 // ss_state_fanout's outputs. It runs on clk_sys, which is both the CPU's
 // clock and minimig.v's, so nothing it drives needs a domain crossing.
@@ -2037,7 +2041,11 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.peek_data(ss_peek_data),
 	.peek_valid(ss_peek_valid),
 	.peek_busy(ss_peek_busy),
-	.peek_scan(ss_peek_scan)
+	.peek_scan(ss_peek_scan),
+	.cpu_pc(ss_pc),
+	.pc_snapshot(ss_pc_snapshot),
+	.kick_pair(ss_kick_pair),
+	.dbg_kick_unstable(ss_dbg_kick_unstable)
 );
 
 // --- outcome toast -----------------------------------------------------------
