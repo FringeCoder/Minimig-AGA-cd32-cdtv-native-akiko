@@ -768,8 +768,27 @@ wire [14:0] ss_restored_intreq;
 // The CIAs. ss_cia_a/ss_cia_b are the capture side, straight out of minimig;
 // the _restored pair and the pulse are the restore side. Both CIAs take their
 // whole word on one clk_sys edge, so there is no sequence here to get wrong.
-wire [190:0] ss_cia_a;
-wire [202:0] ss_cia_b;
+//
+// The capture side is REGISTERED into clk_114 before it joins the state vector.
+// The CIA flops live in minimig's clk_sys domain and ss_serdes shifts on
+// clk_114, so putting them in the vector raw hands the fitter ~400 timed
+// crossings into one shift register -- which failed hold by 0.567 ns across a
+// few dozen of them, CIAB1's timer counters into serdes|shifter. One flop on
+// this side breaks every one of those paths.
+//
+// Safe because the data is static exactly when it is read: ss_ctrl serialises
+// the vector inside the freeze, and a frozen machine has no clk7_en, so no CIA
+// register can change while the capture runs. This is a retiming stage, not a
+// synchroniser, and the two clocks come from the same PLL at 4:1.
+wire [190:0] ss_cia_a_raw;
+wire [202:0] ss_cia_b_raw;
+
+reg  [190:0] ss_cia_a;
+reg  [202:0] ss_cia_b;
+always @(posedge clk_114) begin
+	ss_cia_a <= ss_cia_a_raw;
+	ss_cia_b <= ss_cia_b_raw;
+end
 wire [190:0] ss_restored_cia_a;
 wire [202:0] ss_restored_cia_b;
 wire         ss_restored_cia_we;
@@ -1617,8 +1636,8 @@ minimig minimig
 	// combinational address decodes with no target -- see rtl/ss_state.vh.
 	.ss_map_in            (ss_fanout_map_in     ),
 	.ss_map_we            (ss_fanout_map_we     ),
-	.ss_cia_a             (ss_cia_a             ),
-	.ss_cia_b             (ss_cia_b             ),
+	.ss_cia_a             (ss_cia_a_raw         ),
+	.ss_cia_b             (ss_cia_b_raw         ),
 	.ss_cia_a_in          (ss_restored_cia_a    ),
 	.ss_cia_b_in          (ss_restored_cia_b    ),
 	.ss_cia_we            (ss_restored_cia_we   )
