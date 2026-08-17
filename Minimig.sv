@@ -364,6 +364,7 @@ wire         ss_peek_req_sys;
 wire [127:0] ss_peek_data;
 wire         ss_peek_valid;
 wire         ss_peek_busy;
+wire         ss_peek_scan;
 
 reg  ss_peek_tgl = 1'b0;
 always @(posedge clk_sys) if (ss_peek_req_sys) ss_peek_tgl <= ~ss_peek_tgl;
@@ -705,7 +706,11 @@ wire        ss_cache_flush;
 // arrives, and it resumes the same cycle the scan gives the port back. That is
 // the bus stall this design accepts -- ~20 ms once per restore, with the
 // chipset still running -- not a freeze.
-wire        ss_port_own = ss_freeze | ss_rom_scan;
+// ss_peek_scan is the debug window's own port claim. Kept separate from
+// ss_rom_scan inside ss_ctrl -- driving that one from the peek states as
+// well widened its fan-in enough to fail setup -- and merged here, where
+// it costs a single OR gate.
+wire        ss_port_own = ss_freeze | ss_rom_scan | ss_peek_scan;
 
 // Where the Kickstart ROM physically lives in SDRAM, as the CPU port's own
 // word address -- DERIVED, not assumed. Amiga $F80000 goes through
@@ -2031,7 +2036,8 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.peek_addr(ss_peek_addr),
 	.peek_data(ss_peek_data),
 	.peek_valid(ss_peek_valid),
-	.peek_busy(ss_peek_busy)
+	.peek_busy(ss_peek_busy),
+	.peek_scan(ss_peek_scan)
 );
 
 // --- outcome toast -----------------------------------------------------------
