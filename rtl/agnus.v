@@ -64,6 +64,21 @@ module agnus
 	input  [15:0] data_in,         // data bus in
 	output [15:0] data_out,        // data bus out
 	input   [8:1] address_in,      // 256 words (512 bytes) adress input,
+
+	// Save state replay. Agnus is the only chipset module that does not read
+	// the register address off minimig.v's bus -- it GENERATES that bus, and
+	// decodes its own registers from the internal copy below. So the replay
+	// mux in minimig.v, which switches the bus every other module sees, is
+	// invisible here: DMACON, the DMA pointers, DIWSTRT/STOP, DDFSTRT/STOP,
+	// BEAMCON0 and the copper and blitter registers all ignored a replay
+	// entirely. rtl/sim/ssmux/tb_ss_regbus_mux.sv caught it -- Denise and
+	// Paula took their replayed values and Agnus's DMACON stayed at 0.
+	//
+	// Taking the replay address at the head of the priority mux below fixes
+	// that. Only the address is needed: data_in is already minimig.v's muxed
+	// custom_data_in.
+	input         ss_replay_we,
+	input   [8:1] ss_replay_addr,
 	output reg [20:1] address_out, // chip address output,
 	output  [8:1] reg_address_out, // 256 words (512 bytes) register address out,
 	output reg    cpu_custom,      // CPU has access to custom chipset (registers and chipRAM / slowRAM)
@@ -137,7 +152,22 @@ reg [8:1] reg_address;    //local register address bus
 //first item in this if else if list has highest priority
 always @(*)
 begin
-	if (dma_dsk) begin
+	if (ss_replay_we) begin
+		// A save state replay owns the register bus outright. It only runs
+		// while the machine is frozen, so no DMA engine below can be asking
+		// for the bus at the same time; the priority is stated anyway so the
+		// two can never race if that ever changes. Nothing else is disturbed:
+		// no bus request, no address out, no acknowledge to anyone.
+		cpu_custom = 1;
+		dbr = 0;
+		ack_cop = 0;
+		ack_blt = 0;
+		ack_spr = 0;
+		address_out = 0;
+		reg_address = ss_replay_addr;
+		dbwe = 0;
+	end
+	else if (dma_dsk) begin
 		// bus allocated to disk dma engine
 		cpu_custom = 0;
 		dbr = 1;

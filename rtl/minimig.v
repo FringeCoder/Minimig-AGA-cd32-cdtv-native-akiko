@@ -376,6 +376,18 @@ module minimig
 	input         ss_replay_we,
 	input   [8:1] ss_replay_addr,
 	input  [15:0] ss_replay_data,
+	// The tick the replay writes are decoded on. A restore runs frozen, and
+	// the freeze works by stopping the Amiga's clock generator -- so clk7_en
+	// above is dead for the whole replay, and every chipset register decode,
+	// which is `always @(posedge clk) if (clk7_en)`, never fires. Driving the
+	// buses without this pulse writes nothing at all: proved in
+	// rtl/sim/ssmux/tb_ss_regbus_mux.sv, which failed on all three sampled
+	// registers before it existed.
+	//
+	// Minimig.sv drives it from the MASTER generator's clk7_en, gated by
+	// ss_replay_we, so exactly the cycles carrying a replay write get a tick
+	// and nothing else does.
+	input         ss_replay_tick,
 	// Gary's memory map state, in the order ss_state.vh expects:
 	// {ovl, rom_readonly, sel_kick1mb, sel_kick256kmirror}.
 	output  [3:0] ss_map,
@@ -443,6 +455,16 @@ wire  [8:1] reg_address = ss_replay_we ? ss_replay_addr : reg_address_agnus;
 
 assign ss_rga_addr = reg_address;
 assign ss_rga_data = custom_data_in;
+
+// The register-decode tick for everything on that bus. Identical to clk7_en
+// except during a replay, when the Amiga's generator is stopped and this is
+// the only tick there is. See ss_replay_tick's declaration above.
+//
+// It goes to the modules that decode reg_address and to no others: agnus,
+// paula, denise, userio and the Action Replay cart. The CIAs are on the CPU
+// address bus, not this one, and the memory bridges have no register decode,
+// so an extra tick there would only step logic for nothing.
+wire chipset_clk7_en = clk7_en | ss_replay_tick;
 
 //rest of local signals
 wire        cpu_custom;
@@ -598,7 +620,7 @@ wire        floppy_speed;
 agnus AGNUS1
 (
 	.clk(clk),
-	.clk7_en(clk7_en),
+	.clk7_en(chipset_clk7_en),
 	.cck(cck),
 	.reset(reset),
 	.aen(sel_reg),
@@ -608,6 +630,10 @@ agnus AGNUS1
 	.data_in(custom_data_in),
 	.data_out(agnus_data_out),
 	.address_in(cpu_address_out[8:1]),
+	// Agnus decodes its own registers off the address it generates, not off
+	// the muxed bus, so the replay address has to reach it separately.
+	.ss_replay_we(ss_replay_we),
+	.ss_replay_addr(ss_replay_addr),
 	.address_out(dma_address_out),
 	.reg_address_out(reg_address_agnus),
 	.cpu_custom(cpu_custom),
@@ -649,7 +675,7 @@ agnus AGNUS1
 paula PAULA1
 (
 	.clk(clk),
-	.clk7_en (clk7_en),
+	.clk7_en (chipset_clk7_en),
 	.clk7n_en (clk7n_en),
 	.cck(cck),
 	.reset(reset),
@@ -709,7 +735,7 @@ wire [3:0] cachecfg_pre;
 userio USERIO1 
 (	
 	.clk(clk),
-	.clk7_en(clk7_en),
+	.clk7_en(chipset_clk7_en),
 	.reset(reset),
 	.reg_address_in(reg_address),
 	.data_in(custom_data_in),
@@ -767,7 +793,7 @@ assign res = {shres & |chipset_config[4:3], hires};
 denise DENISE1
 (		
 	.clk(clk),
-	.clk7_en(clk7_en),
+	.clk7_en(chipset_clk7_en),
 	.c1(c1),
 	.c3(c3),
 	.cck(cck),
@@ -924,7 +950,7 @@ minimig_sram_bridge RAM1
 cart CART1
 (
   .clk(clk),
-  .clk7_en(clk7_en),
+  .clk7_en(chipset_clk7_en),
   .clk7n_en(clk7n_en),
   .cpu_rst(!_cpu_reset),
   .cpu_address_in(cpu_address_out),
