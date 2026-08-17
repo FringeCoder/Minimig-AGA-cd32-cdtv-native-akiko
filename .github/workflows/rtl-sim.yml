@@ -77,3 +77,16 @@ jobs:
         run: |
           set -euo pipefail
           bash rtl/sim/tg68k/run.sh
+
+      # The save state register bus through the real minimig: the snoop tap,
+      # the replay mux, the replay's register-decode tick and the memory map
+      # bits. This is the only bench that elaborates minimig.v itself, so it is
+      # also the only one that can see whether a replay actually lands in
+      # agnus, paula and denise rather than merely appearing on their pins.
+      # Both bugs it was written to look for were real: nothing landed at all
+      # while the machine was frozen, and agnus ignored the mux entirely
+      # because it decodes the register address it generates itself.
+      - name: Save state register bus through minimig
+        run: |
+          set -euo pipefail
+          bash rtl/sim/ssmux/run.sh
