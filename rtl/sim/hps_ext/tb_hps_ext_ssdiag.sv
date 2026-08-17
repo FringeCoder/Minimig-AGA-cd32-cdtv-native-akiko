@@ -227,22 +227,33 @@ initial begin
 	@(negedge clk_sys); hps_uio = 1'b1;
 
 	xfer(16'h0062);
-	// Class word 0xF6A3: class 1111011, io_din[5] = peek, and the address high
-	// byte scattered through the spare bits as {io_din[8:6], io_din[4:0]},
-	// which for 0xF6A3 is {3'b010, 5'b00011} = 8'h43.
-	xfer(16'hF6A3);
+	// Class word 0xF6B3: class 1111011, io_din[5] = peek, io_din[4] = arm, and
+	// the address high bits as {io_din[8:6], io_din[3:0]} = {3'b010, 4'b0011}
+	// = 7'h23.
+	xfer(16'hF6B3);
 	xfer(16'h5678);              // addr[16:1]
 
 	// The request is one clock wide and the latch above needs an edge to see
 	// it; xfer returns on a negedge, so give it that edge before asking.
 	repeat (2) @(posedge clk_sys);
 
-	check("peek address high", {24'd0, ss_peek_addr[24:17]}, 32'h00000043);
+	check("peek address high", {25'd0, ss_peek_addr[23:17]}, 32'h00000023);
 	check("peek address low",  {16'd0, ss_peek_addr[16:1]},  32'h00005678);
 	check("peek request pulsed", {31'd0, ss_peek_req_seen}, 32'd1);
 
+	// Read it back WITHOUT the arm bit, which is the whole point of having one:
+	// this must not disturb the address or start another fetch.
+	@(negedge clk_sys); hps_uio = 1'b0;
+	@(negedge clk_sys); hps_uio = 1'b1;
+	xfer(16'h0062);
+	xfer(16'hF620);              // peek class, no arm
+	xfer(16'h0000);
+	ss_peek_req_seen = 1'b0;
+
 	for (k = 0; k < 9; k = k + 1) xfer_rd(w[k]);
 	check("peek signature",  {16'd0, w[0]}, 32'h00005A5A);
+	check("a read does not re-arm",   {31'd0, ss_peek_req_seen}, 32'd0);
+	check("a read leaves the address", {16'd0, ss_peek_addr[16:1]}, 32'h00005678);
 	check("peek longword 0 low",  {16'd0, w[1]}, 32'h0000BABE);
 	check("peek longword 0 high", {16'd0, w[2]}, 32'h0000CAFE);
 	check("peek longword 3 high", {16'd0, w[8]}, 32'h0000FEDC);

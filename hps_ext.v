@@ -132,7 +132,7 @@ module hps_ext
 	// second word carries the low sixteen. One transaction asks; a later one
 	// reads the answer back, so the host never has to wait on the SDRAM
 	// inside a transaction.
-	output reg [24:1] ss_peek_addr,
+	output reg [24:1] ss_peek_addr,   // [24] unused; the arm bit took its place
 	output reg        ss_peek_req,
 	input     [127:0] ss_peek_data,
 	input             ss_peek_valid
@@ -165,6 +165,7 @@ reg  [4:0] byte_cnt;
 // can reach it.
 reg        ss_diag_cs;
 reg        ss_peek_cs;
+reg        ss_peek_arm;
 
 always@(posedge clk_sys) begin : main_proc
 	reg [15:0] cmd;
@@ -194,6 +195,7 @@ always@(posedge clk_sys) begin : main_proc
 		cdtv_cs_stch <= 0;
 		ss_diag_cs <= 0;
 		ss_peek_cs <= 0;
+		ss_peek_arm <= 0;
 		ss_peek_req <= 0;
 		if(cmd == 'h2D) sset <= 1;
 	end
@@ -228,9 +230,16 @@ always@(posedge clk_sys) begin : main_proc
 			// for any host that never asks for a peek.
 			ss_diag_cs       <= (io_din[15:9] == 7'b1111011) && !io_din[5];
 			ss_peek_cs       <= (io_din[15:9] == 7'b1111011) &&  io_din[5];
-			// Address bits [24:17] out of the spare bits of the class word.
-			if (io_din[15:9] == 7'b1111011 && io_din[5])
-				ss_peek_addr[24:17] <= {io_din[8:6], io_din[4:0]};
+			// io_din[4] ARMS a new read; without it the transaction only reads
+			// back what the last one fetched. They have to be separate, because
+			// a readback that re-armed would clear the valid flag it is about to
+			// report and race its own data -- which is exactly what the first
+			// version of this did on hardware.
+			ss_peek_arm      <= (io_din[15:9] == 7'b1111011) &&  io_din[5] && io_din[4];
+			// Address bits [23:17] out of the remaining spare bits. Seven bits
+			// reach 16 MB of word address, well past this design's SDRAM.
+			if (io_din[15:9] == 7'b1111011 && io_din[5] && io_din[4])
+				ss_peek_addr[23:17] <= {io_din[8:6], io_din[3:0]};
 		end
 
 		// One cycle wide: ss_ctrl edge-detects it after a domain crossing.
@@ -238,7 +247,7 @@ always@(posedge clk_sys) begin : main_proc
 
 		// Low sixteen address bits, then go. The address is complete here --
 		// the high bits landed with the class word on the previous byte.
-		if(byte_cnt == 2 && ss_peek_cs) begin
+		if(byte_cnt == 2 && ss_peek_arm) begin
 			ss_peek_addr[16:1] <= io_din;
 			ss_peek_req        <= 1'b1;
 		end
