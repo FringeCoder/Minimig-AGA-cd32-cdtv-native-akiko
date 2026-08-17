@@ -230,6 +230,7 @@ localparam [7:0] IDX_BPLCON0 = 8'h80;   // $100 >> 1, plain, lands in denise
 localparam [7:0] IDX_DMACON  = 8'h4B;   // $096 >> 1, set/clear, agnus
 localparam [7:0] IDX_INTENA  = 8'h4D;   // $09A >> 1, set/clear, paula
 localparam [7:0] IDX_VHPOSW  = 8'h16;   // $02C >> 1, plain, agnus beamcounter
+localparam [7:0] IDX_BLTSIZE = 8'h2C;   // $058 >> 1 -- see the check below
 
 task shadow_load(input [7:0] idx, input [15:0] val);
 begin
@@ -344,6 +345,13 @@ initial begin
 	shadow_load(IDX_INTENA,  16'h0028);
 	shadow_load(IDX_VHPOSW,  16'h0055);   // vpos[7:0]=$00, hpos[8:1]=$55
 
+	// BLTSIZE is not a value, it is a GO button: agnus_blitter.v:501 raises
+	// busy on any write to it. A game's shadow entry always holds one, because
+	// every blit ends by writing it. If the replay drives it, the restore
+	// starts a blit -- with restored pointers, into chip RAM the restore has
+	// just installed, at the moment DMACON is about to come back on.
+	shadow_load(IDX_BLTSIZE, 16'h0140);
+
 	// The value the restore is carrying, and a live register set to something
 	// else entirely. Poked rather than driven: Paula's INTREQ has no write path
 	// from this bench that does not go through the replay itself.
@@ -369,6 +377,11 @@ initial begin
 
 	thaw_machine();
 	repeat (40) @(posedge clk_r);
+
+	// Nothing may have started the blitter. This is the check that says the
+	// replay is a restore and not a program.
+	expect_eq16("frozen replay -> blitter did not start",
+	            {15'd0, ss_blit_busy}, 16'h0000);
 
 	expect_eq16("frozen replay -> denise bplcon0",
 	            dut.DENISE1.bplcon0, 16'hA55A);
