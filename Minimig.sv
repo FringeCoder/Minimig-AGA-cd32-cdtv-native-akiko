@@ -363,6 +363,7 @@ wire [24:1]  ss_peek_addr;
 wire         ss_peek_req_sys;
 wire [127:0] ss_peek_data;
 wire         ss_peek_valid;
+wire         ss_peek_busy;
 
 reg  ss_peek_tgl = 1'b0;
 always @(posedge clk_sys) if (ss_peek_req_sys) ss_peek_tgl <= ~ss_peek_tgl;
@@ -1007,7 +1008,10 @@ cpu_wrapper cpu_wrapper
 	// Releasing the CPU into a half-written register file is the one ordering
 	// error in this path that would look like a game bug rather than a save
 	// state bug.
-	.ss_arm       (ss_save_busy | ss_load_busy | ss_fanout_busy),
+	// ss_peek_busy joins them: the SDRAM CPU port will not answer a
+	// borrowed read while the 68k is still driving it, which is why the
+	// first live peek timed out.
+	.ss_arm       (ss_save_busy | ss_load_busy | ss_fanout_busy | ss_peek_busy),
 	.ss_reg_index (ss_reg_index    ),
 	.ss_reg_data  (ss_reg_data     ),
 	.ss_pc        (ss_pc           ),
@@ -2026,7 +2030,8 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.peek_req(ss_peek_req_114),
 	.peek_addr(ss_peek_addr),
 	.peek_data(ss_peek_data),
-	.peek_valid(ss_peek_valid)
+	.peek_valid(ss_peek_valid),
+	.peek_busy(ss_peek_busy)
 );
 
 // --- outcome toast -----------------------------------------------------------
