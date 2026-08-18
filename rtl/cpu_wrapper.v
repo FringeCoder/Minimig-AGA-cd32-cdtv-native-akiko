@@ -447,9 +447,18 @@ wire stock_speed   = cachecfg[3];
 // equivalent to fastchip_ready being asserted "immediately" alongside
 // fastchip_selack. We treat cdtv_selack as the bridge's "ready" signal.
 // ss_arm parks the CPU on an instruction boundary: ss_at_boundary, the cycle
-// the kernel has decoded an opcode and executed none of it. decodeOPC only
-// changes on an enabled clock, so blocking clkena there is self-latching --
-// the CPU stops on that cycle and stays there until ss_arm drops.
+// the kernel has decoded an opcode and executed none of it.
+//
+// The park has to be LATCHED, not read live. ss_at_boundary is decodeOPC, and
+// the ss_resume re-seed clears decodeOPC (TG68KdotC_Kernel.vhd:1423) -- so the
+// instant the restore re-seeds the sequencer the boundary goes false and a
+// live-gated hold releases the CPU. It would start executing at the restored
+// PC while ss_ctrl is still writing chip RAM, because the state vector is
+// restored BEFORE memory (S_L_ST_FETCH, then S_L_SH_FETCH, then S_L_CH_FETCH).
+// A CPU running against half-rewritten memory is indistinguishable from the
+// mid-instruction restore this park exists to prevent. Latched, the hold
+// survives the re-seed and lasts until ss_arm drops at S_L_RELEASE, by which
+// point memory and the chipset replay are both in place.
 //
 // This deliberately does NOT also wait for cpu_req to drop, which is what it
 // used to do. Measured in tg68k_ss_tb: over 1060 instruction boundaries, not
@@ -460,7 +469,14 @@ wire stock_speed   = cachecfg[3];
 // from the restored PC. Parking at ~cpu_req instead is not safe: it is
 // mid-instruction, and restoring from there scores 66/80 in that bench
 // against 80/80 here.
-wire ss_cpu_hold   = ss_arm & ss_at_boundary;
+
+reg ss_parked;
+always @(posedge clk) begin
+	if (~reset | ~ss_arm) ss_parked <= 1'b0;
+	else if (ss_at_boundary) ss_parked <= 1'b1;
+end
+wire ss_cpu_hold   = ss_arm & (ss_at_boundary | ss_parked);
+
 assign ss_bus_settled = ~cpu_req | chipready | ramready | fastchip_ready | cdtv_selack;
 wire clkena_p_base = ss_bus_settled & ~ss_cpu_hold;
 

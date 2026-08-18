@@ -824,6 +824,49 @@ begin
 
 		----------------------------------------------------------------------
 		note("");
+		----------------------------------------------------------------------
+		note("");
+		note("PHASE 3b -- ss_resume clears the boundary, so a park must latch");
+		----------------------------------------------------------------------
+		-- cpu_wrapper holds the CPU with ss_arm & ss_at_boundary. That signal
+		-- is decodeOPC, and the ss_resume re-seed clears decodeOPC -- so the
+		-- boundary goes false exactly when a restore re-seeds the sequencer.
+		-- A hold gated on it live would release the CPU right there, with
+		-- chip RAM still being written (the state vector is restored first).
+		-- The hold is latched for this reason; this phase is what says so.
+		nReset    <= '0';
+		clkena_in <= '1';
+		ss_resume <= '0';
+		step(6);
+		reload_image;
+		step(4);
+		nReset <= '1';
+		wait_fetch_at(ADDR_MAIN, 400, f_opc, ok);
+		step(60);
+		-- ss_at_boundary is a concurrent assignment off decodeOPC, so reading
+		-- it the instant the process wakes at a clock edge returns the value
+		-- from BEFORE that edge. Settle first, or the bench tests a signal one
+		-- clock stale and reports a design fault that is its own race.
+		for i in 1 to 200 loop
+			wait until rising_edge(clk);
+			wait for 1 ns;
+			exit when ss_at_boundary = '1';
+		end loop;
+		check(ss_at_boundary = '1', "the CPU reaches an instruction boundary");
+		clkena_in <= '0';
+		step(4);
+		wait for 1 ns;
+		check(ss_at_boundary = '1',
+		      "the boundary holds while the CPU clock enable is low");
+		ss_resume <= '1';
+		wait until rising_edge(clk);
+		ss_resume <= '0';
+		wait until rising_edge(clk);
+		wait for 1 ns;
+		check(ss_at_boundary = '0',
+		      "ss_resume CLEARS it -- a live-gated park would let the CPU go " &
+		      "here, mid-restore");
+
 		note("PHASE 4 -- round trip: capture the state and put it straight back");
 		----------------------------------------------------------------------
 		for k in 0 to 79 loop
