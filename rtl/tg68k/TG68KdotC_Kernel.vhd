@@ -148,6 +148,13 @@ entity TG68KdotC_Kernel is
 		ss_reg_index			: in  std_logic_vector( 3 downto 0) := (OTHERS => '0');
 		ss_reg_data				: out std_logic_vector(31 downto 0);
 		ss_pc						: out std_logic_vector(31 downto 0);
+		-- High on the cycle the CPU is BETWEEN instructions: endOPC, which is
+		-- set with setopcode, i.e. the next thing this core does is fetch an
+		-- opcode. It exists because a savestate that freezes anywhere else
+		-- captures TG68_PC pointing mid-instruction -- at an operand word --
+		-- and restoring that resumes the CPU decoding data as code. Measured:
+		-- 5 of 40 freeze points in tg68k_ss_tb derail without this gate.
+		ss_at_boundary			: out std_logic;
 		ss_sr						: out std_logic_vector(15 downto 0);
 		ss_usp					: out std_logic_vector(31 downto 0);
 
@@ -662,6 +669,7 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 -- pipeline.
 ss_reg_data <= regfile(conv_integer(ss_reg_index));
 ss_pc       <= TG68_PC;
+ss_at_boundary <= '1' WHEN endOPC='1' ELSE '0';
 ss_sr       <= FlagsSR & Flags;
 ss_usp      <= USP;
 
