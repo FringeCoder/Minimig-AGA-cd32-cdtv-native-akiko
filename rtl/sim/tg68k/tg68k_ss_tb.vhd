@@ -69,6 +69,7 @@ architecture sim of tg68k_ss_tb is
 	constant RES_D3        : integer := 16#604#;
 	constant RES_A2        : integer := 16#608#;
 	constant RES_TAG       : integer := 16#60C#;
+	constant SCRATCH       : integer := 16#610#;
 
 	-- Values pushed in through the savestate write ports.
 	constant SS_PC_VAL  : std_logic_vector(31 downto 0) := ADDR_RESTORED;
@@ -165,6 +166,7 @@ architecture sim of tg68k_ss_tb is
 	signal ss_reg_data  : std_logic_vector(31 downto 0);
 	signal ss_pc        : std_logic_vector(31 downto 0);
 	signal ss_at_boundary : std_logic;
+	signal ss_exe_pc    : std_logic_vector(31 downto 0);
 	signal ss_sr        : std_logic_vector(15 downto 0);
 	signal ss_usp       : std_logic_vector(31 downto 0);
 
@@ -230,6 +232,7 @@ begin
 			ss_reg_data    => ss_reg_data,
 			ss_pc          => ss_pc,
 			ss_at_boundary => ss_at_boundary,
+			ss_exe_pc      => ss_exe_pc,
 			ss_sr          => ss_sr,
 			ss_usp         => ss_usp,
 			ss_wr_index    => ss_wr_index,
@@ -288,11 +291,12 @@ begin
 		variable rt_n     : integer;
 		variable rt_stray : std_logic_vector(31 downto 0);
 		variable rt_good  : integer := 0;
-		variable rt_line  : string(1 to 40) := (others => ' ');
+		variable rt_line  : string(1 to 80) := (others => ' ');
 		variable rt_first : std_logic_vector(31 downto 0) := (others => '0');
 		variable rt_pc    : std_logic_vector(31 downto 0);
 		variable rt_ff    : std_logic_vector(31 downto 0);
 		variable rt_shown : integer := 0;
+		variable bcount, bidle, bgap, gap : integer := 0;
 		variable summary  : string(1 to 256) := (others => ' ');
 
 		function hex(v : std_logic_vector) return string is
@@ -415,7 +419,9 @@ begin
 		end procedure;
 
 		-- CAPTURE the architectural state the way ss_ctrl's save does: read the
-		-- register file through the export port and take ss_pc as the PC.
+		-- register file through the export port and take ss_exe_pc as the PC.
+		-- NOT ss_pc: TG68_PC is a fetch pointer that has already run into the
+		-- current instruction's extension words.
 		procedure ss_capture(regs : out reg_array;
 		                     pc   : out std_logic_vector(31 downto 0)) is
 		begin
@@ -425,7 +431,7 @@ begin
 				wait until rising_edge(clk);
 				regs(i) := ss_reg_data;
 			end loop;
-			pc := ss_pc;
+			pc := ss_exe_pc;
 		end procedure;
 
 		-- Write back exactly what was captured. Same ports, same order as
@@ -574,12 +580,13 @@ begin
 		-- in $400..$4FF, so every code fetch after the restore must land there.
 		-- A CPU resumed mid-instruction decodes an operand as an opcode and
 		-- wanders out of that range almost immediately.
-		procedure do_roundtrip(freeze : integer;
-		                       pass   : out boolean;
-		                       fetches: out integer;
-		                       strayp : out std_logic_vector(31 downto 0);
-		                       pcap   : out std_logic_vector(31 downto 0);
-		                       firstf : out std_logic_vector(31 downto 0)) is
+		procedure do_roundtrip(freeze  : integer;
+		                       pass    : out boolean;
+		                       fetches : out integer;
+		                       strayp  : out std_logic_vector(31 downto 0);
+		                       pcap    : out std_logic_vector(31 downto 0);
+		                       firstf  : out std_logic_vector(31 downto 0);
+		                       verbose : boolean := false) is
 			variable regs  : reg_array;
 			variable pc    : std_logic_vector(31 downto 0);
 			variable lopc  : std_logic_vector(15 downto 0);
@@ -588,6 +595,8 @@ begin
 			variable stray : std_logic_vector(31 downto 0) := (others => '0');
 			variable ok    : boolean := true;
 			variable ff    : std_logic_vector(31 downto 0) := (others => '0');
+			variable mk0   : std_logic_vector(31 downto 0);
+			variable sc0   : std_logic_vector(31 downto 0);
 		begin
 			nReset    <= '0';
 			clkena_in <= '1';
@@ -612,7 +621,19 @@ begin
 			clkena_in <= '0';
 			step(4);
 			ss_capture(regs, pc);
+			if verbose then
+				note("       captured PC $" & hex(pc) &
+				     "  A7 $" & hex(regs(15)) &
+				     "  D0 $" & hex(regs(0)) &
+				     "  D1 $" & hex(regs(1)) &
+				     "  D2 $" & hex(regs(2)) &
+				     "  A0 $" & hex(regs(8)));
+				note("       stack: [A7] $" & hex(meml(conv_integer(regs(15)(15 downto 0)))) &
+				     "  [A7+4] $" & hex(meml(conv_integer(regs(15)(15 downto 0)) + 4)));
+			end if;
 			ss_restore(regs, pc);
+			mk0 := meml(MAIN_MARK);
+			sc0 := meml(SCRATCH);
 			ss_resume <= '1';
 			wait until rising_edge(clk);
 			ss_resume <= '0';
@@ -624,6 +645,11 @@ begin
 				if clkena_in = '1' and busstate = "00" then
 					n := n + 1;
 					if n = 1 then ff := addr_out; end if;
+					if verbose and n <= 24 then
+						note("       fetch[" & integer'image(n) & "] $" &
+						     hex(addr_out) & " -> $" & hex(data_in) &
+						     "  A7 $" & hex(ss_reg_data));
+					end if;
 					if addr_out(31 downto 8) /= X"000004" then
 						if ok then stray := addr_out; end if;
 						ok := false;
@@ -631,7 +657,17 @@ begin
 				end if;
 			end loop;
 
-			pass    := ok and (n > 8);
+			-- Staying inside $4xx only says the CPU is fetching somewhere
+			-- plausible. The loop also has to RETIRE instructions: both of its
+			-- memory side effects must move, or a CPU spinning on a bad branch
+			-- inside the loop would pass.
+			if verbose then
+				note("       MAIN_MARK $" & hex(mk0) & " -> $" & hex(meml(MAIN_MARK)) &
+				     "   SCRATCH $" & hex(sc0) & " -> $" & hex(meml(SCRATCH)));
+			end if;
+			pass    := ok and (n > 8)
+			           and (meml(MAIN_MARK) /= mk0)
+			           and (meml(SCRATCH) /= sc0);
 			fetches := n;
 			strayp  := stray;
 			pcap    := pc;
@@ -672,6 +708,53 @@ begin
 
 		----------------------------------------------------------------------
 		note("");
+		----------------------------------------------------------------------
+		note("");
+		note("PHASE 1b -- where can the hardware park?");
+		----------------------------------------------------------------------
+		-- cpu_wrapper used to park the CPU at busstate="01" -- its cpu_req
+		-- low, no bus cycle outstanding. That is NOT an instruction boundary,
+		-- and the round trip below scores 66/80 from there.
+		--
+		-- The two conditions cannot simply be ANDed: measured here, an
+		-- instruction boundary NEVER coincides with an idle bus, so a park
+		-- waiting for both would spin until ss_ctrl timed out. The park has to
+		-- be the boundary alone, letting the outstanding fetch settle
+		-- unconsumed -- which is safe because ss_resume re-fetches from the
+		-- restored PC anyway. What this phase has to guarantee is that a
+		-- boundary always comes along soon enough for the park to terminate.
+		nReset <= '0';
+		step(6);
+		reload_image;
+		step(4);
+		nReset <= '1';
+		wait_fetch_at(ADDR_MAIN, 400, f_opc, ok);
+		bcount := 0;
+		bidle  := 0;
+		bgap   := 0;
+		gap    := 0;
+		for i in 1 to 4000 loop
+			wait until rising_edge(clk);
+			gap := gap + 1;
+			if clkena_in = '1' and ss_at_boundary = '1' then
+				bcount := bcount + 1;
+				if busstate = "01" then
+					bidle := bidle + 1;
+				end if;
+				if gap > bgap then bgap := gap; end if;
+				gap := 0;
+			end if;
+		end loop;
+		note("       boundaries: " & integer'image(bcount) &
+		     "   of which with an idle bus: " & integer'image(bidle) &
+		     "   longest wait for one: " & integer'image(bgap) & " clocks");
+		check(bcount > 0, "instruction boundaries occur while the CPU runs");
+		check(bgap > 0 and bgap < 600,
+		      "one is never more than 600 clocks away, so a park terminates");
+		check(bidle = 0,
+		      "and none of them has an idle bus -- so the park condition " &
+		      "cannot also wait for cpu_req to drop");
+
 		note("PHASE 2 -- RED: restore at " & integer'image(FREEZE_N) &
 		     " freeze points, ss_resume never pulsed");
 		----------------------------------------------------------------------
@@ -743,7 +826,7 @@ begin
 		note("");
 		note("PHASE 4 -- round trip: capture the state and put it straight back");
 		----------------------------------------------------------------------
-		for k in 0 to 39 loop
+		for k in 0 to 79 loop
 			do_roundtrip(k, rt_ok, rt_n, rt_stray, rt_pc, rt_ff);
 			if not rt_ok and rt_shown < 4 then
 				note("       point " & integer'image(k) &
@@ -761,12 +844,24 @@ begin
 			end if;
 		end loop;
 		note("       per freeze point (. = kept running, X = derailed): " & rt_line);
-		if rt_good < 40 then
+		if rt_good < 80 then
 			note("       first stray fetch was at $" & hex(rt_first));
 		end if;
-		check(rt_good = 40,
+		check(rt_good = 80,
 		      "capture and restore in place is a no-op (" &
-		      integer'image(rt_good) & "/40)");
+		      integer'image(rt_good) & "/80)");
+
+		if rt_good < 80 then
+			for k in 0 to 79 loop
+				if rt_line(k+1) = 'X' then
+					note("");
+					note("       -- replaying freeze point " & integer'image(k) &
+					     " with the fetch trace --");
+					do_roundtrip(k, rt_ok, rt_n, rt_stray, rt_pc, rt_ff, true);
+					exit;
+				end if;
+			end loop;
+		end if;
 
 
 		if errors = 0 then

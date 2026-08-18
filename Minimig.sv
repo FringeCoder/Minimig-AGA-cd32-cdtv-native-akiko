@@ -581,7 +581,13 @@ amiga_clk amiga_clk_am
 // sampled one per clk_sys cycle while the CPU is parked.
 reg  [3:0]  ss_reg_index;
 wire [31:0] ss_reg_data;
+// The saved PC is the kernel's ARCHITECTURAL PC (exe_pc), not TG68_PC.
+// TG68_PC is a fetch pointer: mid-instruction it has already run on into the
+// operand words, so a state saved with it resumes the CPU decoding data as
+// code. That is what the restores that ended in a reset were doing.
 wire [31:0] ss_pc;
+wire        ss_cpu_at_boundary;
+wire        ss_cpu_bus_settled;
 wire [15:0] ss_sr;
 wire [31:0] ss_usp;
 wire [31:0] ss_vbr;
@@ -701,7 +707,10 @@ wire        ss_cache_flush;
 // The 68k is off the port for both windows, by cpu_wrapper's ss_arm rather
 // than by anything here: ss_arm is tied to (save_busy | load_busy | fan-out
 // busy) at the cpu_wrapper instance, and it parks the CPU at its next
-// no-memaccess boundary, which drops ram_cs. Both busies are high for
+// instruction boundary. That does NOT drop ram_cs on its own -- an
+// instruction boundary never has an idle bus -- which is why the freeze also
+// waits for ss_cpu_bus_settled, so the outstanding cycle is finished and
+// acked before the port changes hands. Both busies are high for
 // milliseconds before ss_rom_scan can rise (a restore has an entire payload
 // CRC pass to get through first, a save is already frozen), so the CPU is long
 // since parked. Even in the impossible case where it were not, the failure is
@@ -1023,7 +1032,9 @@ cpu_wrapper cpu_wrapper
 	.ss_arm       (ss_save_busy | ss_load_busy | ss_fanout_busy | ss_peek_busy),
 	.ss_reg_index (ss_reg_index    ),
 	.ss_reg_data  (ss_reg_data     ),
-	.ss_pc        (ss_pc           ),
+	.ss_exe_pc    (ss_pc           ),
+	.ss_at_boundary(ss_cpu_at_boundary),
+	.ss_bus_settled(ss_cpu_bus_settled),
 	.ss_sr        (ss_sr           ),
 	.ss_usp       (ss_usp          ),
 	.ss_vbr       (ss_vbr          ),
@@ -1136,7 +1147,8 @@ sdram_ctrl ram1
 	.sd_clk       (SDRAM_CLK       ),
 
 	// While frozen the CPU port belongs to ss_dma. The CPU itself is parked
-	// at a no-memaccess boundary, so ram_cs is low and nothing is displaced.
+	// at an instruction boundary with its last bus cycle settled (see
+	// ss_cpu_settled_q), so nothing is in flight to be displaced.
 	// cache_inhibit was previously unconnected (and so tied low); ss_dma
 	// asserts it for the whole dump because chip DMA writes do not pass
 	// through this cache and a cached read could return a stale word.
@@ -1800,7 +1812,7 @@ wire ss_load_req_raw = ss_load_pending;
 // state vector on the one cycle ss_ctrl asserts save_start, which is a single
 // clock after quiesced, so a sweep that only started at freeze time would
 // serialise sixteen uninitialised registers. ss_save_busy parks the CPU at
-// its next no-memaccess boundary (see cpu_wrapper's ss_arm), the sweep runs
+// its next instruction boundary (see cpu_wrapper's ss_arm), the sweep runs
 // there, and ss_regs_valid is what finally lets cpu_boundary go true.
 //
 // ss_load_busy is in here as well as ss_save_busy, and it has to be: it is
@@ -1810,7 +1822,26 @@ wire ss_load_req_raw = ss_load_pending;
 // then time out with FAIL_QUIESCE every single time. The register sweep the
 // block below performs during a restore is harmless -- it is a read port, and
 // the values it lands in ss_cpu_d0..a7 are overwritten by the next save.
-wire ss_cpu_parked = (ss_save_busy | ss_load_busy) & (cpu_state == 2'd1);
+//
+// The park point is the CPU's instruction boundary, not cpu_state==1. A
+// no-memaccess cycle is an internal step in the MIDDLE of an instruction: the
+// state captured there is half-executed, and restoring it derails the machine
+// even though the PC written back is exactly the one that was saved. That is
+// the whole of the reset-on-restore bug.
+//
+// ss_cpu_bus_settled is latched rather than used directly: the ready it
+// reports can be a single cycle, and the parked CPU never consumes it, so
+// sampling it live would deadlock the sixteen-cycle register sweep below.
+// The latch clears whenever the CPU is not on a boundary, so it can only be
+// set by a ready seen during THIS park.
+reg ss_cpu_settled_q;
+always @(posedge clk_sys) begin
+	if (!ss_cpu_at_boundary)     ss_cpu_settled_q <= 1'b0;
+	else if (ss_cpu_bus_settled) ss_cpu_settled_q <= 1'b1;
+end
+
+wire ss_cpu_parked = (ss_save_busy | ss_load_busy)
+                     & ss_cpu_at_boundary & ss_cpu_settled_q;
 
 always @(posedge clk_sys) begin
 	if (!ss_cpu_parked) begin

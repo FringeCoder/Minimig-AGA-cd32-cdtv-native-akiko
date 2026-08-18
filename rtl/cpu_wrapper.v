@@ -58,7 +58,20 @@ module cpu_wrapper
 	// registers, valid while the CPU is parked by ss_arm.
 	input       [3:0] ss_reg_index,
 	output     [31:0] ss_reg_data,
+	// ss_pc is TG68_PC, the FETCH pointer: mid-instruction it points at an
+	// operand word, so it is not what a savestate should record. ss_exe_pc is
+	// the architectural PC -- the address of the instruction being executed --
+	// and ss_at_boundary says when the CPU is sitting on one having executed
+	// none of it. ss_pc is still exported because the diagnostics sample it.
 	output     [31:0] ss_pc,
+	output     [31:0] ss_exe_pc,
+	output            ss_at_boundary,
+	// High when no CPU bus cycle is outstanding -- either the CPU is not
+	// asking for one or the memory has answered. Parking at ~cpu_req used to
+	// give this for free; parking at an instruction boundary does not, and the
+	// freeze must not be taken with a cache fill half done, because it hands
+	// the SDRAM CPU port to ss_dma. Minimig.sv latches this into cpu_boundary.
+	output            ss_bus_settled,
 	output     [15:0] ss_sr,
 	output     [31:0] ss_usp,
 	output     [31:0] ss_vbr,
@@ -337,6 +350,8 @@ cpu_inst_p
   .ss_reg_index(ss_reg_index),
   .ss_reg_data(ss_reg_data),
   .ss_pc(ss_pc),
+  .ss_exe_pc(ss_exe_pc),
+  .ss_at_boundary(ss_at_boundary),
   .ss_sr(ss_sr),
   .ss_usp(ss_usp),
 
@@ -431,14 +446,23 @@ wire stock_speed   = cachecfg[3];
 // combinationally with sel, so the data is available on the same cycle —
 // equivalent to fastchip_ready being asserted "immediately" alongside
 // fastchip_selack. We treat cdtv_selack as the bridge's "ready" signal.
-// ss_arm parks the CPU at the next no-memaccess boundary. cpu_req is low
-// exactly at that boundary, and cpustate cannot change without a clkena
-// tick, so blocking clkena there is self-latching: the CPU stops on that
-// cycle and stays there until ss_arm drops. Blocking it unconditionally
-// instead would strand the CPU mid-bus-cycle with a chip or RAM handshake
-// half done.
-wire ss_cpu_hold   = ss_arm & ~cpu_req;
-wire clkena_p_base = (~cpu_req | chipready | ramready | fastchip_ready | cdtv_selack) & ~ss_cpu_hold;
+// ss_arm parks the CPU on an instruction boundary: ss_at_boundary, the cycle
+// the kernel has decoded an opcode and executed none of it. decodeOPC only
+// changes on an enabled clock, so blocking clkena there is self-latching --
+// the CPU stops on that cycle and stays there until ss_arm drops.
+//
+// This deliberately does NOT also wait for cpu_req to drop, which is what it
+// used to do. Measured in tg68k_ss_tb: over 1060 instruction boundaries, not
+// one had an idle bus, so a park waiting for both would never fire and every
+// save would time out. Parking with a fetch outstanding is safe here because
+// the cycle is allowed to settle -- clkena is already low until the memory
+// answers -- and the CPU simply never consumes the word; ss_resume re-fetches
+// from the restored PC. Parking at ~cpu_req instead is not safe: it is
+// mid-instruction, and restoring from there scores 66/80 in that bench
+// against 80/80 here.
+wire ss_cpu_hold   = ss_arm & ss_at_boundary;
+assign ss_bus_settled = ~cpu_req | chipready | ramready | fastchip_ready | cdtv_selack;
+wire clkena_p_base = ss_bus_settled & ~ss_cpu_hold;
 
 reg [3:0] cooldown;
 always @(posedge clk) begin
