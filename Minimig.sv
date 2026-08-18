@@ -1840,7 +1840,12 @@ always @(posedge clk_sys) begin
 	else if (ss_cpu_bus_settled) ss_cpu_settled_q <= 1'b1;
 end
 
-wire ss_cpu_parked = (ss_save_busy | ss_load_busy)
+// ss_peek_busy belongs here for the same reason ss_load_busy does. The live
+// peek freezes the machine to borrow the SDRAM CPU port, and ss_quiesce will
+// not declare it quiesced without cpu_boundary, so a peek that was not in this
+// term reached S_PEEK_FREEZE, waited, and fell back to idle with freeze still
+// low -- every peek returning "not valid yet" and never a byte of memory.
+wire ss_cpu_parked = (ss_save_busy | ss_load_busy | ss_peek_busy)
                      & ss_cpu_at_boundary & ss_cpu_settled_q;
 
 always @(posedge clk_sys) begin
