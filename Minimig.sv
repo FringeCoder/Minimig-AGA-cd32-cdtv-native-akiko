@@ -387,7 +387,9 @@ hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fa
 	.ss_frame_count(ss_frame_count), .ss_reset_src(ss_reset_src),
 	.ss_reset_pc(ss_reset_pc), .ss_fault_vec(ss_fault_vec),
 	.ss_fault_pc(ss_fault_pc), .ss_int_count(ss_int_count),
-	.ss_fault_sr(ss_fault_sr), .ss_vbr_live(ss_vbr), .ss_sr_live(ss_sr));
+	.ss_fault_sr(ss_fault_sr), .ss_vbr_live(ss_vbr), .ss_sr_live(ss_sr),
+	.ss_int_vec(ss_int_vec), .ss_int_from_pc(ss_int_from_pc),
+	.ss_int_entry_pc(ss_int_entry_pc));
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
@@ -651,17 +653,33 @@ reg        ss_diag_frozen;
 reg [15:0] ss_fault_vec;
 reg [31:0] ss_fault_pc;
 reg [15:0] ss_fault_sr;
+reg [15:0] ss_int_vec;
+reg [31:0] ss_int_from_pc;
+reg [31:0] ss_int_entry_pc;
+reg        ss_int_arm;
+reg        ss_boundary_d;
 reg  [7:0] ss_int_count;
 reg        ss_trap_active_d;
 wire [9:0] ss_trap_vector;
 wire       ss_trap_active;
 always @(posedge clk_sys) begin
 	ss_trap_active_d <= ss_trap_active;
+	// Handler entry: the first instruction decoded after that dispatch. If it
+	// reads $00F8679A the CPU really did use the vector sitting at $6C.
+	ss_boundary_d <= ss_cpu_at_boundary;
+	if (ss_int_arm && ss_cpu_at_boundary && !ss_boundary_d && !ss_diag_frozen) begin
+		ss_int_entry_pc <= ss_pc;
+		ss_int_arm      <= 1'b0;
+	end
 	if (ss_reset_src_clr) begin
 		ss_fault_vec <= 16'd0;
 		ss_fault_pc  <= 32'd0;
-		ss_fault_sr  <= 16'd0;
-		ss_int_count <= 8'd0;
+		ss_fault_sr     <= 16'd0;
+		ss_int_count    <= 8'd0;
+		ss_int_vec      <= 16'd0;
+		ss_int_from_pc  <= 32'd0;
+		ss_int_entry_pc <= 32'd0;
+		ss_int_arm      <= 1'b0;
 	end
 	else if (ss_diag_frozen) begin
 		// hold everything as it was when the machine rebooted
@@ -669,6 +687,19 @@ always @(posedge clk_sys) begin
 	else if (ss_trap_active & ~ss_trap_active_d) begin
 		if (ss_trap_vector >= 10'h060) begin
 			if (ss_int_count != 8'hFF) ss_int_count <= ss_int_count + 8'd1;
+			// The FIRST interrupt: which vector, and the PC it interrupted.
+			// ss_int_entry_pc below records where it actually landed. Every
+			// other candidate has been eliminated by measurement -- memory,
+			// INTENA, INTREQ, VBR, SR, the shadow, the beam -- and what is
+			// left is a contradiction: the level-3 vector at $6C points into
+			// the middle of a ROM routine that the running machine could not
+			// survive using, yet it plainly does. So record where the CPU
+			// goes instead of inferring it.
+			if (ss_int_vec == 16'd0) begin
+				ss_int_vec     <= {6'd0, ss_trap_vector};
+				ss_int_from_pc <= ss_pc;
+				ss_int_arm     <= 1'b1;
+			end
 		end
 		else if (ss_fault_vec == 16'd0) begin
 			ss_fault_vec <= {6'd0, ss_trap_vector};

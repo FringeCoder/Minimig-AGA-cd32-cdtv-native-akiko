@@ -159,7 +159,10 @@ module hps_ext
 	// capture is wrong, or it is zero and the running machine never takes
 	// level 3. One reading decides which.
 	input      [31:0] ss_vbr_live,
-	input      [15:0] ss_sr_live
+	input      [15:0] ss_sr_live,
+	input      [15:0] ss_int_vec,
+	input      [31:0] ss_int_from_pc,
+	input      [31:0] ss_int_entry_pc
 );
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
@@ -445,6 +448,11 @@ always@(posedge clk_sys) begin : main_proc
 							6'd36: io_dout <= ss_vbr_live[15:0];
 							6'd37: io_dout <= ss_vbr_live[31:16];
 							6'd38: io_dout <= ss_sr_live;
+							6'd39: io_dout <= ss_int_vec;
+							6'd40: io_dout <= ss_int_from_pc[15:0];
+							6'd41: io_dout <= ss_int_from_pc[31:16];
+							6'd42: io_dout <= ss_int_entry_pc[15:0];
+							6'd43: io_dout <= ss_int_entry_pc[31:16];
 							default: io_dout <= 16'd0;
 						endcase
 					end
