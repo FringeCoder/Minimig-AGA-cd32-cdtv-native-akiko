@@ -145,7 +145,8 @@ module hps_ext
 	// Live chipset diagnostics, read back at byte_cnt 25-27.
 	input      [14:0] ss_intena_live,
 	input      [14:0] ss_intreq_live,
-	input       [7:0] ss_frame_count
+	input       [7:0] ss_frame_count,
+	input       [2:0] ss_reset_src
 );
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
@@ -416,6 +417,7 @@ always@(posedge clk_sys) begin : main_proc
 							5'd25: io_dout <= {1'b0, ss_intena_live};
 							5'd26: io_dout <= {1'b0, ss_intreq_live};
 							5'd27: io_dout <= {8'd0, ss_frame_count};
+							5'd28: io_dout <= {13'd0, ss_reset_src};
 							default: io_dout <= 16'd0;
 						endcase
 					end

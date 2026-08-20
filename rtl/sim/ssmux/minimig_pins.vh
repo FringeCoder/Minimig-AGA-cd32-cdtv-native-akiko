@@ -159,6 +159,8 @@ wire         ss_disk_busy;
 wire         ss_audio_busy;
 wire [14:0]  ss_intreq;
 wire [14:0]  ss_intena;
+wire [2:0]   ss_reset_src;
+wire         ss_reset_src_clr;
 wire [8:1]   ss_rga_addr;
 wire [15:0]  ss_rga_data;
 wire         ss_replay_we;
@@ -241,6 +243,7 @@ reg  [63:0]  drv_a2065_mem_readdata;
 reg          drv_a2065_mem_readdatavalid;
 reg          drv_a2065_mem_waitrequest;
 reg  [6:0]   drv_USER_IN;
+reg          drv_ss_reset_src_clr;
 reg  [3:0]   drv_ss_map_in;
 reg          drv_ss_map_we;
 reg  [190:0] drv_ss_cia_a_in;
@@ -312,6 +315,7 @@ assign a2065_mem_readdata = drv_a2065_mem_readdata;
 assign a2065_mem_readdatavalid = drv_a2065_mem_readdatavalid;
 assign a2065_mem_waitrequest = drv_a2065_mem_waitrequest;
 assign USER_IN = drv_USER_IN;
+assign ss_reset_src_clr = drv_ss_reset_src_clr;
 assign ss_map_in = drv_ss_map_in;
 assign ss_map_we = drv_ss_map_we;
 assign ss_cia_a_in = drv_ss_cia_a_in;
@@ -386,6 +390,7 @@ begin
 	drv_a2065_mem_readdatavalid = 0;
 	drv_a2065_mem_waitrequest = 0;
 	drv_USER_IN = 0;
+	drv_ss_reset_src_clr = 0;
 	drv_ss_map_in = 0;
 	drv_ss_map_we = 0;
 	drv_ss_cia_a_in = 0;
@@ -549,6 +554,8 @@ minimig dut (
 	.ss_audio_busy(ss_audio_busy),
 	.ss_intreq(ss_intreq),
 	.ss_intena(ss_intena),
+	.ss_reset_src(ss_reset_src),
+	.ss_reset_src_clr(ss_reset_src_clr),
 	.ss_rga_addr(ss_rga_addr),
 	.ss_rga_data(ss_rga_data),
 	.ss_replay_we(ss_replay_we),

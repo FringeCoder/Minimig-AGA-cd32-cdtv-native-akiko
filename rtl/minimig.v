@@ -367,6 +367,8 @@ module minimig
 	// an accumulator built from writes drifts within a frame.
 	output [14:0] ss_intreq,
 	output [14:0] ss_intena,
+	output  [2:0] ss_reset_src,     // {CPU RESET instr, sys_reset, host cpurst}
+	input         ss_reset_src_clr,
 
 	// Save state: the custom chipset register bus, tapped and overridable.
 	// Every chipset register write in the machine is ss_rga_data on ss_rga_addr
@@ -1295,6 +1297,27 @@ assign custom_data_out[15:0] = agnus_data_out[15:0]
 							 | user_data_out[15:0];
 
 //--------------------------------------------------------------------------------------
+
+// Which source last reset the machine. A restore that ends in the Amiga
+// rebooting cannot be diagnosed without this: cpurst (the HOST asking, over
+// userio's reset-control register), sys_reset, and the CPU's own RESET
+// instruction all land on the same wire and produce the identical symptom --
+// ovl back to 1, ROM over address 0, the game restarting from the beginning.
+// Sticky, because the event is over long before anyone can read it.
+assign ss_reset_src = {ss_rst_cpuinstr, ss_rst_sys, ss_rst_host};
+reg ss_rst_host, ss_rst_sys, ss_rst_cpuinstr;
+always @(posedge clk) begin
+	if (ss_reset_src_clr) begin
+		ss_rst_host    <= 1'b0;
+		ss_rst_sys     <= 1'b0;
+		ss_rst_cpuinstr<= 1'b0;
+	end
+	else begin
+		if (cpurst)          ss_rst_host     <= 1'b1;
+		if (sys_reset)       ss_rst_sys      <= 1'b1;
+		if (~_cpu_reset_in)  ss_rst_cpuinstr <= 1'b1;
+	end
+end
 
 assign _cpu_reset = _rst;
 

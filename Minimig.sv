@@ -384,7 +384,7 @@ hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fa
 	.ss_peek_data(ss_peek_data), .ss_peek_valid(ss_peek_valid),
 	.ss_pc_snapshot(ss_pc_snapshot), .ss_kick_pair(ss_kick_pair),
 	.ss_intena_live(ss_intena), .ss_intreq_live(ss_intreq),
-	.ss_frame_count(ss_frame_count));
+	.ss_frame_count(ss_frame_count), .ss_reset_src(ss_reset_src));
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
@@ -616,6 +616,13 @@ wire [14:0] ss_intreq;
 // is the chipset still running at all, and did the INTENA replay land.
 wire [14:0] ss_intena;
 reg  [7:0]  ss_frame_count;   // incremented below, where ss_frame_tick exists
+// Which source reset the Amiga, latched since the current restore began. The
+// latch is cleared when a restore starts, so whatever it holds afterwards is
+// what rebooted the machine as a consequence of that restore.
+wire [2:0]  ss_reset_src;
+reg         ss_load_busy_d;
+always @(posedge clk_sys) ss_load_busy_d <= ss_load_busy;
+wire        ss_reset_src_clr = ss_load_busy & ~ss_load_busy_d;
 
 // Custom chipset register shadow. Most Amiga custom registers are write-only in
 // hardware and this core is faithful about that, so they cannot be exported the
@@ -1698,6 +1705,8 @@ minimig minimig
 	.ss_audio_busy        (ss_audio_busy        ),
 	.ss_intreq            (ss_intreq            ),
 	.ss_intena            (ss_intena            ),
+	.ss_reset_src         (ss_reset_src         ),
+	.ss_reset_src_clr     (ss_reset_src_clr     ),
 	.ss_rga_addr          (ss_rga_addr          ),
 	.ss_rga_data          (ss_rga_data          ),
 	.ss_replay_we         (ss_replay_we         ),
