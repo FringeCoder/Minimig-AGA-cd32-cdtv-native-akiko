@@ -120,6 +120,8 @@ wire [31:0] ss_int_from_pc = 32'h0004E118;
 wire [31:0] ss_int_entry_pc= 32'h00F8679A;
 wire [15:0] ss_lvl3_count  = 16'h0123;
 wire [15:0] ss_int_total   = 16'h4567;
+wire [31:0] ss_lvl3_entry_pc = 32'h00F8679A;
+wire [31:0] ss_lvl3_from_pc  = 32'h0004E118;
 
 hps_ext dut (.*);
 
@@ -160,7 +162,7 @@ reg leaked = 1'b0;
 always @(posedge clk_sys)
 	if (ide_rd | ide_wr | akiko_rd | akiko_wr | cdtv_rd | cdtv_wr | cdda_wr) leaked <= 1'b1;
 
-reg [15:0] w [0:31];   // sized for the full diagnostic readback, byte_cnt 3..34
+reg [15:0] w [0:47];   // sized for the full diagnostic readback
 // ss_peek_req is one cycle wide; latch it so the check below can see it.
 reg ss_peek_req_seen = 1'b0;
 // ss_diag_cs lives inside the DUT; sample it rather than infer it.
@@ -297,7 +299,7 @@ initial begin
 	// purpose -- a saturating counter returns a plausible number, not an
 	// obviously wrong one, so only checking the LAST word actually proves the
 	// counter still advances.
-	for (k = 0; k < 30; k = k + 1) xfer_rd(w[k]);
+	for (k = 0; k < 34; k = k + 1) xfer_rd(w[k]);
 	// The loop above left byte_cnt at 16, so w[k] is byte_cnt 16+k. The
 	// kick_pair words land at w[5..8], which is what pins the offset.
 	check("kick pair word 0",  {16'd0, w[5]},  32'h0000EE00);   // bc21
@@ -322,6 +324,10 @@ initial begin
 	check("handler entry hi", {16'd0, w[27]}, 32'h000000F8);   // bc43
 	check("level-3 count",    {16'd0, w[28]}, 32'h00000123);   // bc44
 	check("interrupt total",  {16'd0, w[29]}, 32'h00004567);   // bc45
+	check("lvl3 entry low",   {16'd0, w[30]}, 32'h0000679A);   // bc46
+	check("lvl3 entry high",  {16'd0, w[31]}, 32'h000000F8);   // bc47
+	check("lvl3 from low",    {16'd0, w[32]}, 32'h0000E118);   // bc48
+	check("lvl3 from high",   {16'd0, w[33]}, 32'h00000004);   // bc49
 
 	// io_din[5] picks the peek, so the status window's own chip select must
 	// have stayed low through all of that -- a decode that let both through

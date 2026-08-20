@@ -390,7 +390,8 @@ hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fa
 	.ss_fault_sr(ss_fault_sr), .ss_vbr_live(ss_vbr), .ss_sr_live(ss_sr),
 	.ss_int_vec(ss_int_vec), .ss_int_from_pc(ss_int_from_pc),
 	.ss_int_entry_pc(ss_int_entry_pc),
-	.ss_lvl3_count(ss_lvl3_count), .ss_int_total(ss_int_total));
+	.ss_lvl3_count(ss_lvl3_count), .ss_int_total(ss_int_total),
+	.ss_lvl3_entry_pc(ss_lvl3_entry_pc), .ss_lvl3_from_pc(ss_lvl3_from_pc));
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
@@ -666,6 +667,16 @@ reg [15:0] ss_fault_sr;
 // reading it should be taking that same dispatch fifty times a second and
 // dying. It does not. So either it never takes level 3 at all, and the restore
 // introduces one, or one of those readings is not what it appears to be.
+// Where a NORMAL level-3 interrupt goes, and what it interrupted. Free-running
+// like the counters beside it, so it describes the running machine rather than
+// a restore. The counters proved the machine takes 50 of these a second and
+// survives, so entering $00F8679A cannot be fatal in itself -- which leaves
+// either a different entry during normal running (the vector the CPU fetches
+// is not the one we peek) or the same entry surviving on different register
+// context. These say which.
+reg [31:0] ss_lvl3_entry_pc;
+reg [31:0] ss_lvl3_from_pc;
+reg        ss_lvl3_arm;
 reg [15:0] ss_lvl3_count;
 reg [15:0] ss_int_total;
 reg [15:0] ss_int_vec;
@@ -682,9 +693,17 @@ always @(posedge clk_sys) begin
 	if (ss_trap_active & ~ss_trap_active_d) begin
 		if (ss_trap_vector >= 10'h060) begin
 			if (ss_int_total != 16'hFFFF) ss_int_total <= ss_int_total + 16'd1;
-			if (ss_trap_vector == 10'h06C && ss_lvl3_count != 16'hFFFF)
-				ss_lvl3_count <= ss_lvl3_count + 16'd1;
+			if (ss_trap_vector == 10'h06C) begin
+				if (ss_lvl3_count != 16'hFFFF)
+					ss_lvl3_count <= ss_lvl3_count + 16'd1;
+				ss_lvl3_from_pc <= ss_pc;
+				ss_lvl3_arm     <= 1'b1;
+			end
 		end
+	end
+	else if (ss_lvl3_arm && ss_cpu_at_boundary && !ss_boundary_d) begin
+		ss_lvl3_entry_pc <= ss_pc;
+		ss_lvl3_arm      <= 1'b0;
 	end
 	// Handler entry: the first instruction decoded after that dispatch. If it
 	// reads $00F8679A the CPU really did use the vector sitting at $6C.
