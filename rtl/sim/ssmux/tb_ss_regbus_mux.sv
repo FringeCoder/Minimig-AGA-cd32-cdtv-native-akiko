@@ -37,6 +37,9 @@ module tb_ss_regbus_mux;
 
 integer errs = 0;
 
+reg [7:0]  beam_hpos_pre;
+reg [10:0] beam_vpos_pre;
+
 task expect_eq16(input [511:0] what, input [15:0] got, input [15:0] want);
 begin
 	if (got !== want) begin
@@ -179,6 +182,7 @@ ss_regshadow shadow
 integer tap_errs    = 0;
 integer mux_errs    = 0;
 integer excl_errs   = 0;
+reg     saw_vhposw_replay = 1'b0;
 reg     checks_live = 1'b0;
 
 always @(posedge clk_r) if (checks_live) begin
@@ -210,6 +214,10 @@ always @(posedge clk_r) if (checks_live) begin
 				         {ss_replay_addr, 1'b0}, $time);
 			excl_errs = excl_errs + 1;
 		end
+		// VHPOSW writes the beam counters, so it must never be replayed. The
+		// shadow holds a value for it (loaded above) precisely so that a
+		// design which forgot the exclusion would drive it here.
+		if (ss_replay_addr == IDX_VHPOSW) saw_vhposw_replay = 1'b1;
 	end
 	else begin
 		// Idle: straight through from agnus and gary.
@@ -343,7 +351,11 @@ initial begin
 	shadow_load(IDX_BPLCON0, 16'hA55A);
 	shadow_load(IDX_DMACON,  16'h0060);   // blitter + sprite bits, DMAEN low
 	shadow_load(IDX_INTENA,  16'h0028);
-	shadow_load(IDX_VHPOSW,  16'h0055);   // vpos[7:0]=$00, hpos[8:1]=$55
+	// VHPOSW is loaded into the shadow but must never reach the bus: it writes
+	// the beam counters, so replaying it moves the raster mid-restore. Loading
+	// it here is what makes the exclusion testable -- shadow_load goes in
+	// through the restore path, which does not consult writable().
+	shadow_load(IDX_VHPOSW,  16'h0055);
 
 	// BLTSIZE is not a value, it is a GO button: agnus_blitter.v:501 raises
 	// busy on any write to it. A game's shadow entry always holds one, because
@@ -359,21 +371,31 @@ initial begin
 	dut.PAULA1.pi1.intreq = 15'h7FFF;
 
 	freeze_machine();
+	// Seed the beam with a known position. Without this the counters are still
+	// X here -- hpos only becomes defined at the first end_of_line and vpos at
+	// the first last_line -- and comparing X against X passes while proving
+	// nothing. Set while frozen, so only a replay write could move it.
+	dut.AGNUS1.bc1.hpos = 9'h0AB;
+	dut.AGNUS1.bc1.vpos = 11'd137;
+	beam_hpos_pre = dut.AGNUS1.bc1.hpos[8:1];
+	beam_vpos_pre = dut.AGNUS1.bc1.vpos;
 	run_replay();
 
-	// The beam, which the replay both sets and must not then drift. VHPOSW is
-	// an ordinary shadowed register, so a replay writes it like any other:
-	// hpos[8:1] takes its low byte and vpos[7:0] its high byte. What must NOT
-	// happen is any movement after that write, and there are ~400 more replay
-	// ticks behind it -- agnus_beamcounter increments hpos under
-	// `clk7_en && cck`, so a machine parked with cck high would step the beam
-	// once per remaining write. Checking the exact value therefore checks the
-	// phase the freeze parks on. hpos[0] is not a counter bit; it is cck
-	// itself, wired straight through.
-	expect_eq16("frozen replay -> beam hpos, no drift after VHPOSW",
-	            {8'd0, dut.AGNUS1.bc1.hpos[8:1]}, {8'd0, 8'h55});
-	expect_eq16("frozen replay -> beam vpos, no drift after VHPOSW",
-	            {5'd0, dut.AGNUS1.bc1.vpos}, 16'h0000);
+	// The beam must not move across a replay. There are ~400 replay ticks in
+	// one pass and agnus_beamcounter increments hpos under `clk7_en && cck`,
+	// so a machine parked with cck high would step the beam once per write --
+	// which is what this checks, by comparing against the position sampled
+	// after the freeze rather than a value the replay installed. It used to
+	// use a replayed VHPOSW as the vehicle; that register is excluded now
+	// precisely because writing it moves the beam, so the property has to be
+	// tested without it. hpos[0] is not a counter bit, it is cck wired
+	// straight through, hence [8:1].
+	expect_eq16("frozen replay -> beam hpos does not drift",
+	            {8'd0, dut.AGNUS1.bc1.hpos[8:1]}, {8'd0, beam_hpos_pre});
+	expect_eq16("frozen replay -> beam vpos does not drift",
+	            {5'd0, dut.AGNUS1.bc1.vpos}, {5'd0, beam_vpos_pre});
+	expect_eq1("VHPOSW was never replayed onto the bus",
+	           saw_vhposw_replay, 1'b0);
 
 	thaw_machine();
 	repeat (40) @(posedge clk_r);
