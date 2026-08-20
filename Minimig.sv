@@ -387,7 +387,7 @@ hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fa
 	.ss_frame_count(ss_frame_count), .ss_reset_src(ss_reset_src),
 	.ss_reset_pc(ss_reset_pc), .ss_fault_vec(ss_fault_vec),
 	.ss_fault_pc(ss_fault_pc), .ss_int_count(ss_int_count),
-	.ss_fault_sr(ss_fault_sr));
+	.ss_fault_sr(ss_fault_sr), .ss_vbr_live(ss_vbr), .ss_sr_live(ss_sr));
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};

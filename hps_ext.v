@@ -151,7 +151,15 @@ module hps_ext
 	input      [15:0] ss_fault_vec,
 	input      [31:0] ss_fault_pc,
 	input       [7:0] ss_int_count,
-	input      [15:0] ss_fault_sr
+	input      [15:0] ss_fault_sr,
+	// Live VBR and SR. The state vector records VBR=0 for a game that demonstrably
+	// contains movec-to-VBR code, and its level-3 vector at physical $6C points
+	// into the middle of a ROM routine -- which the running machine could not
+	// survive if it were really using it. Either VBR is nonzero live and the
+	// capture is wrong, or it is zero and the running machine never takes
+	// level 3. One reading decides which.
+	input      [31:0] ss_vbr_live,
+	input      [15:0] ss_sr_live
 );
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
@@ -434,6 +442,9 @@ always@(posedge clk_sys) begin : main_proc
 							6'd33: io_dout <= ss_fault_pc[31:16];
 							6'd34: io_dout <= {8'd0, ss_int_count};
 							6'd35: io_dout <= ss_fault_sr;
+							6'd36: io_dout <= ss_vbr_live[15:0];
+							6'd37: io_dout <= ss_vbr_live[31:16];
+							6'd38: io_dout <= ss_sr_live;
 							default: io_dout <= 16'd0;
 						endcase
 					end
