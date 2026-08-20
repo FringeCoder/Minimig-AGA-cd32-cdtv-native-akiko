@@ -384,7 +384,8 @@ hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fa
 	.ss_peek_data(ss_peek_data), .ss_peek_valid(ss_peek_valid),
 	.ss_pc_snapshot(ss_pc_snapshot), .ss_kick_pair(ss_kick_pair),
 	.ss_intena_live(ss_intena), .ss_intreq_live(ss_intreq),
-	.ss_frame_count(ss_frame_count), .ss_reset_src(ss_reset_src));
+	.ss_frame_count(ss_frame_count), .ss_reset_src(ss_reset_src),
+	.ss_reset_pc(ss_reset_pc));
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
@@ -623,6 +624,20 @@ wire [2:0]  ss_reset_src;
 reg         ss_load_busy_d;
 always @(posedge clk_sys) ss_load_busy_d <= ss_load_busy;
 wire        ss_reset_src_clr = ss_load_busy & ~ss_load_busy_d;
+
+// The address that executed the RESET instruction. nResetOut is asserted by
+// exactly one thing (TG68KdotC_Kernel.vhd:518, exec(opcRESET)), so latching
+// the architectural PC on its falling edge names the instruction that rebooted
+// the Amiga. That single number says whether the game deliberately reset
+// itself or the CPU wandered into ROM and Kickstart did -- which the reset
+// source alone cannot distinguish.
+reg [31:0] ss_reset_pc;
+reg        ss_nrst_out_d;
+always @(posedge clk_sys) begin
+	ss_nrst_out_d <= cpu_nrst_out;
+	if (ss_reset_src_clr)                      ss_reset_pc <= 32'd0;
+	else if (ss_nrst_out_d & ~cpu_nrst_out)    ss_reset_pc <= ss_pc;
+end
 
 // Custom chipset register shadow. Most Amiga custom registers are write-only in
 // hardware and this core is faithful about that, so they cannot be exported the

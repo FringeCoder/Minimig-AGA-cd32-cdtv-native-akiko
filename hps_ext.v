@@ -146,7 +146,8 @@ module hps_ext
 	input      [14:0] ss_intena_live,
 	input      [14:0] ss_intreq_live,
 	input       [7:0] ss_frame_count,
-	input       [2:0] ss_reset_src
+	input       [2:0] ss_reset_src,
+	input      [31:0] ss_reset_pc
 );
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
@@ -418,6 +419,8 @@ always@(posedge clk_sys) begin : main_proc
 							5'd26: io_dout <= {1'b0, ss_intreq_live};
 							5'd27: io_dout <= {8'd0, ss_frame_count};
 							5'd28: io_dout <= {13'd0, ss_reset_src};
+							5'd29: io_dout <= ss_reset_pc[15:0];
+							5'd30: io_dout <= ss_reset_pc[31:16];
 							default: io_dout <= 16'd0;
 						endcase
 					end
