@@ -158,6 +158,7 @@ wire         ss_blit_busy;
 wire         ss_disk_busy;
 wire         ss_audio_busy;
 wire [14:0]  ss_intreq;
+wire [14:0]  ss_intena;
 wire [8:1]   ss_rga_addr;
 wire [15:0]  ss_rga_data;
 wire         ss_replay_we;
@@ -547,6 +548,7 @@ minimig dut (
 	.ss_disk_busy(ss_disk_busy),
 	.ss_audio_busy(ss_audio_busy),
 	.ss_intreq(ss_intreq),
+	.ss_intena(ss_intena),
 	.ss_rga_addr(ss_rga_addr),
 	.ss_rga_data(ss_rga_data),
 	.ss_replay_we(ss_replay_we),

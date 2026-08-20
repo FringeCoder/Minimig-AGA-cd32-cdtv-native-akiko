@@ -366,6 +366,7 @@ module minimig
 	// from bus writes, but not this one: Paula raises its bits in hardware, so
 	// an accumulator built from writes drifts within a frame.
 	output [14:0] ss_intreq,
+	output [14:0] ss_intena,
 
 	// Save state: the custom chipset register bus, tapped and overridable.
 	// Every chipset register write in the machine is ss_rga_data on ss_rga_addr
@@ -739,6 +740,7 @@ paula PAULA1
 	.enable_mister_floppy(user_port_mode == 2'd1),
 	.mister_floppy_status(mister_floppy_status),
 	.ss_intreq(ss_intreq),
+	.ss_intena(ss_intena),
 
 	.USER_IN(USER_IN),
 	.USER_OUT(USER_OUT)

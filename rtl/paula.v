@@ -122,7 +122,8 @@ module paula
 	output [2:0] mister_floppy_status,
 
 	// Save state. See paula_intcontroller's ss_intreq.
-	output [14:0] ss_intreq
+	output [14:0] ss_intreq,
+	output [14:0] ss_intena
 );
 //--------------------------------------------------------------------------------------
 
@@ -243,7 +244,8 @@ paula_intcontroller pi1
 	.audpen(audpen),
 	.rbfmirror(rbfmirror),
 	._ipl(_ipl),
-	.ss_intreq(ss_intreq)
+	.ss_intreq(ss_intreq),
+	.ss_intena(ss_intena)
 );
 
 //instantiate floppy controller / flashdrive host interface

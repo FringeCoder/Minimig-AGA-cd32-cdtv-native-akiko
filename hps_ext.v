@@ -141,7 +141,11 @@ module hps_ext
 	// four PC samples taken after the freeze dropped, and the two fingerprints
 	// the last restore compared.
 	input     [127:0] ss_pc_snapshot,
-	input      [63:0] ss_kick_pair
+	input      [63:0] ss_kick_pair,
+	// Live chipset diagnostics, read back at byte_cnt 25-27.
+	input      [14:0] ss_intena_live,
+	input      [14:0] ss_intreq_live,
+	input       [7:0] ss_frame_count
 );
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
@@ -409,6 +413,9 @@ always@(posedge clk_sys) begin : main_proc
 							5'd22: io_dout <= ss_kick_pair[31:16];
 							5'd23: io_dout <= ss_kick_pair[47:32];
 							5'd24: io_dout <= ss_kick_pair[63:48];
+							5'd25: io_dout <= {1'b0, ss_intena_live};
+							5'd26: io_dout <= {1'b0, ss_intreq_live};
+							5'd27: io_dout <= {8'd0, ss_frame_count};
 							default: io_dout <= 16'd0;
 						endcase
 					end

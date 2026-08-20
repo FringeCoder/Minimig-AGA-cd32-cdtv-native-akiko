@@ -382,7 +382,9 @@ wire ss_peek_req_114 = ss_peek_tgl_sync ^ ss_peek_tgl_d;
 hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata), .ss_diag(ss_diag),
 	.ss_peek_addr(ss_peek_addr), .ss_peek_req(ss_peek_req_sys),
 	.ss_peek_data(ss_peek_data), .ss_peek_valid(ss_peek_valid),
-	.ss_pc_snapshot(ss_pc_snapshot), .ss_kick_pair(ss_kick_pair));
+	.ss_pc_snapshot(ss_pc_snapshot), .ss_kick_pair(ss_kick_pair),
+	.ss_intena_live(ss_intena), .ss_intreq_live(ss_intreq),
+	.ss_frame_count(ss_frame_count));
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
@@ -608,6 +610,12 @@ wire        ss_audio_busy;
 // rebuilds the other three set/clear registers from bus writes; this one is
 // raised by hardware as well as by the CPU, so it has to be read, not inferred.
 wire [14:0] ss_intreq;
+// Diagnostics only. ss_intena is Paula's live enable mask and ss_frame_count
+// counts vertical blanks, so a single readback answers the two questions a
+// restore that resumes into a frame-wait loop cannot otherwise distinguish:
+// is the chipset still running at all, and did the INTENA replay land.
+wire [14:0] ss_intena;
+reg  [7:0]  ss_frame_count;   // incremented below, where ss_frame_tick exists
 
 // Custom chipset register shadow. Most Amiga custom registers are write-only in
 // hardware and this core is faithful about that, so they cannot be exported the
@@ -1689,6 +1697,7 @@ minimig minimig
 	.ss_disk_busy         (ss_disk_busy         ),
 	.ss_audio_busy        (ss_audio_busy        ),
 	.ss_intreq            (ss_intreq            ),
+	.ss_intena            (ss_intena            ),
 	.ss_rga_addr          (ss_rga_addr          ),
 	.ss_rga_data          (ss_rga_data          ),
 	.ss_replay_we         (ss_replay_we         ),
@@ -1891,6 +1900,12 @@ wire [`SS_STATE_W-1:0] ss_state_in = `SS_STATE_LIST;
 reg ss_vbl_d;
 always @(posedge clk_114) ss_vbl_d <= vbl;
 wire ss_frame_tick = vbl & ~ss_vbl_d;
+
+// Diagnostic frame counter: free-running proof that the chipset is still
+// generating vertical blanks. A restore that leaves the 68k running but the
+// chipset stopped looks identical from the CPU side -- it sits in the game's
+// frame-wait loop either way -- and this is what tells the two apart.
+always @(posedge clk_sys) if (ss_frame_tick) ss_frame_count <= ss_frame_count + 8'd1;
 
 // --- CDTV sector-FIFO hold-off on the save request ---------------------------
 //
