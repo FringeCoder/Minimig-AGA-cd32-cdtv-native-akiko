@@ -118,6 +118,8 @@ wire [15:0] ss_sr_live     = 16'h0004;
 wire [15:0] ss_int_vec     = 16'h006C;
 wire [31:0] ss_int_from_pc = 32'h0004E118;
 wire [31:0] ss_int_entry_pc= 32'h00F8679A;
+wire [15:0] ss_lvl3_count  = 16'h0123;
+wire [15:0] ss_int_total   = 16'h4567;
 
 hps_ext dut (.*);
 
@@ -295,7 +297,7 @@ initial begin
 	// purpose -- a saturating counter returns a plausible number, not an
 	// obviously wrong one, so only checking the LAST word actually proves the
 	// counter still advances.
-	for (k = 0; k < 28; k = k + 1) xfer_rd(w[k]);
+	for (k = 0; k < 30; k = k + 1) xfer_rd(w[k]);
 	// The loop above left byte_cnt at 16, so w[k] is byte_cnt 16+k. The
 	// kick_pair words land at w[5..8], which is what pins the offset.
 	check("kick pair word 0",  {16'd0, w[5]},  32'h0000EE00);   // bc21
@@ -318,6 +320,8 @@ initial begin
 	check("int from PC high", {16'd0, w[25]}, 32'h00000004);   // bc41
 	check("handler entry low",{16'd0, w[26]}, 32'h0000679A);   // bc42
 	check("handler entry hi", {16'd0, w[27]}, 32'h000000F8);   // bc43
+	check("level-3 count",    {16'd0, w[28]}, 32'h00000123);   // bc44
+	check("interrupt total",  {16'd0, w[29]}, 32'h00004567);   // bc45
 
 	// io_din[5] picks the peek, so the status window's own chip select must
 	// have stayed low through all of that -- a decode that let both through

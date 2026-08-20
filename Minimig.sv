@@ -389,7 +389,8 @@ hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fa
 	.ss_fault_pc(ss_fault_pc), .ss_int_count(ss_int_count),
 	.ss_fault_sr(ss_fault_sr), .ss_vbr_live(ss_vbr), .ss_sr_live(ss_sr),
 	.ss_int_vec(ss_int_vec), .ss_int_from_pc(ss_int_from_pc),
-	.ss_int_entry_pc(ss_int_entry_pc));
+	.ss_int_entry_pc(ss_int_entry_pc),
+	.ss_lvl3_count(ss_lvl3_count), .ss_int_total(ss_int_total));
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
@@ -653,6 +654,20 @@ reg        ss_diag_frozen;
 reg [15:0] ss_fault_vec;
 reg [31:0] ss_fault_pc;
 reg [15:0] ss_fault_sr;
+// Free-running, never cleared and never frozen: how many level-3 dispatches
+// (vector $6C) and how many of every other interrupt this machine has taken
+// since power-on. Everything else here describes a restore; these two describe
+// NORMAL RUNNING, which is the thing that has never been measured.
+//
+// The contradiction they settle: after a restore the CPU takes vector $6C from
+// the game's loop into $00F8679A, which is a copy loop in the middle of a
+// Kickstart routine -- fatal, and observed. The running machine has the same
+// vector, the same INTENA with VERTB enabled and the same mask 0, so by every
+// reading it should be taking that same dispatch fifty times a second and
+// dying. It does not. So either it never takes level 3 at all, and the restore
+// introduces one, or one of those readings is not what it appears to be.
+reg [15:0] ss_lvl3_count;
+reg [15:0] ss_int_total;
 reg [15:0] ss_int_vec;
 reg [31:0] ss_int_from_pc;
 reg [31:0] ss_int_entry_pc;
@@ -664,6 +679,13 @@ wire [9:0] ss_trap_vector;
 wire       ss_trap_active;
 always @(posedge clk_sys) begin
 	ss_trap_active_d <= ss_trap_active;
+	if (ss_trap_active & ~ss_trap_active_d) begin
+		if (ss_trap_vector >= 10'h060) begin
+			if (ss_int_total != 16'hFFFF) ss_int_total <= ss_int_total + 16'd1;
+			if (ss_trap_vector == 10'h06C && ss_lvl3_count != 16'hFFFF)
+				ss_lvl3_count <= ss_lvl3_count + 16'd1;
+		end
+	end
 	// Handler entry: the first instruction decoded after that dispatch. If it
 	// reads $00F8679A the CPU really did use the vector sitting at $6C.
 	ss_boundary_d <= ss_cpu_at_boundary;

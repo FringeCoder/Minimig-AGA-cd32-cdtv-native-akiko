@@ -162,7 +162,9 @@ module hps_ext
 	input      [15:0] ss_sr_live,
 	input      [15:0] ss_int_vec,
 	input      [31:0] ss_int_from_pc,
-	input      [31:0] ss_int_entry_pc
+	input      [31:0] ss_int_entry_pc,
+	input      [15:0] ss_lvl3_count,
+	input      [15:0] ss_int_total
 );
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
@@ -453,6 +455,8 @@ always@(posedge clk_sys) begin : main_proc
 							6'd41: io_dout <= ss_int_from_pc[31:16];
 							6'd42: io_dout <= ss_int_entry_pc[15:0];
 							6'd43: io_dout <= ss_int_entry_pc[31:16];
+							6'd44: io_dout <= ss_lvl3_count;
+							6'd45: io_dout <= ss_int_total;
 							default: io_dout <= 16'd0;
 						endcase
 					end
