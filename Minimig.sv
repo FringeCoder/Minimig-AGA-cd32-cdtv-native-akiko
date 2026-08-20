@@ -386,7 +386,8 @@ hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fa
 	.ss_intena_live(ss_intena), .ss_intreq_live(ss_intreq),
 	.ss_frame_count(ss_frame_count), .ss_reset_src(ss_reset_src),
 	.ss_reset_pc(ss_reset_pc), .ss_fault_vec(ss_fault_vec),
-	.ss_fault_pc(ss_fault_pc), .ss_int_count(ss_int_count));
+	.ss_fault_pc(ss_fault_pc), .ss_int_count(ss_int_count),
+	.ss_fault_sr(ss_fault_sr));
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
@@ -639,8 +640,17 @@ wire        ss_reset_src_clr = ss_load_busy & ~ss_load_busy_d;
 // $10 illegal instruction, $20 privilege violation. Vectors $60 and up are
 // interrupt autovectors and are normal, so they are counted rather than
 // latched, which also proves interrupts are being taken at all.
+// Everything here FREEZES at the first reset. Without that the latches keep
+// recording while Kickstart boots and the game restarts, so the interrupt
+// count saturates on post-reboot activity and a fault taken during the reboot
+// is indistinguishable from one that caused it. Frozen, the readback describes
+// only the window between the restore and the reboot -- and if ss_fault_vec is
+// still zero at that point, then NO fault preceded the reset, which means the
+// running code executed RESET deliberately.
+reg        ss_diag_frozen;
 reg [15:0] ss_fault_vec;
 reg [31:0] ss_fault_pc;
+reg [15:0] ss_fault_sr;
 reg  [7:0] ss_int_count;
 reg        ss_trap_active_d;
 wire [9:0] ss_trap_vector;
@@ -650,7 +660,11 @@ always @(posedge clk_sys) begin
 	if (ss_reset_src_clr) begin
 		ss_fault_vec <= 16'd0;
 		ss_fault_pc  <= 32'd0;
+		ss_fault_sr  <= 16'd0;
 		ss_int_count <= 8'd0;
+	end
+	else if (ss_diag_frozen) begin
+		// hold everything as it was when the machine rebooted
 	end
 	else if (ss_trap_active & ~ss_trap_active_d) begin
 		if (ss_trap_vector >= 10'h060) begin
@@ -659,6 +673,7 @@ always @(posedge clk_sys) begin
 		else if (ss_fault_vec == 16'd0) begin
 			ss_fault_vec <= {6'd0, ss_trap_vector};
 			ss_fault_pc  <= ss_pc;
+			ss_fault_sr  <= ss_sr;
 		end
 	end
 end
@@ -667,6 +682,9 @@ reg [31:0] ss_reset_pc;
 reg        ss_nrst_out_d;
 always @(posedge clk_sys) begin
 	ss_nrst_out_d <= cpu_nrst_out;
+	if (ss_reset_src_clr)                      ss_diag_frozen <= 1'b0;
+	else if (ss_nrst_out_d & ~cpu_nrst_out)    ss_diag_frozen <= 1'b1;
+
 	if (ss_reset_src_clr)                      ss_reset_pc <= 32'd0;
 	// First, not last: Kickstart executes its own RESET while booting, which
 	// would otherwise overwrite the interesting one.
@@ -1962,11 +1980,16 @@ reg ss_vbl_d;
 always @(posedge clk_114) ss_vbl_d <= vbl;
 wire ss_frame_tick = vbl & ~ss_vbl_d;
 
-// Diagnostic frame counter: free-running proof that the chipset is still
-// generating vertical blanks. A restore that leaves the 68k running but the
-// chipset stopped looks identical from the CPU side -- it sits in the game's
-// frame-wait loop either way -- and this is what tells the two apart.
-always @(posedge clk_sys) if (ss_frame_tick) ss_frame_count <= ss_frame_count + 8'd1;
+// Vertical blanks between the restore and the reboot. Cleared when a restore
+// starts and frozen when the machine resets, so it answers both questions at
+// once: whether the chipset is running at all (nonzero) and how long the
+// machine survived (0 means it died inside a single frame, which rules out
+// anything that only goes wrong once per frame).
+always @(posedge clk_sys) begin
+	if (ss_reset_src_clr)                             ss_frame_count <= 8'd0;
+	else if (ss_frame_tick && !ss_diag_frozen
+	         && ss_frame_count != 8'hFF)              ss_frame_count <= ss_frame_count + 8'd1;
+end
 
 // --- CDTV sector-FIFO hold-off on the save request ---------------------------
 //

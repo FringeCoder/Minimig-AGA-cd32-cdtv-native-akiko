@@ -112,6 +112,7 @@ wire [31:0] ss_reset_pc    = 32'h00F800D0;
 wire [15:0] ss_fault_vec   = 16'h0020;
 wire [31:0] ss_fault_pc    = 32'h0004E118;
 wire  [7:0] ss_int_count   = 8'd7;
+wire [15:0] ss_fault_sr    = 16'h2004;
 
 hps_ext dut (.*);
 
@@ -289,7 +290,7 @@ initial begin
 	// purpose -- a saturating counter returns a plausible number, not an
 	// obviously wrong one, so only checking the LAST word actually proves the
 	// counter still advances.
-	for (k = 0; k < 19; k = k + 1) xfer_rd(w[k]);
+	for (k = 0; k < 20; k = k + 1) xfer_rd(w[k]);
 	// The loop above left byte_cnt at 16, so w[k] is byte_cnt 16+k. The
 	// kick_pair words land at w[5..8], which is what pins the offset.
 	check("kick pair word 0",  {16'd0, w[5]},  32'h0000EE00);   // bc21
@@ -303,6 +304,7 @@ initial begin
 	check("fault PC low",     {16'd0, w[16]}, 32'h0000E118);   // bc32
 	check("fault PC high",    {16'd0, w[17]}, 32'h00000004);   // bc33
 	check("interrupt count",  {16'd0, w[18]}, 32'h00000007);   // bc34
+	check("fault SR",         {16'd0, w[19]}, 32'h00002004);   // bc35
 
 	// io_din[5] picks the peek, so the status window's own chip select must
 	// have stayed low through all of that -- a decode that let both through

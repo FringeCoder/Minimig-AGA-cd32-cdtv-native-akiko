@@ -150,7 +150,8 @@ module hps_ext
 	input      [31:0] ss_reset_pc,
 	input      [15:0] ss_fault_vec,
 	input      [31:0] ss_fault_pc,
-	input       [7:0] ss_int_count
+	input       [7:0] ss_int_count,
+	input      [15:0] ss_fault_sr
 );
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
@@ -432,6 +433,7 @@ always@(posedge clk_sys) begin : main_proc
 							6'd32: io_dout <= ss_fault_pc[15:0];
 							6'd33: io_dout <= ss_fault_pc[31:16];
 							6'd34: io_dout <= {8'd0, ss_int_count};
+							6'd35: io_dout <= ss_fault_sr;
 							default: io_dout <= 16'd0;
 						endcase
 					end
