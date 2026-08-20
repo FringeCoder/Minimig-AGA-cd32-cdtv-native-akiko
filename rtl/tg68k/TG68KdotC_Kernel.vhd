@@ -162,6 +162,12 @@ entity TG68KdotC_Kernel is
 		-- is NOT this point: it is set alongside setopcode, one instruction
 		-- earlier, with TG68_PC already advanced into the operand words.
 		ss_at_boundary			: out std_logic;
+		-- Diagnostics: the exception being dispatched. trap_vector is the 68k
+		-- vector OFFSET, so $08 bus error, $0C address error, $10 illegal, $20
+		-- privilege violation, $60 and up the interrupt autovectors. High for
+		-- the trap0 microcode state, which every exception passes through.
+		ss_trap_vector			: out std_logic_vector(9 downto 0);
+		ss_trap_active			: out std_logic;
 		ss_sr						: out std_logic_vector(15 downto 0);
 		ss_usp					: out std_logic_vector(31 downto 0);
 
@@ -678,6 +684,8 @@ ss_reg_data <= regfile(conv_integer(ss_reg_index));
 ss_pc       <= TG68_PC;
 ss_exe_pc   <= exe_pc;
 ss_at_boundary <= '1' WHEN decodeOPC='1' ELSE '0';
+ss_trap_vector <= trap_vector(9 downto 0);
+ss_trap_active <= '1' WHEN micro_state=trap0 ELSE '0';
 ss_sr       <= FlagsSR & Flags;
 ss_usp      <= USP;
 

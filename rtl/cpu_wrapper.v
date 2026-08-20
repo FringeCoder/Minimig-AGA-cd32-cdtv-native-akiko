@@ -66,6 +66,8 @@ module cpu_wrapper
 	output     [31:0] ss_pc,
 	output     [31:0] ss_exe_pc,
 	output            ss_at_boundary,
+	output      [9:0] ss_trap_vector,
+	output            ss_trap_active,
 	// High when no CPU bus cycle is outstanding -- either the CPU is not
 	// asking for one or the memory has answered. Parking at ~cpu_req used to
 	// give this for free; parking at an instruction boundary does not, and the
@@ -352,6 +354,8 @@ cpu_inst_p
   .ss_pc(ss_pc),
   .ss_exe_pc(ss_exe_pc),
   .ss_at_boundary(ss_at_boundary),
+  .ss_trap_vector(ss_trap_vector),
+  .ss_trap_active(ss_trap_active),
   .ss_sr(ss_sr),
   .ss_usp(ss_usp),
 

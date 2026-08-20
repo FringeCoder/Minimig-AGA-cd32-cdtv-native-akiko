@@ -100,6 +100,19 @@ wire         ss_peek_valid = 1'b1;
 wire [127:0] ss_pc_snapshot = { 32'h00FC0004, 32'h00003210, 32'h00002200, 32'h00001100 };
 wire  [63:0] ss_kick_pair   = { 32'hFEEDFACE, 32'hC0FFEE00 };
 
+// Live chipset and fault diagnostics, byte_cnt 25-34. Distinct values so a
+// word read back from the wrong offset is obvious rather than plausible --
+// byte_cnt was five bits until this block ran past 31, and the failure mode
+// of that was every later word returning the same one.
+wire [14:0] ss_intena_live = 15'h602D;
+wire [14:0] ss_intreq_live = 15'h0840;
+wire  [7:0] ss_frame_count = 8'hA5;
+wire  [2:0] ss_reset_src   = 3'b100;
+wire [31:0] ss_reset_pc    = 32'h00F800D0;
+wire [15:0] ss_fault_vec   = 16'h0020;
+wire [31:0] ss_fault_pc    = 32'h0004E118;
+wire  [7:0] ss_int_count   = 8'd7;
+
 hps_ext dut (.*);
 
 // --- bus helpers -------------------------------------------------------------
@@ -139,7 +152,7 @@ reg leaked = 1'b0;
 always @(posedge clk_sys)
 	if (ide_rd | ide_wr | akiko_rd | akiko_wr | cdtv_rd | cdtv_wr | cdda_wr) leaked <= 1'b1;
 
-reg [15:0] w [0:8];
+reg [15:0] w [0:31];   // sized for the full diagnostic readback, byte_cnt 3..34
 // ss_peek_req is one cycle wide; latch it so the check below can see it.
 reg ss_peek_req_seen = 1'b0;
 // ss_diag_cs lives inside the DUT; sample it rather than infer it.
@@ -269,6 +282,27 @@ initial begin
 	check("PC sample 0 low",     {16'd0, w[1]}, 32'h00001100);
 	check("PC sample 0 high",    {16'd0, w[2]}, 32'h00000000);
 	check("PC sample 1 low",     {16'd0, w[3]}, 32'h00002200);
+
+	// Keep reading the same transaction out to byte_cnt 34. This is the part
+	// that byte_cnt being five bits broke: it saturated at 31, so every word
+	// from there on read back as the one before it. The values are distinct on
+	// purpose -- a saturating counter returns a plausible number, not an
+	// obviously wrong one, so only checking the LAST word actually proves the
+	// counter still advances.
+	for (k = 0; k < 19; k = k + 1) xfer_rd(w[k]);
+	// The loop above left byte_cnt at 16, so w[k] is byte_cnt 16+k. The
+	// kick_pair words land at w[5..8], which is what pins the offset.
+	check("kick pair word 0",  {16'd0, w[5]},  32'h0000EE00);   // bc21
+	check("live INTENA",      {16'd0, w[9]},  32'h0000602D);   // bc25
+	check("live INTREQ",      {16'd0, w[10]}, 32'h00000840);   // bc26
+	check("frame counter",    {16'd0, w[11]}, 32'h000000A5);   // bc27
+	check("reset source",     {16'd0, w[12]}, 32'h00000004);   // bc28
+	check("reset PC low",     {16'd0, w[13]}, 32'h000000D0);   // bc29
+	check("reset PC high",    {16'd0, w[14]}, 32'h000000F8);   // bc30
+	check("fault vector",     {16'd0, w[15]}, 32'h00000020);   // bc31
+	check("fault PC low",     {16'd0, w[16]}, 32'h0000E118);   // bc32
+	check("fault PC high",    {16'd0, w[17]}, 32'h00000004);   // bc33
+	check("interrupt count",  {16'd0, w[18]}, 32'h00000007);   // bc34
 
 	// io_din[5] picks the peek, so the status window's own chip select must
 	// have stayed low through all of that -- a decode that let both through

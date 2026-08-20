@@ -147,7 +147,10 @@ module hps_ext
 	input      [14:0] ss_intreq_live,
 	input       [7:0] ss_frame_count,
 	input       [2:0] ss_reset_src,
-	input      [31:0] ss_reset_pc
+	input      [31:0] ss_reset_pc,
+	input      [15:0] ss_fault_vec,
+	input      [31:0] ss_fault_pc,
+	input       [7:0] ss_int_count
 );
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
@@ -170,7 +173,11 @@ localparam UIO_SET_VPOS  = 'h2D;
 
 reg [15:0] io_dout;
 reg        dout_en;
-reg  [4:0] byte_cnt;
+// Six bits, not five: the savestate diagnostic readback now runs past word 31,
+// and at five bits byte_cnt saturated there (~&byte_cnt) so every later word
+// read back as the same one. Narrower comparisons elsewhere zero-extend and
+// are unaffected.
+reg  [5:0] byte_cnt;
 // Save state diagnostics chip select. Module level rather than local to
 // main_proc below only so it needs no declaration initialiser: the ~io_uio
 // branch clears it at the end of every transaction, which is before any read
@@ -421,6 +428,10 @@ always@(posedge clk_sys) begin : main_proc
 							5'd28: io_dout <= {13'd0, ss_reset_src};
 							5'd29: io_dout <= ss_reset_pc[15:0];
 							5'd30: io_dout <= ss_reset_pc[31:16];
+							6'd31: io_dout <= ss_fault_vec;
+							6'd32: io_dout <= ss_fault_pc[15:0];
+							6'd33: io_dout <= ss_fault_pc[31:16];
+							6'd34: io_dout <= {8'd0, ss_int_count};
 							default: io_dout <= 16'd0;
 						endcase
 					end

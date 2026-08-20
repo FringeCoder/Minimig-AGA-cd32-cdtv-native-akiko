@@ -385,7 +385,8 @@ hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fa
 	.ss_pc_snapshot(ss_pc_snapshot), .ss_kick_pair(ss_kick_pair),
 	.ss_intena_live(ss_intena), .ss_intreq_live(ss_intreq),
 	.ss_frame_count(ss_frame_count), .ss_reset_src(ss_reset_src),
-	.ss_reset_pc(ss_reset_pc));
+	.ss_reset_pc(ss_reset_pc), .ss_fault_vec(ss_fault_vec),
+	.ss_fault_pc(ss_fault_pc), .ss_int_count(ss_int_count));
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
@@ -631,12 +632,46 @@ wire        ss_reset_src_clr = ss_load_busy & ~ss_load_busy_d;
 // the Amiga. That single number says whether the game deliberately reset
 // itself or the CPU wandered into ROM and Kickstart did -- which the reset
 // source alone cannot distinguish.
+// The FIRST fault taken after a restore, and how many interrupts ran before
+// it. The RESET the machine ends on is Kickstart's own, executed at $00F800D0
+// as part of booting -- an effect, not a cause. What matters is the exception
+// that put the CPU in ROM to begin with: $08 bus error, $0C address error,
+// $10 illegal instruction, $20 privilege violation. Vectors $60 and up are
+// interrupt autovectors and are normal, so they are counted rather than
+// latched, which also proves interrupts are being taken at all.
+reg [15:0] ss_fault_vec;
+reg [31:0] ss_fault_pc;
+reg  [7:0] ss_int_count;
+reg        ss_trap_active_d;
+wire [9:0] ss_trap_vector;
+wire       ss_trap_active;
+always @(posedge clk_sys) begin
+	ss_trap_active_d <= ss_trap_active;
+	if (ss_reset_src_clr) begin
+		ss_fault_vec <= 16'd0;
+		ss_fault_pc  <= 32'd0;
+		ss_int_count <= 8'd0;
+	end
+	else if (ss_trap_active & ~ss_trap_active_d) begin
+		if (ss_trap_vector >= 10'h060) begin
+			if (ss_int_count != 8'hFF) ss_int_count <= ss_int_count + 8'd1;
+		end
+		else if (ss_fault_vec == 16'd0) begin
+			ss_fault_vec <= {6'd0, ss_trap_vector};
+			ss_fault_pc  <= ss_pc;
+		end
+	end
+end
+
 reg [31:0] ss_reset_pc;
 reg        ss_nrst_out_d;
 always @(posedge clk_sys) begin
 	ss_nrst_out_d <= cpu_nrst_out;
 	if (ss_reset_src_clr)                      ss_reset_pc <= 32'd0;
-	else if (ss_nrst_out_d & ~cpu_nrst_out)    ss_reset_pc <= ss_pc;
+	// First, not last: Kickstart executes its own RESET while booting, which
+	// would otherwise overwrite the interesting one.
+	else if (ss_nrst_out_d & ~cpu_nrst_out && ss_reset_pc == 32'd0)
+		ss_reset_pc <= ss_pc;
 end
 
 // Custom chipset register shadow. Most Amiga custom registers are write-only in
@@ -1064,6 +1099,8 @@ cpu_wrapper cpu_wrapper
 	.ss_reg_data  (ss_reg_data     ),
 	.ss_exe_pc    (ss_pc           ),
 	.ss_at_boundary(ss_cpu_at_boundary),
+	.ss_trap_vector(ss_trap_vector),
+	.ss_trap_active(ss_trap_active),
 	.ss_bus_settled(ss_cpu_bus_settled),
 	.ss_sr        (ss_sr           ),
 	.ss_usp       (ss_usp          ),
