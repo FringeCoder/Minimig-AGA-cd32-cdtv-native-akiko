@@ -103,3 +103,16 @@ jobs:
           iverilog -g2012 -I. -o tb_akiko_ss             rtl/akiko.v rtl/akiko_nvram.v             rtl/sim/akiko/altsyncram_sim.v rtl/sim/akiko/tb_akiko_savestate.sv
           vvp tb_akiko_ss | tee out_akiko_ss.log
           grep -q "RUN: PASS" out_akiko_ss.log
+
+      # Where each memory region lands in SDRAM. The savestate names chip RAM,
+      # slow RAM and the Kickstart by the address sdram_ctrl's CPU port expects,
+      # which is not the CPU address -- gary, the bank mapper and the sram
+      # bridge between them drop CPU bit 23 and remap two of the three regions.
+      # A wrong base reads the wrong memory into the file and writes it back
+      # over the right memory, and nothing else in the suite would notice.
+      - name: SDRAM region map
+        run: |
+          set -euo pipefail
+          iverilog -g2012 -o tb_membank             rtl/minimig_bankmapper.v rtl/minimig_sram_bridge.v             rtl/sim/membank/tb_membank_map.sv
+          vvp tb_membank | tee out_membank.log
+          grep -q "RUN: PASS" out_membank.log
