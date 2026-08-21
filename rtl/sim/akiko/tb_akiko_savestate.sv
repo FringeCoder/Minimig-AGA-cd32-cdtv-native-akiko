@@ -17,7 +17,7 @@
 //      deliberately: a bench that takes its expectations from the thing under
 //      test cannot catch a wrong constant.
 //
-//   C. Round trip. Capture, reset the chip, restore, compare the whole 522-bit
+//   C. Round trip. Capture, reset the chip, restore, compare the whole 1052-bit
 //      vector. This is what catches a field that is captured but not restored
 //      (or the reverse) -- the failure mode that a one-directional check reads
 //      as a pass.
@@ -41,7 +41,7 @@ end
 // ---------------------------------------------------------------------------
 // Field map. See the header: written out again on purpose.
 // ---------------------------------------------------------------------------
-localparam SS_W          = 522;
+localparam SS_W          = 1052;
 localparam SS_O_INTREQ   =   0;
 localparam SS_O_INTENA   =  32;
 localparam SS_O_ADDRDATA =  64;
@@ -60,9 +60,14 @@ localparam SS_O_NVRDIR   = 240;
 localparam SS_O_PIO      = 248;
 localparam SS_O_SUBIRQ   = 256;
 localparam SS_O_SHIPINV  = 257;
-localparam SS_O_C2P      = 258;
-localparam SS_O_RPTR     = 514;
-localparam SS_O_WPTR     = 518;
+localparam SS_O_CMDBUF   = 258;
+localparam SS_O_CMDLEN   = 514;
+localparam SS_O_RESBUF   = 520;
+localparam SS_O_RXLEN    = 776;
+localparam SS_O_RXOFF    = 782;
+localparam SS_O_C2P      = 788;
+localparam SS_O_RPTR     = 1044;
+localparam SS_O_WPTR     = 1048;
 
 // The values. Distinct in both halves of every multi-byte field, so a field
 // that lost an end shows up as a failure rather than as a plausible number.
@@ -86,6 +91,9 @@ localparam        V_SUBIRQ   = 1'b1;
 localparam        V_SHIPINV  = 1'b1;
 localparam  [3:0] V_RPTR     = 4'h5;
 localparam  [3:0] V_WPTR     = 4'hD;
+localparam  [5:0] V_CMDLEN   = 6'd7;
+localparam  [5:0] V_RXLEN    = 6'd19;
+localparam  [5:0] V_RXOFF    = 6'd6;
 
 // ---------------------------------------------------------------------------
 // Clock, reset, DUT
@@ -193,8 +201,14 @@ task automatic load_values;
 		u_dut.g_cd.pio_byte             = V_PIO;
 		u_dut.g_cd.subcode_irq          = V_SUBIRQ;
 		u_dut.g_cd.pbx_ship_invalid     = V_SHIPINV;
-		for (i = 0; i < 32; i = i + 1)
+		u_dut.g_cd.cdrom_command_length = V_CMDLEN;
+		u_dut.g_cd.cdrom_receive_length = V_RXLEN;
+		u_dut.g_cd.cdrom_receive_offset = V_RXOFF;
+		for (i = 0; i < 32; i = i + 1) begin
 			u_dut.buff[i] = 8'hA0 + i[7:0];
+			u_dut.g_cd.cdrom_command_buffer[i] = 8'h40 + i[7:0];
+			u_dut.g_cd.cdrom_result_buffer[i]  = 8'h80 + i[7:0];
+		end
 		u_dut.rptr = V_RPTR;
 		u_dut.wptr = V_WPTR;
 		@(posedge clk);
@@ -250,6 +264,9 @@ initial begin
 	check_b("capture SHIPINV", V_SHIPINV, ss_state[SS_O_SHIPINV]);
 	check("capture RPTR",     V_RPTR,     ss_state[SS_O_RPTR     +:  4]);
 	check("capture WPTR",     V_WPTR,     ss_state[SS_O_WPTR     +:  4]);
+	check("capture CMDLEN",   V_CMDLEN,   ss_state[SS_O_CMDLEN   +:  6]);
+	check("capture RXLEN",    V_RXLEN,    ss_state[SS_O_RXLEN    +:  6]);
+	check("capture RXOFF",    V_RXOFF,    ss_state[SS_O_RXOFF    +:  6]);
 
 	// The C2P buffer, byte by byte: buff[0] at the low byte of the section.
 	// A reversed loop is the mistake this is here to catch, and with a
@@ -258,6 +275,16 @@ initial begin
 	for (i = 0; i < 32; i = i + 1)
 		if (ss_state[SS_O_C2P + i*8 +: 8] !== (8'hA0 + i[7:0])) same = 1'b0;
 	check_b("capture C2P buffer in order", 1'b1, same);
+
+	same = 1'b1;
+	for (i = 0; i < 32; i = i + 1)
+		if (ss_state[SS_O_CMDBUF + i*8 +: 8] !== (8'h40 + i[7:0])) same = 1'b0;
+	check_b("capture command buffer in order", 1'b1, same);
+
+	same = 1'b1;
+	for (i = 0; i < 32; i = i + 1)
+		if (ss_state[SS_O_RESBUF + i*8 +: 8] !== (8'h80 + i[7:0])) same = 1'b0;
+	check_b("capture result buffer in order", 1'b1, same);
 
 	captured = ss_state;
 
@@ -287,6 +314,14 @@ initial begin
 	check("restore SECCNT",   V_SECCNT,   ss_state[SS_O_SECCNT   +:  8]);
 	check("restore WPTR",     V_WPTR,     ss_state[SS_O_WPTR     +:  4]);
 	check_b("restore SHIPINV", V_SHIPINV, ss_state[SS_O_SHIPINV]);
+	// The queued response is the field that must survive: a driver that has
+	// half-drained one is the case ss_idle deliberately does not wait out.
+	check("restore RXLEN",    V_RXLEN,    ss_state[SS_O_RXLEN    +:  6]);
+	check("restore RXOFF",    V_RXOFF,    ss_state[SS_O_RXOFF    +:  6]);
+	same = 1'b1;
+	for (i = 0; i < 32; i = i + 1)
+		if (ss_state[SS_O_RESBUF + i*8 +: 8] !== (8'h80 + i[7:0])) same = 1'b0;
+	check_b("restore result buffer in order", 1'b1, same);
 
 	// -------------------------------------------------------------------
 	// D. A restore lands idle even if the chip was not.

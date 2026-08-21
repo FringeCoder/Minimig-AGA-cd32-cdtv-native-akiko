@@ -1014,7 +1014,7 @@ always @(posedge clk_sys) begin
 end
 // Akiko, the same shape as the CIAs above and registered across the same
 // clock boundary for the same reason: akiko.v runs on clk_sys, ss_serdes
-// shifts on clk_114, and 522 raw bits into one shift register is another few
+// shifts on clk_114, and 1052 raw bits into one shift register is another few
 // hundred timed crossings the fitter does not need.
 //
 // Safe on the same grounds. The capture side is static while it is read (the

@@ -229,10 +229,15 @@ localparam SS_O_NVRDIR   = 240; //  8  nvram_dir
 localparam SS_O_PIO      = 248; //  8  pio_byte
 localparam SS_O_SUBIRQ   = 256; //  1  subcode_irq
 localparam SS_O_SHIPINV  = 257; //  1  pbx_ship_invalid
-localparam SS_O_C2P      = 258; // 256 buff[0..31], buff[0] at the low byte
-localparam SS_O_RPTR     = 514; //  4  rptr
-localparam SS_O_WPTR     = 518; //  4  wptr
-                                //     total 522 == `SS_AKIKO_W
+localparam SS_O_CMDBUF   = 258; // 256 cdrom_command_buffer[0..31]
+localparam SS_O_CMDLEN   = 514; //   6 cdrom_command_length
+localparam SS_O_RESBUF   = 520; // 256 cdrom_result_buffer[0..31]
+localparam SS_O_RXLEN    = 776; //   6 cdrom_receive_length
+localparam SS_O_RXOFF    = 782; //   6 cdrom_receive_offset
+localparam SS_O_C2P      = 788; // 256 buff[0..31], buff[0] at the low byte
+localparam SS_O_RPTR     = 1044;//   4 rptr
+localparam SS_O_WPTR     = 1048;//   4 wptr
+                                //     total 1052 == `SS_AKIKO_W
 
 // -----------------------------------------------------------------------
 // Existing C2P logic (preserved bit-equivalent to legacy akiko.v)
@@ -301,7 +306,7 @@ wire  [7:0] cd_hps_sec_status;
 wire        cd_hps_rx_busy;
 wire  [7:0] cd_hps_nvr_dout;
 wire        cd_hps_nvr_dirty;
-wire [257:0] cd_ss_native;   // the CD register block's slice of ss_state
+wire [787:0] cd_ss_native;   // the CD register block's slice of ss_state
 wire         cd_ss_idle;
 
 generate
@@ -377,6 +382,9 @@ if (NATIVE_CD32) begin : g_cd
 	// boundaries (hps_cmd_done / hps_result_done).
 	reg  [5:0] hps_cmd_rd_ptr;
 	reg  [5:0] hps_result_wr_ptr;
+
+	// Restore-side loop index for the two command buffers.
+	integer    ss_bj;
 
 	// M4 PBX sector DMA state.
 	//
@@ -1182,10 +1190,21 @@ if (NATIVE_CD32) begin : g_cd
 				subcode_irq          <= ss_ld_data[SS_O_SUBIRQ];
 				pbx_ship_invalid     <= ss_ld_data[SS_O_SHIPINV];
 
+				// The command path travels by value: a queued response
+				// the driver has not finished reading is normal state, not
+				// a transient, so it goes back exactly as it was. See the
+				// ss_idle comment for why it cannot be waited out instead.
+				cdrom_command_length <= ss_ld_data[SS_O_CMDLEN +: 6];
+				cdrom_receive_length <= ss_ld_data[SS_O_RXLEN  +: 6];
+				cdrom_receive_offset <= ss_ld_data[SS_O_RXOFF  +: 6];
+				for (ss_bj = 0; ss_bj < 32; ss_bj = ss_bj + 1) begin
+					cdrom_command_buffer[ss_bj] <=
+						ss_ld_data[SS_O_CMDBUF + ss_bj*8 +: 8];
+					cdrom_result_buffer[ss_bj]  <=
+						ss_ld_data[SS_O_RESBUF + ss_bj*8 +: 8];
+				end
+
 				// Transients, forced idle. See above.
-				cdrom_command_length <= 6'h0;
-				cdrom_receive_length <= 6'h0;
-				cdrom_receive_offset <= 6'h0;
 				tx_dma_delay         <= 2'h0;
 				rx_dma_delay         <= 2'h0;
 				tx_busy              <= 1'b0;
@@ -1308,6 +1327,25 @@ if (NATIVE_CD32) begin : g_cd
 	// rx_dma_delay are the 3-tick post-write inhibit: nonzero means a
 	// transfer has been asked for and has not started yet, which is no
 	// more restorable than one already running.
+	//
+	// What is deliberately NOT in here is a pending command or a queued
+	// response. Those look like the staging buffers but they are not:
+	// cdrom_receive_length stays non-zero for as long as the driver leaves a
+	// response half-drained, which is a normal resting state, not a transient
+	// one. WinUAE's cdrom_return_data does the same thing, and the RX engine
+	// here follows it -- an rxcmp match mid-delivery raises RXDMADONE and
+	// leaves the rest of the response queued until the BIOS bumps rxcmp again,
+	// which it may not do for a long time. Requiring those to be clear would
+	// mean a machine sitting on a half-read response could never be saved at
+	// all. So the two command buffers travel in the vector instead, and the
+	// idle rule stays limited to things that clear on their own within a few
+	// cycles.
+	//
+	// hps_cmd_rd_ptr and hps_result_wr_ptr do stay, and they are not the same
+	// case: non-zero there means the HPS is part-way through reading a command
+	// out or writing a response in. That half of the transaction lives in
+	// userspace and will not resume after a restore, so there is nothing to
+	// carry -- only a gap to wait for, and the wait is one host poll long.
 	assign cd_ss_idle =
 	         ~pbx_busy & ~subcode_busy & ~tx_busy & ~rx_busy
 	       & ~rx_inflight & ~dma_owned
@@ -1316,13 +1354,27 @@ if (NATIVE_CD32) begin : g_cd
 	       & (sec_wr_ptr == 12'd0) & (sub_wr_ptr == 7'd0)
 	       & ~hps_sec_dma_active
 	       & (tx_dma_delay == 2'd0) & (rx_dma_delay == 2'd0)
-	       & (cdrom_command_length == 6'd0)
-	       & (cdrom_receive_length == 6'd0)
-	       & (cdrom_receive_offset == 6'd0)
 	       & (hps_cmd_rd_ptr    == 6'd0)
 	       & (hps_result_wr_ptr == 6'd0);
 
+	// The two 32-byte command buffers, out to the vector. Generate loops for
+	// the same reason the C2P buffer uses one: these are arrays everywhere
+	// else, and a hand-written 32-term concatenation is a transposition
+	// waiting to happen.
+	wire [255:0] cmdbuf_ss;
+	wire [255:0] resbuf_ss;
+	genvar ss_bi;
+	for (ss_bi = 0; ss_bi < 32; ss_bi = ss_bi + 1) begin : g_cmdbuf_ss
+		assign cmdbuf_ss[ss_bi*8 +: 8] = cdrom_command_buffer[ss_bi];
+		assign resbuf_ss[ss_bi*8 +: 8] = cdrom_result_buffer[ss_bi];
+	end
+
 	assign cd_ss_native = {
+		cdrom_receive_offset,   // [787:782]
+		cdrom_receive_length,   // [781:776]
+		resbuf_ss,              // [775:520]
+		cdrom_command_length,   // [519:514]
+		cmdbuf_ss,              // [513:258]
 		pbx_ship_invalid,       // [257]
 		subcode_irq,            // [256]
 		pio_byte,               // [255:248]
@@ -1385,7 +1437,7 @@ end else begin : g_stub
 	assign cd_hps_nvr_dirty   = 1'b0;
 	// No CD block to be busy, so never a reason to hold up a freeze. The C2P
 	// half of the vector is still real in this build and is captured above.
-	assign cd_ss_native       = 258'h0;
+	assign cd_ss_native       = 788'h0;
 	assign cd_ss_idle         = 1'b1;
 end
 endgenerate
