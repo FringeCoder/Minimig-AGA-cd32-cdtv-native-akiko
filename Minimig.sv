@@ -845,9 +845,23 @@ wire [15:0] ss_sd_wr;
 wire        ss_rom_scan;
 
 // Invalidate the 68020's cache at the end of a restore, while the machine is
-// still frozen. ORed into cpu_cache_ctrl[3] below -- the CACR clear bit, which
-// cpu_cache_new edge-detects -- so this reuses the machine's own invalidate
-// instead of adding a second mechanism.
+// still frozen. Driven into cpu_cache_ctrl[3] below -- the CACR clear bit,
+// which cpu_cache_new edge-detects -- so this reuses the machine's own
+// invalidate instead of adding a second mechanism.
+//
+// DRIVEN, not ORed, and that distinction is the whole of a bug. cpu_cache_new
+// clears on a RISING EDGE of bit 3, and TG68K stores CACR bit 3 exactly as
+// MOVEC wrote it (TG68KdotC_Kernel.vhd: CACR <= reg_QA(3 downto 0)). Bit 3 is
+// the 68020's "clear data cache" bit, which AmigaOS sets -- so a state saved
+// with it set restores a CACR that already holds bit 3 high, an OR then
+// produces no edge, and the invalidate silently does not happen.
+//
+// It shows up as a restore that works within a session and destroys the
+// machine after a reboot: in-session the stale lines still describe nearly the
+// right memory, so nothing visibly breaks. Measured on AmigaVision -- the file
+// verified byte-perfect and its CRC passed, the Kickstart fingerprint matched,
+// and the machine still faulted LINE-F inside Kickstart without completing a
+// single video frame.
 //
 // It is needed because the restore writes chip RAM through the borrowed SDRAM
 // CPU port, while the cache's snoop port is tied to chipWE, the chip DMA write
@@ -1078,6 +1092,27 @@ end
 wire  [1:0] cpu_state;
 wire        cpu_nrst_out;
 wire  [3:0] cpu_cacr;
+// The cache control the two memory controllers actually see.
+//
+// While the machine is FROZEN, bit 3 is ss_cache_flush alone. ss_ctrl holds it
+// low until its flush state and raises it there, so the rising edge
+// cpu_cache_new needs is produced no matter what the machine's own CACR
+// happens to hold -- which is the point, since a restored CACR can already
+// have bit 3 set and an OR would then produce no edge at all.
+//
+// Gated on the freeze rather than on save_busy | load_busy, and the difference
+// matters: those two are already high through the quiesce wait, which is up to
+// two seconds with the CPU still RUNNING. Overriding the bit there would
+// swallow the machine's own cache-clear requests -- MOVEC with bit 3 set is
+// how AmigaOS makes modified code visible, so suppressing it for two seconds
+// is its own corruption. A frozen CPU cannot issue one, so inside the freeze
+// there is nothing to swallow.
+//
+// The low three bits stay the CPU's throughout: they are cache ENABLE and
+// friends, and overriding those would change whether the cache is on, not
+// merely when it is emptied.
+wire [3:0] ss_cache_ctrl = ss_freeze ? {ss_cache_flush, cpu_cacr[2:0]}
+                                     : cpu_cacr;
 wire [31:0] cpu_nmi_addr;
 wire        cpu_rst;
 
@@ -1318,7 +1353,7 @@ sdram_ctrl ram1
 	.c_7m         (c1              ),
 
 	.cache_rst    (cpu_rst         ),
-	.cpu_cache_ctrl(cpu_cacr | {ss_cache_flush, 3'b000}),
+	.cpu_cache_ctrl(ss_cache_ctrl),
 	.dcache_sw_en (dcache_sw_en_w  ),
 
 	.sd_data      (SDRAM_DQ        ),
@@ -1455,7 +1490,7 @@ ddram_ctrl ram2
 	.reset_n      (~reset_d        ),
 
 	.cache_rst    (cpu_rst         ),
-	.cpu_cache_ctrl(cpu_cacr | {ss_cache_flush, 3'b000}),
+	.cpu_cache_ctrl(ss_cache_ctrl),
 	.dcache_sw_en (dcache_sw_en_w  ),
 
 	.DDRAM_CLK    (DDRAM_CLK       ),
