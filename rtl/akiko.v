@@ -1307,55 +1307,55 @@ if (NATIVE_CD32) begin : g_cd
 	// Save state: capture, restore, and the idle condition that makes the
 	// pair honest.
 	//
-	// ss_idle is the whole reason the staging buffers are not in the
-	// vector. Every term below is either an engine mid-transfer or a
-	// buffer holding bytes that have arrived but not yet been shipped, and
-	// a snapshot taken while any of them is true would drop those bytes on
-	// the floor: the HPS has already handed the sector over and moved its
-	// read position on, so nothing would ever send it again, and the title
-	// would sit waiting for a PBX interrupt that cannot come.
+	// ss_idle covers exactly one thing: no DMA engine may be part-way
+	// through a transfer when the machine freezes. Nothing else.
 	//
-	// Waiting for the gap costs nothing. A save waits as long as it takes
-	// (ss_quiesce's save-side frame limit is deliberately generous), and
-	// the gaps are frequent: a 2x read is one sector every 1/150 s and the
-	// ship itself is a few thousand chip-bus slots, so most cycles are
-	// idle even mid-stream. If a title ever does starve the freeze, the
-	// failure is a clean FAIL_QUIESCE rather than a save that restores
-	// into a stalled drive.
+	// It was written the other way round first -- every staging buffer had
+	// to be empty as well -- on the reasoning that a staged sector would be
+	// lost, because the HPS had already handed it over and moved on. Two of
+	// those terms are not transient at all, and on hardware the freeze then
+	// never happened: every save of a running CD32 title reported
+	// FAIL_QUIESCE, and so did every diagnostic peek, which shares the
+	// condition.
 	//
-	// The counters are in here as well as the busy flags. tx_dma_delay and
-	// rx_dma_delay are the 3-tick post-write inhibit: nonzero means a
-	// transfer has been asked for and has not started yet, which is no
-	// more restorable than one already running.
+	//   sector_ready is set when a sector arrives and cleared only when the
+	//   PBX engine ships it, which needs the title to free a slot. Between
+	//   loads a prefetched sector sits staged for as long as the game likes.
 	//
-	// What is deliberately NOT in here is a pending command or a queued
-	// response. Those look like the staging buffers but they are not:
-	// cdrom_receive_length stays non-zero for as long as the driver leaves a
-	// response half-drained, which is a normal resting state, not a transient
-	// one. WinUAE's cdrom_return_data does the same thing, and the RX engine
-	// here follows it -- an rxcmp match mid-delivery raises RXDMADONE and
-	// leaves the rest of the response queued until the BIOS bumps rxcmp again,
-	// which it may not do for a long time. Requiring those to be clear would
-	// mean a machine sitting on a half-read response could never be saved at
-	// all. So the two command buffers travel in the vector instead, and the
-	// idle rule stays limited to things that clear on their own within a few
-	// cycles.
+	//   hps_result_wr_ptr is never cleared if hps_result_done arrives while
+	//   a response is still queued -- the commit is skipped and the pointer
+	//   keeps its value with nothing left to clear it.
 	//
-	// hps_cmd_rd_ptr and hps_result_wr_ptr do stay, and they are not the same
-	// case: non-zero there means the HPS is part-way through reading a command
-	// out or writing a response in. That half of the transaction lives in
-	// userspace and will not resume after a restore, so there is nothing to
-	// carry -- only a gap to wait for, and the wait is one host poll long.
+	// The premise was wrong as well as the terms. A staged sector is NOT
+	// lost by dropping it, because cdrom_sector_counter advances at PBX_FIN
+	// -- when a sector is SHIPPED, not when it arrives -- and userspace
+	// fetches cd_data_lba_base + counter. So a sector that arrived but was
+	// never shipped is precisely the sector at base + counter: clear
+	// sector_ready and the very next hps_sec_req asks for the same LBA
+	// again. The restore forces those registers idle already, so this is
+	// self-healing rather than merely tolerable. The same holds for a
+	// partly filled sector and for a subcode block, which is one 96-byte
+	// subchannel frame out of seventy-five a second during CDDA.
+	//
+	// hps_sec_dma_active stays, and is the one buffer-ish term that has to:
+	// it means the UIO fast path is actively driving bytes in this instant,
+	// and freezing the machine underneath a transfer in flight is a
+	// different thing from discarding one that has finished.
+	//
+	// tx_dma_delay and rx_dma_delay are the 3-tick post-write inhibit:
+	// nonzero means a transfer has been asked for and has not started yet,
+	// which is no more restorable than one already running.
+	//
+	// The two command buffers travel in the state vector, so nothing here
+	// needs to wait on them. That was the right call for a different reason
+	// -- cdrom_receive_length is non-zero for as long as the driver leaves a
+	// response half-drained, which is a resting state, not a transient one.
 	assign cd_ss_idle =
 	         ~pbx_busy & ~subcode_busy & ~tx_busy & ~rx_busy
 	       & ~rx_inflight & ~dma_owned
 	       & (pbx_state == PBX_IDLE) & (subcode_state == SUB_IDLE)
-	       & ~sector_ready & ~subcode_ready
-	       & (sec_wr_ptr == 12'd0) & (sub_wr_ptr == 7'd0)
 	       & ~hps_sec_dma_active
-	       & (tx_dma_delay == 2'd0) & (rx_dma_delay == 2'd0)
-	       & (hps_cmd_rd_ptr    == 6'd0)
-	       & (hps_result_wr_ptr == 6'd0);
+	       & (tx_dma_delay == 2'd0) & (rx_dma_delay == 2'd0);
 
 	// The two 32-byte command buffers, out to the vector. Generate loops for
 	// the same reason the C2P buffer uses one: these are arrays everywhere

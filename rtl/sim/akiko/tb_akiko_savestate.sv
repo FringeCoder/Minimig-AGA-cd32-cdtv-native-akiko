@@ -5,11 +5,15 @@
 // Covers the three things the savestate ports have to get right, and nothing
 // else -- the register decode itself belongs to tb_akiko_regs.
 //
-//   A. The idle rule. ss_idle is what lets the state vector leave Akiko's
-//      staging buffers out: the freeze does not happen unless every engine is
-//      quiet and nothing is staged. A bug that leaves ss_idle stuck high does
-//      not show up as a broken bench anywhere else -- it shows up on hardware
-//      as a title that stops loading after a restore, months later.
+//   A. The idle rule. ss_idle holds the freeze off while a DMA engine is
+//      part-way through a transfer, and it must do NOTHING else. A version
+//      that also demanded the staging buffers be empty shipped once and broke
+//      saving outright: sector_ready is cleared only when the PBX engine ships
+//      a sector, so a prefetched sector sits staged for as long as the title
+//      likes, and every save of a running CD32 title reported FAIL_QUIESCE.
+//      Both directions are checked below -- stuck high is a restore into a
+//      wedged drive, stuck low is a feature that cannot be used at all, and
+//      the second one is what actually happened.
 //
 //   B. Capture offsets. Every field is forced to a distinct value and then
 //      read back out of the ss_state slice it is supposed to occupy. The
@@ -226,14 +230,43 @@ initial begin
 	// -------------------------------------------------------------------
 	check_b("idle after reset", 1'b1, ss_idle);
 
-	// One byte of a sector from the HPS is enough to break it: those bytes
-	// are already gone from the host's point of view, so a freeze here
-	// would lose them.
+	// A DMA engine mid-transfer holds the freeze off. This is the whole of
+	// what ss_idle is for.
+	@(negedge clk);
+	u_dut.g_cd.pbx_busy = 1'b1;
+	@(posedge clk); #1;
+	check_b("idle drops while the PBX engine ships", 1'b0, ss_idle);
+	@(negedge clk);
+	u_dut.g_cd.pbx_busy = 1'b0;
+	@(posedge clk); #1;
+	check_b("idle returns when the engine finishes", 1'b1, ss_idle);
+
+	// And the other direction, which is the one that shipped broken. A
+	// staged sector, a staged subcode block, a partly filled buffer and a
+	// stalled host result pointer are all states a healthy machine sits in
+	// for an unbounded time. None of them may hold the freeze off: dropping
+	// a staged sector costs nothing, because cdrom_sector_counter only
+	// advances when a sector is SHIPPED, so the next hps_sec_req asks
+	// userspace for the very same LBA again.
+	@(negedge clk);
+	u_dut.g_cd.sector_ready      = 1'b1;
+	u_dut.g_cd.subcode_ready     = 1'b1;
+	u_dut.g_cd.sec_wr_ptr        = 12'd1000;
+	u_dut.g_cd.sub_wr_ptr        = 7'd40;
+	u_dut.g_cd.hps_result_wr_ptr = 6'd5;
+	u_dut.g_cd.hps_cmd_rd_ptr    = 6'd3;
+	u_dut.g_cd.cdrom_receive_length = 6'd12;
+	@(posedge clk); #1;
+	check_b("staged data does not hold off the freeze", 1'b1, ss_idle);
+
+	// One byte in flight on the UIO fast path is different: that is a
+	// transfer happening now, not one that has finished.
 	@(negedge clk); sec_byte = 8'h5A; sec_push = 1;
 	@(posedge clk);
 	@(negedge clk); sec_push = 0;
 	#1;
-	check_b("idle drops on a partly received sector", 1'b0, ss_idle);
+	check_b("a finished slow-path push still allows the freeze",
+	        1'b1, ss_idle);
 
 	pulse_reset();
 	#1;
