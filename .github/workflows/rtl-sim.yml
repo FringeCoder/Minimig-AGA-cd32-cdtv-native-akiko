@@ -90,3 +90,16 @@ jobs:
         run: |
           set -euo pipefail
           bash rtl/sim/ssmux/run.sh
+
+      # Akiko's savestate ports: the idle rule that lets the state vector leave
+      # the staging buffers out, the capture-side bit offsets, and a full
+      # capture/reset/restore round trip. Needs the altsyncram stub under
+      # rtl/sim/akiko/, because akiko_nvram.v instantiates the Altera primitive
+      # directly and Icarus has no model for it -- which is why the rest of the
+      # akiko benches are still ModelSim-only.
+      - name: Akiko save state
+        run: |
+          set -euo pipefail
+          iverilog -g2012 -I. -o tb_akiko_ss             rtl/akiko.v rtl/akiko_nvram.v             rtl/sim/akiko/altsyncram_sim.v rtl/sim/akiko/tb_akiko_savestate.sv
+          vvp tb_akiko_ss | tee out_akiko_ss.log
+          grep -q "RUN: PASS" out_akiko_ss.log

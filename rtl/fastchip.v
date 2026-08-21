@@ -17,6 +17,8 @@
 //
 //----------------------------------------------------------------------------------  
 
+`include "rtl/ss_state.vh"
+
 module fastchip
 (
 	input         clk,
@@ -105,7 +107,14 @@ module fastchip
 	input         hps_sec_dma_active,
 	input   [7:0] hps_sec_dma_byte,
 	input  [13:0] hps_sec_dma_addr,
-	input         hps_sec_dma_we
+	input         hps_sec_dma_we,
+
+	// Akiko save state. Pass-through to the akiko instance below; the
+	// layout and the meaning of ss_idle are documented there.
+	output [`SS_AKIKO_W-1:0] akiko_ss_state,
+	input                    akiko_ss_ld,
+	input  [`SS_AKIKO_W-1:0] akiko_ss_ld_data,
+	output                   akiko_ss_idle
 );
 
 // Native CD32 Akiko gate.
@@ -193,7 +202,11 @@ akiko #(.NATIVE_CD32(NATIVE_CD32)) akiko
 	.hps_sec_dma_we(hps_sec_dma_we),
 	.hps_subcode_push(akiko_hps_subcode_push),
 	.hps_subcode_byte(akiko_hps_subcode_byte),
-	.hps_subcode_done(akiko_hps_subcode_done)
+	.hps_subcode_done(akiko_hps_subcode_done),
+	.ss_state(akiko_ss_state),
+	.ss_ld(akiko_ss_ld),
+	.ss_ld_data(akiko_ss_ld_data),
+	.ss_idle(akiko_ss_idle)
 );
 
 akiko_hps_bridge akiko_hps_bridge

@@ -1012,6 +1012,29 @@ always @(posedge clk_sys) begin
 	ss_restored_cia_a_q <= ss_restored_cia_a;
 	ss_restored_cia_b_q <= ss_restored_cia_b;
 end
+// Akiko, the same shape as the CIAs above and registered across the same
+// clock boundary for the same reason: akiko.v runs on clk_sys, ss_serdes
+// shifts on clk_114, and 522 raw bits into one shift register is another few
+// hundred timed crossings the fitter does not need.
+//
+// Safe on the same grounds. The capture side is static while it is read (the
+// machine is frozen, and Akiko was required to be idle before the freeze was
+// granted -- see akiko.v's ss_idle); the restore side has been held stable for
+// twenty-odd cycles by the time the fan-out's akiko_we pulses at step 22.
+wire [`SS_AKIKO_W-1:0] ss_akiko_raw;
+reg  [`SS_AKIKO_W-1:0] ss_akiko;
+always @(posedge clk_114) ss_akiko <= ss_akiko_raw;
+
+wire [`SS_AKIKO_W-1:0] ss_restored_akiko;
+wire                   ss_restored_akiko_we;
+reg  [`SS_AKIKO_W-1:0] ss_restored_akiko_q;
+always @(posedge clk_sys) ss_restored_akiko_q <= ss_restored_akiko;
+
+// Akiko has no DMA in flight and nothing staged. One of ss_quiesce's freeze
+// conditions; without it a snapshot taken mid-sector-ship would drop the
+// bytes the HPS has already handed over and will never send again.
+wire        ss_akiko_idle;
+
 wire        ss_fanout_busy;
 wire        ss_fanout_ack;
 /////////////////////////////////////////////////////////////////////////////
@@ -1611,7 +1634,13 @@ fastchip fastchip
 	.hps_sec_dma_active (akiko_sec_dma_active),
 	.hps_sec_dma_byte   (akiko_sec_dma_byte  ),
 	.hps_sec_dma_addr   (akiko_sec_dma_addr  ),
-	.hps_sec_dma_we     (akiko_sec_dma_we    )
+	.hps_sec_dma_we     (akiko_sec_dma_we    ),
+
+	// Akiko save state. See the wires next to the CIA pair above.
+	.akiko_ss_state     (ss_akiko_raw        ),
+	.akiko_ss_ld        (ss_restored_akiko_we),
+	.akiko_ss_ld_data   (ss_restored_akiko_q ),
+	.akiko_ss_idle      (ss_akiko_idle       )
 );
 
 
@@ -2199,7 +2228,14 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.blit_busy    (ss_blit_busy),
 	.disk_busy    (ss_disk_busy),
 	.audio_busy   (ss_audio_busy),
-	.cpu_boundary (ss_cpu_parked & ss_regs_valid & ss_ram_idle & ~ss_dma_busy),
+	// ss_akiko_idle rides along in cpu_boundary rather than getting its own
+	// port: ss_quiesce takes a single "not yet" term and the reason a freeze
+	// is refused is uniform from its point of view. What it adds is that no
+	// Akiko engine is mid-transfer and no sector or subcode block is staged,
+	// which is what lets the state vector carry Akiko's registers and leave
+	// its buffers out. akiko.v's ss_idle has the argument in full.
+	.cpu_boundary (ss_cpu_parked & ss_regs_valid & ss_ram_idle & ~ss_dma_busy
+	               & ss_akiko_idle),
 	.frame_tick   (ss_frame_tick),
 	.freeze       (ss_freeze),
 
@@ -2542,6 +2578,8 @@ ss_state_fanout #(.STATE_W(`SS_STATE_W)) ss_fanout
 	.cia_a_out    (ss_restored_cia_a),
 	.cia_b_out    (ss_restored_cia_b),
 	.cia_we       (ss_restored_cia_we),
+	.akiko_out    (ss_restored_akiko),
+	.akiko_we     (ss_restored_akiko_we),
 
 	.busy         (ss_fanout_busy)
 );

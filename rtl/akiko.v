@@ -46,6 +46,8 @@
 //
 //----------------------------------------------------------------------------------
 
+`include "rtl/ss_state.vh"
+
 module akiko #(parameter NATIVE_CD32 = 0)
 (
 	input             clk,
@@ -150,7 +152,34 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	// during CDDA play; the DMA FSM ships them to subcode_address.
 	input             hps_subcode_push,
 	input       [7:0] hps_subcode_byte,
-	input             hps_subcode_done
+	input             hps_subcode_done,
+
+	// ---------------------------------------------------------------------
+	// Save state.
+	//
+	// ss_state is the whole of what a restore puts back, and ss_ld writes all
+	// of it on one clock -- the same shape ciaa.v and ciab.v use, for the same
+	// reason: there is nothing here to sequence and nothing that can land
+	// half-written.
+	//
+	// What the vector does NOT carry is the transient machinery: the 2352-byte
+	// sector staging buffer, the 96-byte subcode block, the command and result
+	// buffers, and the DMA engines' in-flight bookkeeping. ss_idle covers
+	// those instead. The snapshot is only taken in a cycle where every engine
+	// is idle and nothing is staged, so there is no in-flight byte to carry --
+	// and, just as important, none to silently lose.
+	//
+	// WinUAE draws the same line (save_akiko writes the registers and the C2P
+	// buffer, and re-reads sectors from the image on restore). It can afford
+	// to re-read because it owns the drive; we do not own it, so we wait for
+	// the gap instead of trying to recreate one.
+	//
+	// The layout is written out at SS_ prefixed localparams below. It is the
+	// on-disk field order, so appending is free and reordering is not.
+	output [`SS_AKIKO_W-1:0] ss_state,
+	input                    ss_ld,
+	input  [`SS_AKIKO_W-1:0] ss_ld_data,
+	output                   ss_idle
 );
 
 // -----------------------------------------------------------------------
@@ -175,6 +204,37 @@ localparam        CDFLAG_PBX_BIT    = 27; // CONFIG bit 27 (data DMA enable)
 localparam        CDFLAG_ENABLE_BIT = 26; // CONFIG bit 26 (CD interface enable)
 
 // -----------------------------------------------------------------------
+// Save state field map.
+//
+// Offsets are LSB bit positions in ss_state and ss_ld_data. Both directions
+// index from these names, so capture and restore cannot disagree about where
+// a field lives; and because this IS the on-disk field order, appending is
+// free while reordering breaks every existing save.
+// -----------------------------------------------------------------------
+localparam SS_O_INTREQ   =   0; // 32  cdrom_intreq
+localparam SS_O_INTENA   =  32; // 32  cdrom_intena
+localparam SS_O_ADDRDATA =  64; // 32  cdrom_addressdata
+localparam SS_O_ADDRMISC =  96; // 32  cdrom_addressmisc
+localparam SS_O_FLAGS    = 128; // 32  cdrom_flags (CONFIG)
+localparam SS_O_PBX      = 160; // 16  cdrom_pbx
+localparam SS_O_SUBCOFF  = 176; //  8  cdrom_subcodeoffset (the register)
+localparam SS_O_TXINX    = 184; //  8  cdcomtxinx
+localparam SS_O_RXINX    = 192; //  8  cdcomrxinx
+localparam SS_O_TXCMP    = 200; //  8  cdcomtxcmp
+localparam SS_O_RXCMP    = 208; //  8  cdcomrxcmp
+localparam SS_O_SUBOFF   = 216; //  8  subcode_off (the DMA write base, 0/128)
+localparam SS_O_SECCNT   = 224; //  8  cdrom_sector_counter
+localparam SS_O_NVRIO    = 232; //  8  nvram_io
+localparam SS_O_NVRDIR   = 240; //  8  nvram_dir
+localparam SS_O_PIO      = 248; //  8  pio_byte
+localparam SS_O_SUBIRQ   = 256; //  1  subcode_irq
+localparam SS_O_SHIPINV  = 257; //  1  pbx_ship_invalid
+localparam SS_O_C2P      = 258; // 256 buff[0..31], buff[0] at the low byte
+localparam SS_O_RPTR     = 514; //  4  rptr
+localparam SS_O_WPTR     = 518; //  4  wptr
+                                //     total 522 == `SS_AKIKO_W
+
+// -----------------------------------------------------------------------
 // Existing C2P logic (preserved bit-equivalent to legacy akiko.v)
 // -----------------------------------------------------------------------
 wire c2p_sel = (addr[5:2] == 'b1110);
@@ -182,8 +242,18 @@ wire c2p_sel = (addr[5:2] == 'b1110);
 reg [7:0] buff[32];
 reg [3:0] rptr = 0, wptr = 0;
 
+integer ss_ci;
 always @(posedge clk) begin
-	if((wr|rd) & cs & c2p_sel) begin
+	// ss_ld first: a restore overrides whatever the bus is doing, and the
+	// CPU is parked at an instruction boundary while it runs, so the two
+	// cannot legitimately collide anyway.
+	if (ss_ld) begin
+		for (ss_ci = 0; ss_ci < 32; ss_ci = ss_ci + 1)
+			buff[ss_ci] <= ss_ld_data[SS_O_C2P + ss_ci*8 +: 8];
+		rptr <= ss_ld_data[SS_O_RPTR +: 4];
+		wptr <= ss_ld_data[SS_O_WPTR +: 4];
+	end
+	else if((wr|rd) & cs & c2p_sel) begin
 		if (wr) begin
 			rptr <= 0;
 			wptr <= wptr + 1'd1;
@@ -195,6 +265,17 @@ always @(posedge clk) begin
 		end
 	end
 end
+
+// The C2P buffer, out to the state vector. A generate loop rather than a
+// 32-term concatenation: the array is indexed everywhere else and writing
+// the list out by hand is a transposition waiting to happen.
+wire [255:0] c2p_ss_buf;
+genvar ss_gi;
+generate
+	for (ss_gi = 0; ss_gi < 32; ss_gi = ss_gi + 1) begin : g_c2p_ss
+		assign c2p_ss_buf[ss_gi*8 +: 8] = buff[ss_gi];
+	end
+endgenerate
 
 reg [15:0] c2p_dout;
 always @(*) begin : c2p_read
@@ -220,6 +301,8 @@ wire  [7:0] cd_hps_sec_status;
 wire        cd_hps_rx_busy;
 wire  [7:0] cd_hps_nvr_dout;
 wire        cd_hps_nvr_dirty;
+wire [257:0] cd_ss_native;   // the CD register block's slice of ss_state
+wire         cd_ss_idle;
 
 generate
 if (NATIVE_CD32) begin : g_cd
@@ -1062,6 +1145,67 @@ if (NATIVE_CD32) begin : g_cd
 				// waiting for subcode data that is not on its way.
 				cdrom_intreq         <= cdrom_intreq | CDINT_DRIVERECV;
 			end
+
+			// ---------------------------------------------------------
+			// Restore. Last in the block so it wins over everything
+			// above it, the same placement ciaa.v uses. The CPU is
+			// parked at an instruction boundary while this runs and
+			// Akiko was quiesced before the capture, so there is no
+			// legitimate bus or DMA activity to lose to it.
+			//
+			// The transient registers are not written from the vector
+			// because they are not in it -- they are forced to their
+			// idle values instead. That is not a shortcut: the freeze
+			// only happened because they were already idle, so this
+			// writes back exactly what was there. Doing it explicitly
+			// means a restore into a machine whose Akiko is mid-transfer
+			// (a slot that was saved before the idle rule existed, say)
+			// lands in a consistent state rather than a wedged one.
+			// ---------------------------------------------------------
+			if (ss_ld) begin
+				cdrom_intreq         <= ss_ld_data[SS_O_INTREQ   +: 32];
+				cdrom_intena         <= ss_ld_data[SS_O_INTENA   +: 32];
+				cdrom_addressdata    <= ss_ld_data[SS_O_ADDRDATA +: 32];
+				cdrom_addressmisc    <= ss_ld_data[SS_O_ADDRMISC +: 32];
+				cdrom_flags          <= ss_ld_data[SS_O_FLAGS    +: 32];
+				cdrom_pbx            <= ss_ld_data[SS_O_PBX      +: 16];
+				cdrom_subcodeoffset  <= ss_ld_data[SS_O_SUBCOFF  +:  8];
+				cdcomtxinx           <= ss_ld_data[SS_O_TXINX    +:  8];
+				cdcomrxinx           <= ss_ld_data[SS_O_RXINX    +:  8];
+				cdcomtxcmp           <= ss_ld_data[SS_O_TXCMP    +:  8];
+				cdcomrxcmp           <= ss_ld_data[SS_O_RXCMP    +:  8];
+				subcode_off          <= ss_ld_data[SS_O_SUBOFF   +:  8];
+				cdrom_sector_counter <= ss_ld_data[SS_O_SECCNT   +:  8];
+				nvram_io             <= ss_ld_data[SS_O_NVRIO    +:  8];
+				nvram_dir            <= ss_ld_data[SS_O_NVRDIR   +:  8];
+				pio_byte             <= ss_ld_data[SS_O_PIO      +:  8];
+				subcode_irq          <= ss_ld_data[SS_O_SUBIRQ];
+				pbx_ship_invalid     <= ss_ld_data[SS_O_SHIPINV];
+
+				// Transients, forced idle. See above.
+				cdrom_command_length <= 6'h0;
+				cdrom_receive_length <= 6'h0;
+				cdrom_receive_offset <= 6'h0;
+				tx_dma_delay         <= 2'h0;
+				rx_dma_delay         <= 2'h0;
+				tx_busy              <= 1'b0;
+				rx_busy              <= 1'b0;
+				rx_inflight          <= 1'b0;
+				dma_owned            <= 1'b0;
+				hps_cmd_rd_ptr       <= 6'h0;
+				hps_result_wr_ptr    <= 6'h0;
+				sec_wr_ptr           <= 12'h0;
+				sector_ready         <= 1'b0;
+				sub_wr_ptr           <= 7'h0;
+				subcode_ready        <= 1'b0;
+				subcode_busy         <= 1'b0;
+				subcode_state        <= SUB_IDLE;
+				sub_idx              <= 8'h0;
+				pbx_busy             <= 1'b0;
+				pbx_state            <= PBX_IDLE;
+				pbx_seccnt           <= 4'h0;
+				pbx_byte_idx         <= 12'h0;
+			end
 		end // else !reset
 	end
 
@@ -1140,6 +1284,65 @@ if (NATIVE_CD32) begin : g_cd
 	// rx_busy out — receive engine has a queued or in-flight response.
 	assign cd_hps_rx_busy     = (cdrom_receive_length != 6'd0);
 
+	// -------------------------------------------------------------------
+	// Save state: capture, restore, and the idle condition that makes the
+	// pair honest.
+	//
+	// ss_idle is the whole reason the staging buffers are not in the
+	// vector. Every term below is either an engine mid-transfer or a
+	// buffer holding bytes that have arrived but not yet been shipped, and
+	// a snapshot taken while any of them is true would drop those bytes on
+	// the floor: the HPS has already handed the sector over and moved its
+	// read position on, so nothing would ever send it again, and the title
+	// would sit waiting for a PBX interrupt that cannot come.
+	//
+	// Waiting for the gap costs nothing. A save waits as long as it takes
+	// (ss_quiesce's save-side frame limit is deliberately generous), and
+	// the gaps are frequent: a 2x read is one sector every 1/150 s and the
+	// ship itself is a few thousand chip-bus slots, so most cycles are
+	// idle even mid-stream. If a title ever does starve the freeze, the
+	// failure is a clean FAIL_QUIESCE rather than a save that restores
+	// into a stalled drive.
+	//
+	// The counters are in here as well as the busy flags. tx_dma_delay and
+	// rx_dma_delay are the 3-tick post-write inhibit: nonzero means a
+	// transfer has been asked for and has not started yet, which is no
+	// more restorable than one already running.
+	assign cd_ss_idle =
+	         ~pbx_busy & ~subcode_busy & ~tx_busy & ~rx_busy
+	       & ~rx_inflight & ~dma_owned
+	       & (pbx_state == PBX_IDLE) & (subcode_state == SUB_IDLE)
+	       & ~sector_ready & ~subcode_ready
+	       & (sec_wr_ptr == 12'd0) & (sub_wr_ptr == 7'd0)
+	       & ~hps_sec_dma_active
+	       & (tx_dma_delay == 2'd0) & (rx_dma_delay == 2'd0)
+	       & (cdrom_command_length == 6'd0)
+	       & (cdrom_receive_length == 6'd0)
+	       & (cdrom_receive_offset == 6'd0)
+	       & (hps_cmd_rd_ptr    == 6'd0)
+	       & (hps_result_wr_ptr == 6'd0);
+
+	assign cd_ss_native = {
+		pbx_ship_invalid,       // [257]
+		subcode_irq,            // [256]
+		pio_byte,               // [255:248]
+		nvram_dir,              // [247:240]
+		nvram_io,               // [239:232]
+		cdrom_sector_counter,   // [231:224]
+		subcode_off,            // [223:216]
+		cdcomrxcmp,             // [215:208]
+		cdcomtxcmp,             // [207:200]
+		cdcomrxinx,             // [199:192]
+		cdcomtxinx,             // [191:184]
+		cdrom_subcodeoffset,    // [183:176]
+		cdrom_pbx,              // [175:160]
+		cdrom_flags,            // [159:128]
+		cdrom_addressmisc,      // [127:96]
+		cdrom_addressdata,      // [95:64]
+		cdrom_intena,           // [63:32]
+		cdrom_intreq            // [31:0]
+	};
+
 	// I2C slave EEPROM (1 KiB, 24LC08-equivalent). Pulls SDA
 	// low for ACK and read-data; never drives SCL. Volatile BRAM —
 	// persistence is a separate feature.
@@ -1180,6 +1383,10 @@ end else begin : g_stub
 	assign cd_hps_rx_busy     = 1'b0;
 	assign cd_hps_nvr_dout    = 8'h0;
 	assign cd_hps_nvr_dirty   = 1'b0;
+	// No CD block to be busy, so never a reason to hold up a freeze. The C2P
+	// half of the vector is still real in this build and is captured above.
+	assign cd_ss_native       = 258'h0;
+	assign cd_ss_idle         = 1'b1;
 end
 endgenerate
 
@@ -1216,5 +1423,10 @@ assign hps_rx_busy     = cd_hps_rx_busy;
 // NVRAM save-dump port out to fastchip / bridge.
 assign hps_nvr_dout    = cd_hps_nvr_dout;
 assign hps_nvr_dirty   = cd_hps_nvr_dirty;
+
+// Save state out. The CD register block occupies the low 258 bits; the C2P
+// buffer and its two pointers, which exist in every build, sit above it.
+assign ss_state = { wptr, rptr, c2p_ss_buf, cd_ss_native };
+assign ss_idle  = cd_ss_idle;
 
 endmodule
