@@ -392,7 +392,7 @@ hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fa
 	.ss_int_entry_pc(ss_int_entry_pc),
 	.ss_lvl3_count(ss_lvl3_count), .ss_int_total(ss_int_total),
 	.ss_lvl3_entry_pc(ss_lvl3_entry_pc), .ss_lvl3_from_pc(ss_lvl3_from_pc),
-	.ss_vpos(ss_beam_vpos), .ss_vpos_max(ss_vpos_max),
+	.ss_vpos(ss_beam_vpos_q), .ss_vpos_max(ss_vpos_max),
 	.ss_hpos_max(ss_hpos_max), .ss_vbl_int_count(ss_vbl_int_count),
 	.ss_htotal(ss_beam_htotal), .ss_varbeamen(ss_beam_varbeamen),
 	.ss_harddis(ss_beam_harddis));
@@ -661,6 +661,22 @@ reg   [8:0] ss_hpos_max;
 reg   [7:0] ss_vbl_int_count;
 reg         ss_vbl_int_d;
 
+// The beam is registered before anything looks at it. vpos and hpos come from
+// flops inside agnus_beamcounter, out through agnus and minimig, and the
+// trackers below are magnitude comparators -- combinational the whole way,
+// which cost 0.46 ns of setup on a clock that was already the tightest in the
+// design and turned a clean fit into a failing one. A diagnostic that violates
+// timing can report the wrong number, which is worse than not having it.
+//
+// One cycle of latency changes nothing here: these are maxima accumulated over
+// seconds, and the readback is sampled by a host poller at 1 Hz.
+reg  [10:0] ss_beam_vpos_q;
+reg   [8:0] ss_beam_hpos_q;
+always @(posedge clk_sys) begin
+	ss_beam_vpos_q <= ss_beam_vpos;
+	ss_beam_hpos_q <= ss_beam_hpos;
+end
+
 always @(posedge clk_sys) begin
 	ss_vbl_int_d <= ss_beam_vbl_int;
 	if (ss_reset_src_clr) begin
@@ -669,8 +685,8 @@ always @(posedge clk_sys) begin
 		ss_vbl_int_count <= 8'd0;
 	end
 	else begin
-		if (ss_beam_vpos > ss_vpos_max) ss_vpos_max <= ss_beam_vpos;
-		if (ss_beam_hpos > ss_hpos_max) ss_hpos_max <= ss_beam_hpos;
+		if (ss_beam_vpos_q > ss_vpos_max) ss_vpos_max <= ss_beam_vpos_q;
+		if (ss_beam_hpos_q > ss_hpos_max) ss_hpos_max <= ss_beam_hpos_q;
 		if (ss_beam_vbl_int && !ss_vbl_int_d && ss_vbl_int_count != 8'hFF)
 			ss_vbl_int_count <= ss_vbl_int_count + 8'd1;
 	end
