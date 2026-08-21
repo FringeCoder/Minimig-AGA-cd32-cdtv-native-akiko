@@ -855,6 +855,12 @@ wire        ss_rom_scan;
 // not go near it, so without this the CPU resumes against a cache still
 // describing the memory that was there before the restore.
 wire        ss_cache_flush;
+// Denise's colour table, borrowed by the savestate while the machine is frozen.
+wire        ss_clut_active;
+wire  [7:0] ss_clut_addr;
+wire [31:0] ss_clut_rd_data;
+wire        ss_clut_wr_en;
+wire [31:0] ss_clut_wr_data;
 
 // Who owns sdram_ctrl's CPU port this cycle. One expression, used for all
 // seven of the port's signals at the ram1 instance below.
@@ -1847,6 +1853,11 @@ minimig minimig
 	.ss_audio_busy        (ss_audio_busy        ),
 	.ss_intreq            (ss_intreq            ),
 	.ss_intena            (ss_intena            ),
+	.ss_clut_active       (ss_clut_active       ),
+	.ss_clut_addr         (ss_clut_addr         ),
+	.ss_clut_rd_data      (ss_clut_rd_data      ),
+	.ss_clut_wr_en        (ss_clut_wr_en        ),
+	.ss_clut_wr_data      (ss_clut_wr_data      ),
 	.ss_reset_src         (ss_reset_src         ),
 	.ss_reset_src_clr     (ss_reset_src_clr     ),
 	.ss_rga_addr          (ss_rga_addr          ),
@@ -2201,6 +2212,11 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.kick_base    (SS_KICK_BASE),
 	.rom_scan     (ss_rom_scan),
 	.cache_flush  (ss_cache_flush),
+	.clut_active  (ss_clut_active),
+	.clut_addr    (ss_clut_addr),
+	.clut_rd_data (ss_clut_rd_data),
+	.clut_wr_en   (ss_clut_wr_en),
+	.clut_wr_data (ss_clut_wr_data),
 
 	// Chipset register shadow. See ss_regshadow above.
 	.shadow_rd_addr (ss_shadow_rd      ),

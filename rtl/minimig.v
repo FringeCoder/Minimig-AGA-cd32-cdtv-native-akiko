@@ -367,6 +367,12 @@ module minimig
 	// an accumulator built from writes drifts within a frame.
 	output [14:0] ss_intreq,
 	output [14:0] ss_intena,
+	// Save state: Denise's 256-entry colour table.
+	input         ss_clut_active,
+	input   [7:0] ss_clut_addr,
+	output [31:0] ss_clut_rd_data,
+	input         ss_clut_wr_en,
+	input  [31:0] ss_clut_wr_data,
 	output  [2:0] ss_reset_src,     // {CPU RESET instr, sys_reset, host cpurst}
 	input         ss_reset_src_clr,
 
@@ -829,7 +835,12 @@ denise DENISE1
 	.ecs(|chipset_config[4:3]),
 	.aga(chipset_config[4]),
 	.hires(hires),
-	.shres(shres)
+	.shres(shres),
+	.ss_clut_active(ss_clut_active),
+	.ss_clut_addr(ss_clut_addr),
+	.ss_clut_rd_data(ss_clut_rd_data),
+	.ss_clut_wr_en(ss_clut_wr_en),
+	.ss_clut_wr_data(ss_clut_wr_data)
 );
 
 //instantiate cia A

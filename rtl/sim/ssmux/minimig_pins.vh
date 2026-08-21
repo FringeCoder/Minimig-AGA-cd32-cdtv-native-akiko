@@ -159,6 +159,11 @@ wire         ss_disk_busy;
 wire         ss_audio_busy;
 wire [14:0]  ss_intreq;
 wire [14:0]  ss_intena;
+wire         ss_clut_active;
+wire [7:0]   ss_clut_addr;
+wire [31:0]  ss_clut_rd_data;
+wire         ss_clut_wr_en;
+wire [31:0]  ss_clut_wr_data;
 wire [2:0]   ss_reset_src;
 wire         ss_reset_src_clr;
 wire [8:1]   ss_rga_addr;
@@ -243,6 +248,10 @@ reg  [63:0]  drv_a2065_mem_readdata;
 reg          drv_a2065_mem_readdatavalid;
 reg          drv_a2065_mem_waitrequest;
 reg  [6:0]   drv_USER_IN;
+reg          drv_ss_clut_active;
+reg  [7:0]   drv_ss_clut_addr;
+reg          drv_ss_clut_wr_en;
+reg  [31:0]  drv_ss_clut_wr_data;
 reg          drv_ss_reset_src_clr;
 reg  [3:0]   drv_ss_map_in;
 reg          drv_ss_map_we;
@@ -315,6 +324,10 @@ assign a2065_mem_readdata = drv_a2065_mem_readdata;
 assign a2065_mem_readdatavalid = drv_a2065_mem_readdatavalid;
 assign a2065_mem_waitrequest = drv_a2065_mem_waitrequest;
 assign USER_IN = drv_USER_IN;
+assign ss_clut_active = drv_ss_clut_active;
+assign ss_clut_addr = drv_ss_clut_addr;
+assign ss_clut_wr_en = drv_ss_clut_wr_en;
+assign ss_clut_wr_data = drv_ss_clut_wr_data;
 assign ss_reset_src_clr = drv_ss_reset_src_clr;
 assign ss_map_in = drv_ss_map_in;
 assign ss_map_we = drv_ss_map_we;
@@ -390,6 +403,10 @@ begin
 	drv_a2065_mem_readdatavalid = 0;
 	drv_a2065_mem_waitrequest = 0;
 	drv_USER_IN = 0;
+	drv_ss_clut_active = 0;
+	drv_ss_clut_addr = 0;
+	drv_ss_clut_wr_en = 0;
+	drv_ss_clut_wr_data = 0;
 	drv_ss_reset_src_clr = 0;
 	drv_ss_map_in = 0;
 	drv_ss_map_we = 0;
@@ -554,6 +571,11 @@ minimig dut (
 	.ss_audio_busy(ss_audio_busy),
 	.ss_intreq(ss_intreq),
 	.ss_intena(ss_intena),
+	.ss_clut_active(ss_clut_active),
+	.ss_clut_addr(ss_clut_addr),
+	.ss_clut_rd_data(ss_clut_rd_data),
+	.ss_clut_wr_en(ss_clut_wr_en),
+	.ss_clut_wr_data(ss_clut_wr_data),
 	.ss_reset_src(ss_reset_src),
 	.ss_reset_src_clr(ss_reset_src_clr),
 	.ss_rga_addr(ss_rga_addr),
