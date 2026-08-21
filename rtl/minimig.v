@@ -427,7 +427,18 @@ module minimig
 	input  [202:0] ss_cia_b_in,
 	// One clk_sys pulse, like ss_map_we, and for the same reason: everything
 	// it writes is a clk_sys register and the Amiga's timebase is stopped.
-	input          ss_cia_we
+	input          ss_cia_we,
+
+	// Beam and frame geometry, out to the save state diagnostics. Read-only
+	// observation: a restore that comes back with no vertical blanks looks
+	// exactly like one that comes back with the display running, from the
+	// outside, and these are what tell the two apart.
+	output  [10:0] ss_vpos,
+	output   [8:0] ss_hpos,
+	output         ss_vbl_int,
+	output   [8:0] ss_htotal,
+	output         ss_varbeamen,
+	output         ss_harddis
 );
 
 
@@ -691,8 +702,16 @@ agnus AGNUS1
 	.floppy_speed(floppy_speed),
 	.lpen_vpos(lpen_vpos),
 	.lpen_hpos(lpen_hpos),
-	.blit_busy(ss_blit_busy)
+	.blit_busy(ss_blit_busy),
+	.ss_vpos_out(ss_vpos),
+	.ss_hpos_out(ss_hpos)
 );
+
+// Frame geometry, straight out of the wires agnus already exports.
+assign ss_vbl_int   = vbl_int;
+assign ss_htotal    = htotal;
+assign ss_varbeamen = varbeamen;
+assign ss_harddis   = harddis;
 
 //instantiate paula
 paula PAULA1

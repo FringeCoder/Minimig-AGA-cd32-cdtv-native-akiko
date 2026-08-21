@@ -180,6 +180,12 @@ wire [202:0] ss_cia_b;
 wire [190:0] ss_cia_a_in;
 wire [202:0] ss_cia_b_in;
 wire         ss_cia_we;
+wire [10:0]  ss_vpos;
+wire [8:0]   ss_hpos;
+wire         ss_vbl_int;
+wire [8:0]   ss_htotal;
+wire         ss_varbeamen;
+wire         ss_harddis;
 
 // ------------------------------------------------------- input drivers
 // (ports in the generator's EXTERNAL set are left for the bench to drive)
@@ -591,5 +597,11 @@ minimig dut (
 	.ss_cia_b(ss_cia_b),
 	.ss_cia_a_in(ss_cia_a_in),
 	.ss_cia_b_in(ss_cia_b_in),
-	.ss_cia_we(ss_cia_we)
+	.ss_cia_we(ss_cia_we),
+	.ss_vpos(ss_vpos),
+	.ss_hpos(ss_hpos),
+	.ss_vbl_int(ss_vbl_int),
+	.ss_htotal(ss_htotal),
+	.ss_varbeamen(ss_varbeamen),
+	.ss_harddis(ss_harddis)
 );

@@ -113,7 +113,14 @@ module agnus
 	input         aga,             // enables AGA features
 	input         floppy_speed,    // allocates refresh slots for disk DMA
 	input  [10:0] lpen_vpos,       // light-pen vertical position, latched by userspace (userio.v)
-	input   [8:0] lpen_hpos        // light-pen horizontal position, latched by userspace (userio.v)
+	input   [8:0] lpen_hpos,       // light-pen horizontal position, latched by userspace (userio.v)
+
+	// Beam position, out to the save state diagnostics only. Nothing in the
+	// machine reads these; they exist so a restore that comes back with the
+	// display stopped can be told apart from one that comes back with the
+	// display running on the wrong frame geometry.
+	output [10:0] ss_vpos_out,
+	output  [8:0] ss_hpos_out
 );
 
 //register names and adresses
@@ -472,6 +479,9 @@ agnus_blitter bl1
 
 wire  [8:0] hpos;      //alternative horizontal beam counter
 wire [10:0] vpos;      //vertical beam counter
+
+assign ss_vpos_out = vpos;
+assign ss_hpos_out = hpos;
 wire        vbl;       //JB: vertical blanking
 wire        vblend;    //JB: last line of vertical blanking
 wire [15:0] data_bmc;  //beam counter data out

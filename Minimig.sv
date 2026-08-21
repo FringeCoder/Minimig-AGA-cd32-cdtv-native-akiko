@@ -391,7 +391,11 @@ hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fa
 	.ss_int_vec(ss_int_vec), .ss_int_from_pc(ss_int_from_pc),
 	.ss_int_entry_pc(ss_int_entry_pc),
 	.ss_lvl3_count(ss_lvl3_count), .ss_int_total(ss_int_total),
-	.ss_lvl3_entry_pc(ss_lvl3_entry_pc), .ss_lvl3_from_pc(ss_lvl3_from_pc));
+	.ss_lvl3_entry_pc(ss_lvl3_entry_pc), .ss_lvl3_from_pc(ss_lvl3_from_pc),
+	.ss_vpos(ss_beam_vpos), .ss_vpos_max(ss_vpos_max),
+	.ss_hpos_max(ss_hpos_max), .ss_vbl_int_count(ss_vbl_int_count),
+	.ss_htotal(ss_beam_htotal), .ss_varbeamen(ss_beam_varbeamen),
+	.ss_harddis(ss_beam_harddis));
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
@@ -623,6 +627,54 @@ wire [14:0] ss_intreq;
 // is the chipset still running at all, and did the INTENA replay land.
 wire [14:0] ss_intena;
 reg  [7:0]  ss_frame_count;   // incremented below, where ss_frame_tick exists
+
+// ------------------------------------------------------------------ beam diag
+//
+// A restore that comes back with the game spinning on a frame-wait loop tells
+// you nothing on its own: memory can be byte-perfect, the CPU can be taking
+// interrupts, and the machine can still be dead because the beam never reaches
+// vertical blank. ss_frame_count already answers "were there any vertical
+// blanks" (it read zero over 250 seconds on hardware, which is what sent this
+// here); these answer the next question, which is why.
+//
+//   vpos_max / hpos_max  -- how far each counter gets. A vpos_max well below
+//                           the frame height means the beam is running but the
+//                           frame never completes; a vpos_max of zero with a
+//                           moving hpos means only the vertical half is stuck.
+//   vbl_int_count        -- Paula's actual VERTB request. This is the signal
+//                           the game is waiting on, one step upstream of the
+//                           interrupt it never sees.
+//   htotal/varbeamen/harddis -- the ECS variable-beam geometry, which decides
+//                           where vertical blank falls at all.
+//
+// All cleared when a restore starts, so they describe the restored machine and
+// not the one before it.
+wire [10:0] ss_beam_vpos;
+wire  [8:0] ss_beam_hpos;
+wire        ss_beam_vbl_int;
+wire  [8:0] ss_beam_htotal;
+wire        ss_beam_varbeamen;
+wire        ss_beam_harddis;
+
+reg  [10:0] ss_vpos_max;
+reg   [8:0] ss_hpos_max;
+reg   [7:0] ss_vbl_int_count;
+reg         ss_vbl_int_d;
+
+always @(posedge clk_sys) begin
+	ss_vbl_int_d <= ss_beam_vbl_int;
+	if (ss_reset_src_clr) begin
+		ss_vpos_max      <= 11'd0;
+		ss_hpos_max      <= 9'd0;
+		ss_vbl_int_count <= 8'd0;
+	end
+	else begin
+		if (ss_beam_vpos > ss_vpos_max) ss_vpos_max <= ss_beam_vpos;
+		if (ss_beam_hpos > ss_hpos_max) ss_hpos_max <= ss_beam_hpos;
+		if (ss_beam_vbl_int && !ss_vbl_int_d && ss_vbl_int_count != 8'hFF)
+			ss_vbl_int_count <= ss_vbl_int_count + 8'd1;
+	end
+end
 // Which source reset the Amiga, latched since the current restore began. The
 // latch is cleared when a restore starts, so whatever it holds afterwards is
 // what rebooted the machine as a consequence of that restore.
@@ -1940,7 +1992,13 @@ minimig minimig
 	.ss_cia_b             (ss_cia_b_raw         ),
 	.ss_cia_a_in          (ss_restored_cia_a_q  ),
 	.ss_cia_b_in          (ss_restored_cia_b_q  ),
-	.ss_cia_we            (ss_restored_cia_we   )
+	.ss_cia_we            (ss_restored_cia_we   ),
+	.ss_vpos              (ss_beam_vpos         ),
+	.ss_hpos              (ss_beam_hpos         ),
+	.ss_vbl_int           (ss_beam_vbl_int      ),
+	.ss_htotal            (ss_beam_htotal       ),
+	.ss_varbeamen         (ss_beam_varbeamen    ),
+	.ss_harddis           (ss_beam_harddis      )
 );
 
 //////////////////////////  SAVE STATES (phase 1A)  /////////////////////////

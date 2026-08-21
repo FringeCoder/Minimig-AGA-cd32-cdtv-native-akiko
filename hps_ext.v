@@ -166,7 +166,16 @@ module hps_ext
 	input      [15:0] ss_lvl3_count,
 	input      [15:0] ss_int_total,
 	input      [31:0] ss_lvl3_entry_pc,
-	input      [31:0] ss_lvl3_from_pc
+	input      [31:0] ss_lvl3_from_pc,
+
+	// Beam diagnostics. See the latches in Minimig.sv for what each answers.
+	input      [10:0] ss_vpos,
+	input      [10:0] ss_vpos_max,
+	input       [8:0] ss_hpos_max,
+	input       [7:0] ss_vbl_int_count,
+	input       [8:0] ss_htotal,
+	input             ss_varbeamen,
+	input             ss_harddis
 );
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
@@ -463,6 +472,11 @@ always@(posedge clk_sys) begin : main_proc
 							6'd47: io_dout <= ss_lvl3_entry_pc[31:16];
 							6'd48: io_dout <= ss_lvl3_from_pc[15:0];
 							6'd49: io_dout <= ss_lvl3_from_pc[31:16];
+							6'd50: io_dout <= {5'd0, ss_vpos};
+							6'd51: io_dout <= {5'd0, ss_vpos_max};
+							6'd52: io_dout <= {7'd0, ss_hpos_max};
+							6'd53: io_dout <= {8'd0, ss_vbl_int_count};
+							6'd54: io_dout <= {5'd0, ss_harddis, ss_varbeamen, ss_htotal};
 							default: io_dout <= 16'd0;
 						endcase
 					end

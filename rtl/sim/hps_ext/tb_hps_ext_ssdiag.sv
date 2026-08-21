@@ -122,6 +122,15 @@ wire [15:0] ss_lvl3_count  = 16'h0123;
 wire [15:0] ss_int_total   = 16'h4567;
 wire [31:0] ss_lvl3_entry_pc = 32'h00F8679A;
 wire [31:0] ss_lvl3_from_pc  = 32'h0004E118;
+// Beam diagnostics. Distinct values per field so a slot that reads the wrong
+// register shows up as a wrong number rather than a plausible one.
+wire [10:0] ss_vpos          = 11'd123;
+wire [10:0] ss_vpos_max      = 11'd311;
+wire  [8:0] ss_hpos_max      = 9'd227;
+wire  [7:0] ss_vbl_int_count = 8'd45;
+wire  [8:0] ss_htotal        = 9'd227;
+wire        ss_varbeamen     = 1'b1;
+wire        ss_harddis       = 1'b0;
 
 hps_ext dut (.*);
 
@@ -162,7 +171,7 @@ reg leaked = 1'b0;
 always @(posedge clk_sys)
 	if (ide_rd | ide_wr | akiko_rd | akiko_wr | cdtv_rd | cdtv_wr | cdda_wr) leaked <= 1'b1;
 
-reg [15:0] w [0:47];   // sized for the full diagnostic readback
+reg [15:0] w [0:52];   // sized for the full diagnostic readback
 // ss_peek_req is one cycle wide; latch it so the check below can see it.
 reg ss_peek_req_seen = 1'b0;
 // ss_diag_cs lives inside the DUT; sample it rather than infer it.
@@ -299,7 +308,7 @@ initial begin
 	// purpose -- a saturating counter returns a plausible number, not an
 	// obviously wrong one, so only checking the LAST word actually proves the
 	// counter still advances.
-	for (k = 0; k < 34; k = k + 1) xfer_rd(w[k]);
+	for (k = 0; k < 39; k = k + 1) xfer_rd(w[k]);
 	// The loop above left byte_cnt at 16, so w[k] is byte_cnt 16+k. The
 	// kick_pair words land at w[5..8], which is what pins the offset.
 	check("kick pair word 0",  {16'd0, w[5]},  32'h0000EE00);   // bc21
@@ -328,6 +337,15 @@ initial begin
 	check("lvl3 entry high",  {16'd0, w[31]}, 32'h000000F8);   // bc47
 	check("lvl3 from low",    {16'd0, w[32]}, 32'h0000E118);   // bc48
 	check("lvl3 from high",   {16'd0, w[33]}, 32'h00000004);   // bc49
+
+	// The beam diagnostics, bc50-54. The packed word is checked as a whole so
+	// a field that moved inside it fails here rather than reading plausibly.
+	check("beam vpos",        {16'd0, w[34]}, 32'd123);        // bc50
+	check("beam vpos_max",    {16'd0, w[35]}, 32'd311);        // bc51
+	check("beam hpos_max",    {16'd0, w[36]}, 32'd227);        // bc52
+	check("vbl_int count",    {16'd0, w[37]}, 32'd45);         // bc53
+	check("geometry packed",  {16'd0, w[38]},
+	      {16'd0, 5'd0, 1'b0, 1'b1, 9'd227});                  // bc54
 
 	// io_din[5] picks the peek, so the status window's own chip select must
 	// have stayed low through all of that -- a decode that let both through
