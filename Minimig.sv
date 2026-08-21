@@ -36,7 +36,7 @@ assign USER_OUT = (user_port_mode == 2'd2) ? IndirectUserOutSnac :
 `include "build_id.v" 
 `include "rtl/ss_state.vh"
 localparam CONF_STR = {
-	"AmigaCD;UART115200:230400,MIDI,SS3E000000:400000;",
+	"AmigaCD;UART115200:230400,MIDI,SS3C000000:C00000;",
 	"J,Red(Fire),Blue,Yellow,Green,RT,LT,Pause;",
 	"jn,A,B,X,Y,R,L,Start;",
 	"jp,B,A,X,Y,R,L,Start;",
@@ -2163,16 +2163,27 @@ end
 wire ss_save_req = ss_save_req_raw & ss_sec_go;
 wire ss_load_req = ss_load_req_raw & ss_sec_go;
 
-// Save state window: 0x3E000000, four 4 MB slots. DDRAM_ADDR is a 64-bit word
+// Save state window: 0x3C000000, four 12 MB slots. DDRAM_ADDR is a 64-bit word
 // address, so the byte base is shifted right by three.
+//
+// 12 MB per slot, not 4: a machine with 8 MB of Zorro II fast RAM has 11.5 MB
+// of state, and every slot has to hold the largest case because the slot a
+// save lands in is the user's choice, not the payload's. The window moved down
+// from 0x3E000000 to fit four of them below 0x3F000000 -- the top 16 MB of
+// DDR3 is left alone, as it was before.
+//
+// This does not change which configurations can be saved. Zorro III fast RAM
+// still overlaps the window (Z3_1 covers 0x30000000-0x3FFFFFFF whatever the
+// window's base within it) and is still refused in the OSD; Zorro II sits at
+// 0x30000000-0x307FFFFF and is clear of it either way.
 //
 // The byte address must be written as a 32-bit literal, not the 29-bit one
 // the plan used: 0x3E000000 has bit 29 set, so 29'h3E000000 is truncated to
 // 0x1E000000 before the shift and the window lands at byte 0xF000000 --
 // below DDR3's valid base, and squarely inside fast RAM. The shifted result
 // does fit in 29 bits, which is why the destination width is still 29.
-localparam [28:0] SS_SLOT_BASE   = 29'h07C00000;   // byte 0x3E000000 >> 3
-localparam [28:0] SS_SLOT_STRIDE = 29'h00080000;   // byte 0x00400000 >> 3
+localparam [28:0] SS_SLOT_BASE   = 29'h07800000;   // byte 0x3C000000 >> 3
+localparam [28:0] SS_SLOT_STRIDE = 29'h00180000;   // byte 0x00C00000 >> 3
 
 ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 (
@@ -2240,6 +2251,17 @@ ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
 	.freeze       (ss_freeze),
 
 	.chip_base    (24'h000000),
+
+	// Zorro II fast RAM present. Taken from the CONFIGURATION rather than
+	// from cpu_wrapper's z2ram_ena, which only goes high once Kickstart has
+	// autoconfigured the board: that would make the payload length change
+	// part-way through a boot, so two saves in one session could disagree
+	// about it and the second could not be restored over the first.
+	//
+	// The decode mirrors cpu_wrapper's ac_memcard. On 68020 the three bits are
+	// used as-is and bit 2 selects a Zorro III board; on 68000 a set bit 2 is
+	// folded down to the 8 MB Zorro II entry, so any non-zero value is Z2.
+	.fast_ena     (cpu_type ? (~memcfg[6] & |memcfg[5:4]) : (|memcfg[6:4])),
 
 	// Kickstart fingerprint. See SS_KICK_BASE for the derivation and
 	// ss_port_own for the mux this output drives. KICK_WORDS keeps its 512 KB
