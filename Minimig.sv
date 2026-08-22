@@ -2201,6 +2201,22 @@ reg ss_vbl_d;
 always @(posedge clk_114) ss_vbl_d <= vbl;
 wire ss_frame_tick = vbl & ~ss_vbl_d;
 
+// The same edge, detected in clk_sys, for the frame COUNTER below.
+//
+// ss_frame_tick is a clk_114 pulse and the counter runs on clk_sys, which is
+// four times slower -- so an 8.8 ns pulse fell between clk_sys edges nearly
+// every time and the counter sat at zero on a perfectly healthy machine. It
+// read zero next to a saturated vbl_int and a vpos_max of 312, which is how it
+// was caught; before that it was taken as proof the display had stopped and
+// sent a diagnosis down the wrong path entirely.
+//
+// vbl is a clk_sys signal (minimig runs on clk_sys), so detecting the edge
+// there is not a crossing at all -- it is where it should have been. The
+// clk_114 copy stays: ss_quiesce runs on clk_114 and needs it in that domain.
+reg ss_vbl_sys_d;
+always @(posedge clk_sys) ss_vbl_sys_d <= vbl;
+wire ss_frame_tick_sys = vbl & ~ss_vbl_sys_d;
+
 // Vertical blanks between the restore and the reboot. Cleared when a restore
 // starts and frozen when the machine resets, so it answers both questions at
 // once: whether the chipset is running at all (nonzero) and how long the
@@ -2208,7 +2224,7 @@ wire ss_frame_tick = vbl & ~ss_vbl_d;
 // anything that only goes wrong once per frame).
 always @(posedge clk_sys) begin
 	if (ss_reset_src_clr)                             ss_frame_count <= 8'd0;
-	else if (ss_frame_tick && !ss_diag_frozen
+	else if (ss_frame_tick_sys && !ss_diag_frozen
 	         && ss_frame_count != 8'hFF)              ss_frame_count <= ss_frame_count + 8'd1;
 end
 
