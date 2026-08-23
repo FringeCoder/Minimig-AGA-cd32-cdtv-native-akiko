@@ -684,9 +684,9 @@ always @(posedge clk_sys) begin
 			ss_vbl_int_count <= ss_vbl_int_count + 8'd1;
 	end
 end
-// Which source reset the Amiga, latched since the current restore began. The
-// latch is cleared when a restore starts, so whatever it holds afterwards is
-// what rebooted the machine as a consequence of that restore.
+// A restore starting. The beam trackers above and the frame counter below clear
+// on this, so what they hold afterwards describes the restored machine rather
+// than the one it replaced.
 reg         ss_load_busy_d;
 always @(posedge clk_sys) ss_load_busy_d <= ss_load_busy;
 wire        ss_reset_src_clr = ss_load_busy & ~ss_load_busy_d;
@@ -700,7 +700,6 @@ wire        ss_reset_src_clr = ss_load_busy & ~ss_load_busy_d;
 //
 // The beam counters below stayed: they named an htotal of zero on a hung
 // machine in one line, which is the only reason the last bug was findable.
-end
 
 // Custom chipset register shadow. Most Amiga custom registers are write-only in
 // hardware and this core is faithful about that, so they cannot be exported the
