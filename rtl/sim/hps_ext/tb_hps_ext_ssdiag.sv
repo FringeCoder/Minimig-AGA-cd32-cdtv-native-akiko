@@ -100,28 +100,17 @@ wire         ss_peek_valid = 1'b1;
 wire [127:0] ss_pc_snapshot = { 32'h00FC0004, 32'h00003210, 32'h00002200, 32'h00001100 };
 wire  [63:0] ss_kick_pair   = { 32'hFEEDFACE, 32'hC0FFEE00 };
 
-// Live chipset and fault diagnostics, byte_cnt 25-34. Distinct values so a
-// word read back from the wrong offset is obvious rather than plausible --
-// byte_cnt was five bits until this block ran past 31, and the failure mode
-// of that was every later word returning the same one.
+// Live chipset diagnostics. Distinct values so a word read back from the wrong
+// offset is obvious rather than plausible -- byte_cnt was five bits until this
+// block ran past 31, and the failure mode of that was every later word
+// returning the same one.
+//
+// The reboot forensics that occupied byte_cnt 28-49 were retired with the bug
+// they were built for. Those slots now read zero and keep their numbering, so
+// the fields that remain did not have to move and neither did the host.
 wire [14:0] ss_intena_live = 15'h602D;
 wire [14:0] ss_intreq_live = 15'h0840;
 wire  [7:0] ss_frame_count = 8'hA5;
-wire  [2:0] ss_reset_src   = 3'b100;
-wire [31:0] ss_reset_pc    = 32'h00F800D0;
-wire [15:0] ss_fault_vec   = 16'h0020;
-wire [31:0] ss_fault_pc    = 32'h0004E118;
-wire  [7:0] ss_int_count   = 8'd7;
-wire [15:0] ss_fault_sr    = 16'h2004;
-wire [31:0] ss_vbr_live    = 32'h00040000;
-wire [15:0] ss_sr_live     = 16'h0004;
-wire [15:0] ss_int_vec     = 16'h006C;
-wire [31:0] ss_int_from_pc = 32'h0004E118;
-wire [31:0] ss_int_entry_pc= 32'h00F8679A;
-wire [15:0] ss_lvl3_count  = 16'h0123;
-wire [15:0] ss_int_total   = 16'h4567;
-wire [31:0] ss_lvl3_entry_pc = 32'h00F8679A;
-wire [31:0] ss_lvl3_from_pc  = 32'h0004E118;
 // Beam diagnostics. Distinct values per field so a slot that reads the wrong
 // register shows up as a wrong number rather than a plausible one.
 wire [10:0] ss_vpos          = 11'd123;
@@ -315,28 +304,6 @@ initial begin
 	check("live INTENA",      {16'd0, w[9]},  32'h0000602D);   // bc25
 	check("live INTREQ",      {16'd0, w[10]}, 32'h00000840);   // bc26
 	check("frame counter",    {16'd0, w[11]}, 32'h000000A5);   // bc27
-	check("reset source",     {16'd0, w[12]}, 32'h00000004);   // bc28
-	check("reset PC low",     {16'd0, w[13]}, 32'h000000D0);   // bc29
-	check("reset PC high",    {16'd0, w[14]}, 32'h000000F8);   // bc30
-	check("fault vector",     {16'd0, w[15]}, 32'h00000020);   // bc31
-	check("fault PC low",     {16'd0, w[16]}, 32'h0000E118);   // bc32
-	check("fault PC high",    {16'd0, w[17]}, 32'h00000004);   // bc33
-	check("interrupt count",  {16'd0, w[18]}, 32'h00000007);   // bc34
-	check("fault SR",         {16'd0, w[19]}, 32'h00002004);   // bc35
-	check("live VBR low",     {16'd0, w[20]}, 32'h00000000);   // bc36
-	check("live VBR high",    {16'd0, w[21]}, 32'h00000004);   // bc37
-	check("live SR",          {16'd0, w[22]}, 32'h00000004);   // bc38
-	check("first int vector", {16'd0, w[23]}, 32'h0000006C);   // bc39
-	check("int from PC low",  {16'd0, w[24]}, 32'h0000E118);   // bc40
-	check("int from PC high", {16'd0, w[25]}, 32'h00000004);   // bc41
-	check("handler entry low",{16'd0, w[26]}, 32'h0000679A);   // bc42
-	check("handler entry hi", {16'd0, w[27]}, 32'h000000F8);   // bc43
-	check("level-3 count",    {16'd0, w[28]}, 32'h00000123);   // bc44
-	check("interrupt total",  {16'd0, w[29]}, 32'h00004567);   // bc45
-	check("lvl3 entry low",   {16'd0, w[30]}, 32'h0000679A);   // bc46
-	check("lvl3 entry high",  {16'd0, w[31]}, 32'h000000F8);   // bc47
-	check("lvl3 from low",    {16'd0, w[32]}, 32'h0000E118);   // bc48
-	check("lvl3 from high",   {16'd0, w[33]}, 32'h00000004);   // bc49
 
 	// The beam diagnostics, bc50-54. The packed word is checked as a whole so
 	// a field that moved inside it fails here rather than reading plausibly.

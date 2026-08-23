@@ -146,27 +146,12 @@ module hps_ext
 	input      [14:0] ss_intena_live,
 	input      [14:0] ss_intreq_live,
 	input       [7:0] ss_frame_count,
-	input       [2:0] ss_reset_src,
-	input      [31:0] ss_reset_pc,
-	input      [15:0] ss_fault_vec,
-	input      [31:0] ss_fault_pc,
-	input       [7:0] ss_int_count,
-	input      [15:0] ss_fault_sr,
 	// Live VBR and SR. The state vector records VBR=0 for a game that demonstrably
 	// contains movec-to-VBR code, and its level-3 vector at physical $6C points
 	// into the middle of a ROM routine -- which the running machine could not
 	// survive if it were really using it. Either VBR is nonzero live and the
 	// capture is wrong, or it is zero and the running machine never takes
 	// level 3. One reading decides which.
-	input      [31:0] ss_vbr_live,
-	input      [15:0] ss_sr_live,
-	input      [15:0] ss_int_vec,
-	input      [31:0] ss_int_from_pc,
-	input      [31:0] ss_int_entry_pc,
-	input      [15:0] ss_lvl3_count,
-	input      [15:0] ss_int_total,
-	input      [31:0] ss_lvl3_entry_pc,
-	input      [31:0] ss_lvl3_from_pc,
 
 	// Beam diagnostics. See the latches in Minimig.sv for what each answers.
 	input      [10:0] ss_vpos,
@@ -450,28 +435,28 @@ always@(posedge clk_sys) begin : main_proc
 							5'd25: io_dout <= {1'b0, ss_intena_live};
 							5'd26: io_dout <= {1'b0, ss_intreq_live};
 							5'd27: io_dout <= {8'd0, ss_frame_count};
-							5'd28: io_dout <= {13'd0, ss_reset_src};
-							5'd29: io_dout <= ss_reset_pc[15:0];
-							5'd30: io_dout <= ss_reset_pc[31:16];
-							6'd31: io_dout <= ss_fault_vec;
-							6'd32: io_dout <= ss_fault_pc[15:0];
-							6'd33: io_dout <= ss_fault_pc[31:16];
-							6'd34: io_dout <= {8'd0, ss_int_count};
-							6'd35: io_dout <= ss_fault_sr;
-							6'd36: io_dout <= ss_vbr_live[15:0];
-							6'd37: io_dout <= ss_vbr_live[31:16];
-							6'd38: io_dout <= ss_sr_live;
-							6'd39: io_dout <= ss_int_vec;
-							6'd40: io_dout <= ss_int_from_pc[15:0];
-							6'd41: io_dout <= ss_int_from_pc[31:16];
-							6'd42: io_dout <= ss_int_entry_pc[15:0];
-							6'd43: io_dout <= ss_int_entry_pc[31:16];
-							6'd44: io_dout <= ss_lvl3_count;
-							6'd45: io_dout <= ss_int_total;
-							6'd46: io_dout <= ss_lvl3_entry_pc[15:0];
-							6'd47: io_dout <= ss_lvl3_entry_pc[31:16];
-							6'd48: io_dout <= ss_lvl3_from_pc[15:0];
-							6'd49: io_dout <= ss_lvl3_from_pc[31:16];
+							5'd28: io_dout <= 16'd0;   // retired diagnostic
+							5'd29: io_dout <= 16'd0;   // retired diagnostic
+							5'd30: io_dout <= 16'd0;   // retired diagnostic
+							6'd31: io_dout <= 16'd0;   // retired diagnostic
+							6'd32: io_dout <= 16'd0;   // retired diagnostic
+							6'd33: io_dout <= 16'd0;   // retired diagnostic
+							6'd34: io_dout <= 16'd0;   // retired diagnostic
+							6'd35: io_dout <= 16'd0;   // retired diagnostic
+							6'd36: io_dout <= 16'd0;   // retired diagnostic
+							6'd37: io_dout <= 16'd0;   // retired diagnostic
+							6'd38: io_dout <= 16'd0;   // retired diagnostic
+							6'd39: io_dout <= 16'd0;   // retired diagnostic
+							6'd40: io_dout <= 16'd0;   // retired diagnostic
+							6'd41: io_dout <= 16'd0;   // retired diagnostic
+							6'd42: io_dout <= 16'd0;   // retired diagnostic
+							6'd43: io_dout <= 16'd0;   // retired diagnostic
+							6'd44: io_dout <= 16'd0;   // retired diagnostic
+							6'd45: io_dout <= 16'd0;   // retired diagnostic
+							6'd46: io_dout <= 16'd0;   // retired diagnostic
+							6'd47: io_dout <= 16'd0;   // retired diagnostic
+							6'd48: io_dout <= 16'd0;   // retired diagnostic
+							6'd49: io_dout <= 16'd0;   // retired diagnostic
 							6'd50: io_dout <= {5'd0, ss_vpos};
 							6'd51: io_dout <= {5'd0, ss_vpos_max};
 							6'd52: io_dout <= {7'd0, ss_hpos_max};

@@ -384,14 +384,7 @@ hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fa
 	.ss_peek_data(ss_peek_data), .ss_peek_valid(ss_peek_valid),
 	.ss_pc_snapshot(ss_pc_snapshot), .ss_kick_pair(ss_kick_pair),
 	.ss_intena_live(ss_intena), .ss_intreq_live(ss_intreq),
-	.ss_frame_count(ss_frame_count), .ss_reset_src(ss_reset_src),
-	.ss_reset_pc(ss_reset_pc), .ss_fault_vec(ss_fault_vec),
-	.ss_fault_pc(ss_fault_pc), .ss_int_count(ss_int_count),
-	.ss_fault_sr(ss_fault_sr), .ss_vbr_live(ss_vbr), .ss_sr_live(ss_sr),
-	.ss_int_vec(ss_int_vec), .ss_int_from_pc(ss_int_from_pc),
-	.ss_int_entry_pc(ss_int_entry_pc),
-	.ss_lvl3_count(ss_lvl3_count), .ss_int_total(ss_int_total),
-	.ss_lvl3_entry_pc(ss_lvl3_entry_pc), .ss_lvl3_from_pc(ss_lvl3_from_pc),
+	.ss_frame_count(ss_frame_count),
 	.ss_vpos(ss_beam_vpos_q), .ss_vpos_max(ss_vpos_max),
 	.ss_hpos_max(ss_hpos_max), .ss_vbl_int_count(ss_vbl_int_count),
 	.ss_htotal(ss_beam_htotal), .ss_varbeamen(ss_beam_varbeamen),
@@ -694,142 +687,19 @@ end
 // Which source reset the Amiga, latched since the current restore began. The
 // latch is cleared when a restore starts, so whatever it holds afterwards is
 // what rebooted the machine as a consequence of that restore.
-wire [2:0]  ss_reset_src;
 reg         ss_load_busy_d;
 always @(posedge clk_sys) ss_load_busy_d <= ss_load_busy;
 wire        ss_reset_src_clr = ss_load_busy & ~ss_load_busy_d;
 
-// The address that executed the RESET instruction. nResetOut is asserted by
-// exactly one thing (TG68KdotC_Kernel.vhd:518, exec(opcRESET)), so latching
-// the architectural PC on its falling edge names the instruction that rebooted
-// the Amiga. That single number says whether the game deliberately reset
-// itself or the CPU wandered into ROM and Kickstart did -- which the reset
-// source alone cannot distinguish.
-// The FIRST fault taken after a restore, and how many interrupts ran before
-// it. The RESET the machine ends on is Kickstart's own, executed at $00F800D0
-// as part of booting -- an effect, not a cause. What matters is the exception
-// that put the CPU in ROM to begin with: $08 bus error, $0C address error,
-// $10 illegal instruction, $20 privilege violation. Vectors $60 and up are
-// interrupt autovectors and are normal, so they are counted rather than
-// latched, which also proves interrupts are being taken at all.
-// Everything here FREEZES at the first reset. Without that the latches keep
-// recording while Kickstart boots and the game restarts, so the interrupt
-// count saturates on post-reboot activity and a fault taken during the reboot
-// is indistinguishable from one that caused it. Frozen, the readback describes
-// only the window between the restore and the reboot -- and if ss_fault_vec is
-// still zero at that point, then NO fault preceded the reset, which means the
-// running code executed RESET deliberately.
-reg        ss_diag_frozen;
-reg [15:0] ss_fault_vec;
-reg [31:0] ss_fault_pc;
-reg [15:0] ss_fault_sr;
-// Free-running, never cleared and never frozen: how many level-3 dispatches
-// (vector $6C) and how many of every other interrupt this machine has taken
-// since power-on. Everything else here describes a restore; these two describe
-// NORMAL RUNNING, which is the thing that has never been measured.
+// The reboot forensics that used to live here -- reset source and reset PC,
+// the first-fault latch, the interrupt and level-3 counters, the entry and
+// from-PC snapshots -- are gone. They were built to find out why a restore
+// rebooted the Amiga, that bug is fixed, and every failure since has been
+// diagnosed by the beam readback and by comparing the save file against
+// memory instead. See docs/superpowers/plans/ for what they proved.
 //
-// The contradiction they settle: after a restore the CPU takes vector $6C from
-// the game's loop into $00F8679A, which is a copy loop in the middle of a
-// Kickstart routine -- fatal, and observed. The running machine has the same
-// vector, the same INTENA with VERTB enabled and the same mask 0, so by every
-// reading it should be taking that same dispatch fifty times a second and
-// dying. It does not. So either it never takes level 3 at all, and the restore
-// introduces one, or one of those readings is not what it appears to be.
-// Where a NORMAL level-3 interrupt goes, and what it interrupted. Free-running
-// like the counters beside it, so it describes the running machine rather than
-// a restore. The counters proved the machine takes 50 of these a second and
-// survives, so entering $00F8679A cannot be fatal in itself -- which leaves
-// either a different entry during normal running (the vector the CPU fetches
-// is not the one we peek) or the same entry surviving on different register
-// context. These say which.
-reg [31:0] ss_lvl3_entry_pc;
-reg [31:0] ss_lvl3_from_pc;
-reg        ss_lvl3_arm;
-reg [15:0] ss_lvl3_count;
-reg [15:0] ss_int_total;
-reg [15:0] ss_int_vec;
-reg [31:0] ss_int_from_pc;
-reg [31:0] ss_int_entry_pc;
-reg        ss_int_arm;
-reg        ss_boundary_d;
-reg  [7:0] ss_int_count;
-reg        ss_trap_active_d;
-wire [9:0] ss_trap_vector;
-wire       ss_trap_active;
-always @(posedge clk_sys) begin
-	ss_trap_active_d <= ss_trap_active;
-	if (ss_trap_active & ~ss_trap_active_d) begin
-		if (ss_trap_vector >= 10'h060) begin
-			if (ss_int_total != 16'hFFFF) ss_int_total <= ss_int_total + 16'd1;
-			if (ss_trap_vector == 10'h06C) begin
-				if (ss_lvl3_count != 16'hFFFF)
-					ss_lvl3_count <= ss_lvl3_count + 16'd1;
-				ss_lvl3_from_pc <= ss_pc;
-				ss_lvl3_arm     <= 1'b1;
-			end
-		end
-	end
-	else if (ss_lvl3_arm && ss_cpu_at_boundary && !ss_boundary_d) begin
-		ss_lvl3_entry_pc <= ss_pc;
-		ss_lvl3_arm      <= 1'b0;
-	end
-	// Handler entry: the first instruction decoded after that dispatch. If it
-	// reads $00F8679A the CPU really did use the vector sitting at $6C.
-	ss_boundary_d <= ss_cpu_at_boundary;
-	if (ss_int_arm && ss_cpu_at_boundary && !ss_boundary_d && !ss_diag_frozen) begin
-		ss_int_entry_pc <= ss_pc;
-		ss_int_arm      <= 1'b0;
-	end
-	if (ss_reset_src_clr) begin
-		ss_fault_vec <= 16'd0;
-		ss_fault_pc  <= 32'd0;
-		ss_fault_sr     <= 16'd0;
-		ss_int_count    <= 8'd0;
-		ss_int_vec      <= 16'd0;
-		ss_int_from_pc  <= 32'd0;
-		ss_int_entry_pc <= 32'd0;
-		ss_int_arm      <= 1'b0;
-	end
-	else if (ss_diag_frozen) begin
-		// hold everything as it was when the machine rebooted
-	end
-	else if (ss_trap_active & ~ss_trap_active_d) begin
-		if (ss_trap_vector >= 10'h060) begin
-			if (ss_int_count != 8'hFF) ss_int_count <= ss_int_count + 8'd1;
-			// The FIRST interrupt: which vector, and the PC it interrupted.
-			// ss_int_entry_pc below records where it actually landed. Every
-			// other candidate has been eliminated by measurement -- memory,
-			// INTENA, INTREQ, VBR, SR, the shadow, the beam -- and what is
-			// left is a contradiction: the level-3 vector at $6C points into
-			// the middle of a ROM routine that the running machine could not
-			// survive using, yet it plainly does. So record where the CPU
-			// goes instead of inferring it.
-			if (ss_int_vec == 16'd0) begin
-				ss_int_vec     <= {6'd0, ss_trap_vector};
-				ss_int_from_pc <= ss_pc;
-				ss_int_arm     <= 1'b1;
-			end
-		end
-		else if (ss_fault_vec == 16'd0) begin
-			ss_fault_vec <= {6'd0, ss_trap_vector};
-			ss_fault_pc  <= ss_pc;
-			ss_fault_sr  <= ss_sr;
-		end
-	end
-end
-
-reg [31:0] ss_reset_pc;
-reg        ss_nrst_out_d;
-always @(posedge clk_sys) begin
-	ss_nrst_out_d <= cpu_nrst_out;
-	if (ss_reset_src_clr)                      ss_diag_frozen <= 1'b0;
-	else if (ss_nrst_out_d & ~cpu_nrst_out)    ss_diag_frozen <= 1'b1;
-
-	if (ss_reset_src_clr)                      ss_reset_pc <= 32'd0;
-	// First, not last: Kickstart executes its own RESET while booting, which
-	// would otherwise overwrite the interesting one.
-	else if (ss_nrst_out_d & ~cpu_nrst_out && ss_reset_pc == 32'd0)
-		ss_reset_pc <= ss_pc;
+// The beam counters below stayed: they named an htotal of zero on a hung
+// machine in one line, which is the only reason the last bug was findable.
 end
 
 // Custom chipset register shadow. Most Amiga custom registers are write-only in
@@ -1321,8 +1191,6 @@ cpu_wrapper cpu_wrapper
 	.ss_reg_data  (ss_reg_data     ),
 	.ss_exe_pc    (ss_pc           ),
 	.ss_at_boundary(ss_cpu_at_boundary),
-	.ss_trap_vector(ss_trap_vector),
-	.ss_trap_active(ss_trap_active),
 	.ss_bus_settled(ss_cpu_bus_settled),
 	.ss_sr        (ss_sr           ),
 	.ss_usp       (ss_usp          ),
@@ -1990,7 +1858,6 @@ minimig minimig
 	.ss_clut_rd_data      (ss_clut_rd_data      ),
 	.ss_clut_wr_en        (ss_clut_wr_en        ),
 	.ss_clut_wr_data      (ss_clut_wr_data      ),
-	.ss_reset_src         (ss_reset_src         ),
 	.ss_reset_src_clr     (ss_reset_src_clr     ),
 	.ss_rga_addr          (ss_rga_addr          ),
 	.ss_rga_data          (ss_rga_data          ),
@@ -2224,7 +2091,7 @@ wire ss_frame_tick_sys = vbl & ~ss_vbl_sys_d;
 // anything that only goes wrong once per frame).
 always @(posedge clk_sys) begin
 	if (ss_reset_src_clr)                             ss_frame_count <= 8'd0;
-	else if (ss_frame_tick_sys && !ss_diag_frozen
+	else if (ss_frame_tick_sys
 	         && ss_frame_count != 8'hFF)              ss_frame_count <= ss_frame_count + 8'd1;
 end
 
