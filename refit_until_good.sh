@@ -12,10 +12,10 @@ Q=/c/intelFPGA_lite/17.0/quartus/bin64
 OUT=seed_sweep
 mkdir -p "$OUT"
 R="$OUT/refit.txt"
-: > "$R"
+# refit.txt is seeded with the seed 4 result from the full compile above.
 TARGET=0.15
 
-for SEED in 10 16 4 18 14 7 2 11 15 1; do
+for SEED in 10 16 18 14 7 2 11 15 1 3 5 8; do
     "$Q/quartus_fit" --seed=$SEED Minimig > "$OUT/refit_fit_$SEED.log" 2>&1 || { echo "seed $SEED FIT FAILED" | tee -a "$R"; continue; }
     "$Q/quartus_sta" Minimig > "$OUT/refit_sta_$SEED.log" 2>&1
     s=$(grep -oE "Worst-case setup slack is [-0-9.]+" output_files/Minimig.sta.rpt | tail -1 | grep -oE "[-0-9.]+$")
