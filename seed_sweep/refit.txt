@@ -1,11 +1,14 @@
-seed 10  slack -0.199
-seed 16  slack 0.118
-seed 4  slack 0.137
-seed 18  slack -0.244
-seed 14  slack -0.143
-seed 7  slack -0.211
-seed 2  slack -0.256
-seed 11  slack -0.142
-seed 15  slack -0.042
-seed 1  slack -0.250
-no seed reached 0.15
+seed 4  slack 0.045 (full compile, trimmed netlist)
+seed 10  slack -0.023
+seed 16  slack 0.113
+seed 18  slack 0.066
+seed 14  slack 0.107
+seed 7 FIT FAILED
+
+Sweep stopped by hand at seed 7. "FIT FAILED" above is that kill, not a result
+for seed 7 -- it and seeds 2, 11, 15, 1, 3, 5, 8 were never measured on this
+netlist. Deployed build is seed 14: setup +0.107, hold +0.169.
+
+Hold slack is NOT in the table above because the script only recorded setup.
+Seed 16 reads best here at +0.113 setup and has -0.346 HOLD, so it is not a
+candidate. Check both slacks before trusting any row.
