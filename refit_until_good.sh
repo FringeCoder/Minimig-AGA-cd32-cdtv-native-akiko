@@ -26,6 +26,15 @@ for SEED in 10 16 4 18 14 7 2 11 15 1; do
         cp output_files/Minimig.rbf "$OUT/Minimig_good_seed$SEED.rbf"
         echo "GOOD: seed $SEED at $s -- rbf saved" | tee -a "$R"
         exit 0
+    else
+        # Keep every positive build: if nothing clears the target, the best
+        # measured seed still needs a bitstream and refitting it costs another
+        # fifteen minutes for a placement already computed once.
+        ok2=$(awk -v a="${s:-0}" 'BEGIN{print (a>0)?1:0}')
+        if [ "$ok2" = "1" ]; then
+            "$Q/quartus_asm" Minimig > "$OUT/refit_asm_$SEED.log" 2>&1
+            cp output_files/Minimig.rbf "$OUT/Minimig_pos_seed$SEED.rbf"
+        fi
     fi
 done
 echo "no seed reached $TARGET" | tee -a "$R"
