@@ -80,7 +80,7 @@ module chipdma_arb
 	// the port is symmetrical to keep the diff minimal.
 	input             cdtv_dma_req,
 	input             cdtv_dma_we,
-	input      [23:0] cdtv_dma_baddr,
+	input      [31:0] cdtv_dma_baddr,
 	input       [7:0] cdtv_dma_wbyte,
 	output      [7:0] cdtv_dma_rbyte,
 	output            cdtv_dma_ack,
@@ -194,7 +194,10 @@ reg        ak_baddr0;   // byte selector for read demux
 //     ram1 vs ram2 from the master's 24-bit byte address + AC state.
 //     Latched at arm_now alongside ak_addr; held through the slot.
 reg        ak_is_ddr;
-reg [28:1] ak_ddr_addr;
+// Set when the latched address decodes to no memory at all. Such a slot must
+// not be driven onto the chip bus -- a truncated Z3 address used to land on
+// the vector table instead.
+reg        ak_unmapped;
 
 // --- Registered DDR3 bus driven from clk_sys to ddram_ctrl
 //     (clk_114). All six lines latched at arm_now and held until the
@@ -273,7 +276,7 @@ wire arming_is_cdtv = ~akiko_dma_req_q & cdtv_dma_req_q;
 
 // Live master-side inputs at the arming edge (combinational pick).
 wire        live_we     = arming_is_cdtv ? cdtv_dma_we    : akiko_dma_we;
-wire [23:0] live_baddr  = arming_is_cdtv ? cdtv_dma_baddr : akiko_dma_baddr;
+wire [31:0] live_baddr  = arming_is_cdtv ? cdtv_dma_baddr : {8'h00, akiko_dma_baddr};
 wire  [7:0] live_wbyte  = arming_is_cdtv ? cdtv_dma_wbyte : akiko_dma_wbyte;
 
 // --- arm_now: combinational claim at the c_7m_rise edge. Drives
@@ -332,11 +335,12 @@ wire        router_zram_sel;
 
 memory_router u_router
 (
-	.cpu_addr      ({8'h00, live_baddr}),  // 24-bit byte addr → 32 bits, top byte 0
+	.cpu_addr      (live_baddr),
 	.cchip         (1'b0),
 	.ckick         (1'b0),
 	.wr            (1'b0),
 	.bootrom       (1'b0),
+	.cdtv_mode     (1'b0),          // only gates sel_kickram, which ckick=0 already kills
 	.z2ram_ena     (z2ram_ena),
 	.z3ram_base0   (z3ram_base0),
 	.z3ram_ena0    (z3ram_ena0),
@@ -362,10 +366,16 @@ memory_router u_router
 // timing dependency, so combinational is unnecessary).
 wire        is_ddr_now   = arm_now ? router_zram_sel : ak_is_ddr;
 
+// Anything above the 24-bit chip window that the router did not claim for
+// fast RAM decodes to nothing. Driving it onto the chip bus aliases it back
+// into chip RAM, which is how a Z3 write reached the vector table.
+wire        addr_unmapped   = |live_baddr[31:24] & ~router_zram_sel;
+wire        is_unmapped_now = arm_now ? addr_unmapped : ak_unmapped;
+
 // SDRAM (ram1) override only fires when the slot routes to ram1. This
 // path keeps the original combinational shape because sdram_ctrl samples
 // on the same clk_sys edge as arm_now (8.7 ns budget).
-wire arb_drive_chip = arb_drive & ~is_ddr_now;
+wire arb_drive_chip = arb_drive & ~is_ddr_now & ~is_unmapped_now;
 
 assign chip_out_addr = arb_drive_chip ? ak_addr_w    : chip_in_addr;
 assign chip_out_l    = arb_drive_chip ? ak_l_w       : chip_in_l;
@@ -394,6 +404,7 @@ always @(posedge clk) begin
 		ak_rbyte_r     <= 8'h00;
 		active_is_cdtv <= 1'b0;
 		ak_is_ddr      <= 1'b0;
+		ak_unmapped    <= 1'b0;
 		dma_ddr_cs_r   <= 1'b0;
 		dma_ddr_we_r   <= 1'b1;  // safe default — bridge was write-only before this fix
 	end else begin
@@ -411,7 +422,7 @@ always @(posedge clk) begin
 				ak_we          <= live_we;
 				ak_baddr0      <= live_baddr[0];
 				ak_is_ddr      <= router_zram_sel;
-				ak_ddr_addr    <= router_ramaddr;
+				ak_unmapped    <= addr_unmapped;
 				slot_cnt       <= 3'd0;
 				active_is_cdtv <= arming_is_cdtv;
 				// When this slot routes to DDR, latch the

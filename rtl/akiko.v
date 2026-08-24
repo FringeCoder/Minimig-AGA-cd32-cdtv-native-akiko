@@ -99,15 +99,15 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	input             hps_result_done, // pulse: commit hps_result_wr_ptr -> receive_length
 
 	// ---------------------------------------------------------------------
-	// HPS sector channel (M4: 2352-byte raw-sector pushes from Main, plus a
-	// 1-byte status read for the current cdrom_sector_counter). Inactive
-	// (zero) when NATIVE_CD32 = 0.
+	// HPS sector channel (M4: one raw sector pushed from Main as 1176
+	// 16-bit words, plus a 1-byte status read for the current
+	// cdrom_sector_counter). Inactive (zero) when NATIVE_CD32 = 0.
 	// ---------------------------------------------------------------------
 	output            hps_sec_req,     // status: I have a free PBX slot and an empty buffer
 	output      [7:0] hps_sec_status,  // 1-byte read mux (currently == cdrom_sector_counter)
-	input             hps_sec_push,    // pulse: store hps_sec_byte at sec_wr_ptr++
-	input       [7:0] hps_sec_byte,
-	input             hps_sec_done,    // pulse: commit; if sec_wr_ptr == 12'd2352, sector_ready<=1
+	input             hps_sec_push,    // pulse: store hps_sec_word at sec_wr_ptr++
+	input      [15:0] hps_sec_word,
+	input             hps_sec_done,    // pulse: commit; if sec_wr_ptr == 11'd1176, sector_ready<=1
 
 	// rx_busy = receive engine has a queued or in-flight response.
 	// Userspace gates unsolicited pushes (TOC drip, post-INFO media-status)
@@ -132,20 +132,6 @@ module akiko #(parameter NATIVE_CD32 = 0)
 	input       [9:0] nvr_load_addr,
 	input       [7:0] nvr_load_din,
 	input             nvr_load_we,
-
-	// Fast sector path via hps_io's UIO_SECTOR_RD pipeline.
-	// Coexists with hps_sec_push/byte/done (the slow per-byte SSPI_ACK
-	// path); userspace picks one per push. When userspace sends
-	// `spi_w(UIO_SECTOR_RD | (AKIKO_SEC_SLOT<<8))` followed by a 2352-byte
-	// fast block write, hps_io drives sd_ack[AKIKO_SEC_SLOT] high for the
-	// whole transfer and pulses sd_buff_wr per byte with sd_buff_addr
-	// auto-incrementing 0..2351. The pipeline absorbs back-to-back bytes
-	// at SPI clock without dropping, which the per-cs/sec_push path cannot.
-	// All four signals tied 0 leaves only the legacy path active.
-	input             hps_sec_dma_active,  // = sd_ack[AKIKO_SEC_SLOT]
-	input       [7:0] hps_sec_dma_byte,    // = sd_buff_dout
-	input      [13:0] hps_sec_dma_addr,    // = sd_buff_addr
-	input             hps_sec_dma_we,      // = sd_buff_wr
 
 	// Subcode streaming push channel (akiko_cd32.cpp), mirrors hps_sec_*
 	// slow path. Main pushes 96 INTERLEAVED subchannel bytes per CD frame
@@ -389,8 +375,8 @@ if (NATIVE_CD32) begin : g_cd
 	// M4 PBX sector DMA state.
 	//
 	// sector_buffer holds one raw 2352-byte sector pushed by Main via the
-	// HPS sector channel. sector_ready latches when a full sector arrives
-	// (sec_wr_ptr == 2352 at hps_sec_done). cdrom_sector_counter resets to
+	// HPS sector channel as 1176 words. sector_ready latches when a full
+	// sector arrives (sec_wr_ptr == 1176 at hps_sec_done). cdrom_sector_counter resets to
 	// 0 on CDFLAG_ENABLE 0->1 (akiko.cpp:1973-1976); increments after each
 	// successful slot write.
 	//
@@ -402,21 +388,16 @@ if (NATIVE_CD32) begin : g_cd
 	//   PBX_ZERO  : drive write of zero to slot+0xc00 + zero_idx for 0..145.
 	//   PBX_FIN   : clear pbx[seccnt], set CDINT_PBX, increment counter,
 	//               drop sector_ready, -> PBX_IDLE.
-	reg  [7:0] sector_buffer [2352];
-	reg [11:0] sec_wr_ptr;
+	// One sector is 1176 16-bit words, not 2352 bytes. The host pushes the
+	// whole sector as words over the ext bus, which halves the number of SPI
+	// elements per sector and leaves a single write port here.
+	reg [15:0] sector_buffer [1176];
+	reg [10:0] sec_wr_ptr;
 	reg        sector_ready;
 
-	// Muxed single write port into sector_buffer. Slow path (hps_sec_push)
-	// at sec_wr_ptr; fast path (UIO_SECTOR_RD) at sd_buff_addr. The two
-	// are protocol-exclusive (see write block below) so a simple priority
-	// mux is correct.
-	wire        sec_w_we   = hps_sec_dma_active
-	                          ? (hps_sec_dma_we && hps_sec_dma_addr < 14'd2352)
-	                          : (hps_sec_push  && sec_wr_ptr != 12'd2352);
-	wire [11:0] sec_w_addr = hps_sec_dma_active
-	                          ? hps_sec_dma_addr[11:0] : sec_wr_ptr;
-	wire  [7:0] sec_w_din  = hps_sec_dma_active
-	                          ? hps_sec_dma_byte : hps_sec_byte;
+	wire        sec_w_we   = hps_sec_push && sec_wr_ptr != 11'd1176;
+	wire [10:0] sec_w_addr = sec_wr_ptr;
+	wire [15:0] sec_w_din  = hps_sec_word;
 	reg  [7:0] cdrom_sector_counter;
 	reg        pbx_busy;
 	reg  [1:0] pbx_state;
@@ -547,21 +528,28 @@ if (NATIVE_CD32) begin : g_cd
 		else       pbx_addr <= pbx_addr_c;
 	end
 	// sector_buffer must NOT be read combinationally here
-	// (sector_buffer[pbx_byte_idx]): that forces Quartus to map the 2352-byte
-	// array into ~5K ALM registers behind a 2352-way async read mux and a
-	// 2352-way write decode — a timing-marginal structure that intermittently
-	// mis-fills and mis-reads under back-to-back fast UIO_SECTOR_RD block
-	// writes. Hardware A/B: fast push garbles every time, slow per-byte push
-	// a quarter of the time, and both a D-Cache and a PBX-write fix were
-	// falsified, so the corruption is born in the fast FILL of this array.
-	// Registering the read makes the array infer M10K block RAM
+	// (sector_buffer[pbx_byte_idx]): that forces Quartus to map the array
+	// into ALM registers behind a wide async read mux and an equally wide
+	// write decode — a timing-marginal structure that intermittently
+	// mis-fills and mis-reads under back-to-back block writes. Hardware A/B
+	// on the old byte-wide array: fast push garbled every time, slow
+	// per-byte push a quarter of the time, and both a D-Cache and a PBX-write
+	// fix were falsified, so the corruption was born in the FILL of this
+	// array. Registering the read makes the array infer M10K block RAM
 	// (synchronous read) and incidentally aligns the read
 	// latency with the already-registered pbx_addr. The 1-cycle latency is
 	// invisible: pbx_byte_idx is stable between dma_acks and chipdma_arb samples
 	// pbx_addr/pbx_wbyte on c_7m_rise ≥3 clk_sys cycles after the byte
 	// transition (the same argument that makes pbx_addr's registration safe).
-	reg  [7:0] sector_rd_q;
-	always @(posedge clk) sector_rd_q <= sector_buffer[pbx_byte_idx];
+	reg [15:0] sector_rd_w;
+	reg        sector_rd_hi;
+	always @(posedge clk) begin
+		sector_rd_w  <= sector_buffer[pbx_byte_idx[11:1]];
+		sector_rd_hi <= pbx_byte_idx[0];
+	end
+	// Words arrive in host byte order, so the odd byte of each pair is the
+	// high half.
+	wire [7:0] sector_rd_q = sector_rd_hi ? sector_rd_w[15:8] : sector_rd_w[7:0];
 	wire [7:0]  sector_byte_at_idx = (pbx_byte_idx <  12'd3   ) ? 8'h00 :
 	                                 (pbx_byte_idx == 12'd3   ) ? (cdrom_sector_counter & 8'h1f) :
 	                                 (pbx_byte_idx <  12'd2352) ? sector_rd_q :
@@ -652,7 +640,7 @@ if (NATIVE_CD32) begin : g_cd
 			dma_owner            <= OWN_RX;
 			hps_cmd_rd_ptr       <= 6'h0;
 			hps_result_wr_ptr    <= 6'h0;
-			sec_wr_ptr           <= 12'h0;
+			sec_wr_ptr           <= 11'h0;
 			sector_ready         <= 1'b0;
 			sub_wr_ptr           <= 7'h0;
 			subcode_ready        <= 1'b0;
@@ -809,7 +797,7 @@ if (NATIVE_CD32) begin : g_cd
 						cdrom_intreq         <= cdrom_intreq & ~CDINT_OVERFLOW;
 						cdrom_sector_counter <= 8'h0;
 						sector_ready         <= 1'b0;
-						sec_wr_ptr           <= 12'h0;
+						sec_wr_ptr           <= 11'h0;
 						// A new READ DATA invalidates any
 						// PBX ship still in flight from the PREVIOUS read so its
 						// PBX_FIN cannot bump the counter we just reset to 0 (off-
@@ -1018,18 +1006,12 @@ if (NATIVE_CD32) begin : g_cd
 				pbx_ship_invalid <= 1'b0;
 
 			// -----------------------------------------------------------------
-			// HPS bridge: sector-data in. The two source paths (slow per-
-			// byte SSPI ACK pump and fast UIO_SECTOR_RD pipeline) share ONE
-			// write port into sector_buffer, expressed as a single
-			// `sector_buffer[addr] <= din` statement with addr/din muxed
-			// off hps_sec_dma_active. Two physical writers force Quartus to
-			// implement the 2352-byte array in ALMs (~5K ALMs of registers)
-			// instead of M10K. Paths are mutually exclusive at the protocol
-			// level: hps_sec_dma_active = sd_ack[1] is HIGH only while a
-			// SECTOR_RD is in flight, during which the slow-path's
-			// hps_sec_push stays LOW (different hps_io opcode 0x17 vs 0x61).
+			// HPS bridge: sector-data in. One write port, one source: the
+			// host pushes 1176 words over the ext bus. Keeping it to a single
+			// `sector_buffer[addr] <= din` statement is what lets Quartus
+			// infer M10K instead of building the array out of ALMs.
 			// -----------------------------------------------------------------
-			if (sec_w_we && !sector_ready) begin
+			if (sec_w_we && !sector_ready && !enable_rising) begin
 				sector_buffer[sec_w_addr] <= sec_w_din;
 			end
 
@@ -1040,23 +1022,17 @@ if (NATIVE_CD32) begin : g_cd
 			// bridge push a full sector into an already-"full" buffer (every
 			// byte gated off, fill=0) and ship a stale sector. The fill belongs
 			// to the OLD read and is discarded; the new read re-fetches base+0.
-			if (hps_sec_dma_active) begin
-				if (hps_sec_dma_we && hps_sec_dma_addr == 14'd2351
-				    && !sector_ready && !enable_rising) sector_ready <= 1'b1;
-			end else begin
-				// !enable_rising: a new READ DATA resets sec_wr_ptr<=0 in the
-				// cfg_high block (textually earlier); without this guard a same-
-				// cycle slow-path increment would win the NBA and leave the ptr
-				// at 1 after a restart. The fast path is the norm for CD32;
-				// this hardens the dormant SSPI slow path.
-				if (hps_sec_push && !sector_ready && sec_wr_ptr != 12'd2352
-				    && !enable_rising) begin
-					sec_wr_ptr <= sec_wr_ptr + 12'd1;
-				end
-				if (hps_sec_done) begin
-					if (sec_wr_ptr == 12'd2352 && !enable_rising) sector_ready <= 1'b1;
-					sec_wr_ptr <= 12'h0;
-				end
+			// !enable_rising: a new READ DATA resets sec_wr_ptr<=0 in the
+			// cfg_high block (textually earlier); without this guard a same-
+			// cycle increment would win the NBA and leave the ptr at 1 after
+			// a restart.
+			if (hps_sec_push && !sector_ready && sec_wr_ptr != 11'd1176
+			    && !enable_rising) begin
+				sec_wr_ptr <= sec_wr_ptr + 11'd1;
+			end
+			if (hps_sec_done) begin
+				if (sec_wr_ptr == 11'd1176 && !enable_rising) sector_ready <= 1'b1;
+				sec_wr_ptr <= 11'h0;
 			end
 
 			// -----------------------------------------------------------------
@@ -1213,7 +1189,7 @@ if (NATIVE_CD32) begin : g_cd
 				dma_owned            <= 1'b0;
 				hps_cmd_rd_ptr       <= 6'h0;
 				hps_result_wr_ptr    <= 6'h0;
-				sec_wr_ptr           <= 12'h0;
+				sec_wr_ptr           <= 11'h0;
 				sector_ready         <= 1'b0;
 				sub_wr_ptr           <= 7'h0;
 				subcode_ready        <= 1'b0;
@@ -1337,11 +1313,6 @@ if (NATIVE_CD32) begin : g_cd
 	// partly filled sector and for a subcode block, which is one 96-byte
 	// subchannel frame out of seventy-five a second during CDDA.
 	//
-	// hps_sec_dma_active stays, and is the one buffer-ish term that has to:
-	// it means the UIO fast path is actively driving bytes in this instant,
-	// and freezing the machine underneath a transfer in flight is a
-	// different thing from discarding one that has finished.
-	//
 	// tx_dma_delay and rx_dma_delay are the 3-tick post-write inhibit:
 	// nonzero means a transfer has been asked for and has not started yet,
 	// which is no more restorable than one already running.
@@ -1354,7 +1325,6 @@ if (NATIVE_CD32) begin : g_cd
 	         ~pbx_busy & ~subcode_busy & ~tx_busy & ~rx_busy
 	       & ~rx_inflight & ~dma_owned
 	       & (pbx_state == PBX_IDLE) & (subcode_state == SUB_IDLE)
-	       & ~hps_sec_dma_active
 	       & (tx_dma_delay == 2'd0) & (rx_dma_delay == 2'd0);
 
 	// The two 32-byte command buffers, out to the vector. Generate loops for

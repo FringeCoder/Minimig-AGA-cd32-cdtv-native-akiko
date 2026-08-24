@@ -259,31 +259,27 @@ module minimig
 
 	// CDTV bridge ↔ cpu_wrapper port. cpu_wrapper drives cpu_din through
 	// the bridge when cdtv_selack fires (same short-circuit as fastchip).
-	// Direction: bridge data + selack come OUT of minimig.v (the bridge
-	// lives inside this module); the AC ROM byte lookup is the reverse —
-	// cpu_wrapper owns the table, the bridge queries by ac_rom_addr.
+	// The AC ROM table lives inside cdtv_bridge now, so cpu_wrapper only
+	// supplies the autoconfig-assigned base.
 	output [15:0] cdtv_din,
 	output        cdtv_selack,
-	output  [5:0] cdtv_ac_rom_addr,
-	input   [7:0] cdtv_ac_rom_byte,
+	input   [7:0] cdtv_base,
 
-	// CDTV bridge ↔ Main_MiSTer (UIO) ports, driven by cdtv_hps_bridge.
-	input         cdtv_cmd_in_pop,
-	output        cdtv_cmd_in_pending,
-	output  [7:0] cdtv_cmd_in_byte,
-	input         cdtv_cmd_out_push,
-	input   [7:0] cdtv_cmd_out_data,
-	input         cdtv_sec_byte_push,
-	input   [7:0] cdtv_sec_byte_data,
-	// Sector FIFO credit out to cdtv_hps_bridge (free space, 32-byte units)
-	// and the exact empty flag used by the save state sequencer.
-	output  [7:0] cdtv_sec_space,
+	// CDTV bridge ↔ Main_MiSTer, straight off the ext bus in hps_ext.v.
+	input         cdtv_cs,
+	input         cdtv_cs_sec,
+	input         cdtv_cs_stch,
+	input         cdtv_cs_nvr,
+	input         cdtv_cs_card,
+	input         cdtv_wr,
+	input         cdtv_rd,
+	input  [15:0] cdtv_uio_din,
+	output [15:0] cdtv_uio_dout,
+	output        cdtv_req,
+	// The exact empty flag the save state sequencer waits on.
 	output        cdtv_sec_fifo_empty,
 	input         cdtv_subq_push,
 	input   [7:0] cdtv_subq_byte,
-	input         cdtv_stch_pulse,
-	output        cdtv_stch_ack,
-	input         cdtv_stch_ack_clr,
 	input         cdtv_sten_pulse,
 	input         cdtv_scor_pulse,
 	input         cdtv_sbcp_pulse,
@@ -293,22 +289,18 @@ module minimig
 	// pulses ack once the byte has been written to chip RAM.
 	output        cdtv_dma_req,
 	output        cdtv_dma_we,
-	output [23:0] cdtv_dma_baddr,
+	output [31:0] cdtv_dma_baddr,
 	output  [7:0] cdtv_dma_wbyte,
 	input         cdtv_dma_ack,
 
-	// CDTV NVRAM HPS ports — load via hps_io.ioctl_download, save via the
-	// UIO drain.
-	input  [13:0] cdtv_nvr_load_addr,
-	input   [7:0] cdtv_nvr_load_din,
-	input         cdtv_nvr_load_we,
-	input  [13:0] cdtv_nvr_save_addr,
-	output  [7:0] cdtv_nvr_save_dout,
+	// Battery RAM and memory card both live behind the bridge; only their
+	// dirty flags leave this module, for the status word.
 	output        cdtv_nvr_dirty,
-	input         cdtv_nvr_clear_dirty,
+	output        cdtv_card_dirty,
 
 	// CDDA volume word from the TPI Port B DAC strobes.
 	output  [9:0] cdtv_cdda_volume,
+	output        cdtv_cdda_volume_valid,
 
 	//user i/o
 	output  [1:0] cpucfg,
@@ -520,10 +512,22 @@ wire        sel_cia_b;			//cia B select
 	wire        sel_toccata;
 	wire        sel_a2065;
 wire        sel_cdtv;            // $E90000-$E9FFFF DMAC/TPI/CR-511 window
-wire        sel_cdtv_nvram;      // $DC8000-$DCFFFF battery RAM
+wire        sel_cdtv_nvram;
+wire        sel_cdtv_card;      // $DC8000-$DCFFFF battery RAM
 wire [15:0] cdtv_bridge_dout;    // 16-bit data from cdtv_bridge.v
 wire        cdtv_bridge_selack;
-wire [15:0] cdtv_nvr_dout;       // 16-bit (even+odd byte) data from cdtv_nvram.v (CPU port)
+wire [15:0] cdtv_nvr_dout;
+wire [13:0] cdtv_nvr_addr;
+wire  [7:0] cdtv_nvr_load_din;
+wire        cdtv_nvr_load_we;
+wire  [7:0] cdtv_nvr_save_dout;
+wire        cdtv_nvr_clear_dirty;
+wire [15:0] cdtv_card_dout;
+wire [12:0] cdtv_card_addr;
+wire  [7:0] cdtv_card_load_din;
+wire        cdtv_card_load_we;
+wire  [7:0] cdtv_card_save_dout;
+wire        cdtv_card_clear_dirty;       // 16-bit (even+odd byte) data from cdtv_nvram.v (CPU port)
 wire        cdtv_irq_w;          // CDTV INT2 source (DMAC E_INT | TPI ilatch[5])
 wire        int2;					//intterrupt 2
 wire        int3;					//intterrupt 3 
@@ -1053,6 +1057,7 @@ gary GARY1
 	.hdc_ena(ide_ena & ~ide_fast), // Gayle decoding enable	
 	.toccata_ena(toccata_ena),
 	.toccata_base(toccata_base),
+	.cdtv_base(cdtv_base),
 	.a2065_ena(a2065_ena),
 	.a2065_base(a2065_base),
 	.cdtv_mode(chipset_config[5]),
@@ -1077,6 +1082,7 @@ gary GARY1
 	.sel_a2065(sel_a2065),
 	.sel_cdtv(sel_cdtv),
 	.sel_cdtv_nvram(sel_cdtv_nvram),
+	.sel_cdtv_card(sel_cdtv_card),
 	.reset(reset),
 	.clk(clk),
 	.rom_readonly(rom_readonly),
@@ -1245,29 +1251,38 @@ cdtv_bridge cdtv_bridge_inst
 	.hwr             (cpu_hwr              ),    // upper / even-byte write strobe
 	.lwr             (cpu_lwr              ),    // lower / odd-byte write strobe
 
-	.ac_rom_byte     (cdtv_ac_rom_byte     ),
-	.ac_rom_addr     (cdtv_ac_rom_addr     ),
-
 	.cdtv_irq        (cdtv_irq_w           ),
 	.cdda_volume     (cdtv_cdda_volume     ),
+	.cdda_volume_valid(cdtv_cdda_volume_valid),
 
-	.cmd_in_pending  (cdtv_cmd_in_pending  ),
-	.cmd_in_byte     (cdtv_cmd_in_byte     ),
-	.cmd_in_pop      (cdtv_cmd_in_pop      ),
-	.cmd_out_push    (cdtv_cmd_out_push    ),
-	.cmd_out_data    (cdtv_cmd_out_data    ),
+	.uio_cs          (cdtv_cs              ),
+	.uio_cs_sec      (cdtv_cs_sec          ),
+	.uio_cs_stch     (cdtv_cs_stch         ),
+	.uio_cs_nvr      (cdtv_cs_nvr          ),
+	.uio_cs_card     (cdtv_cs_card         ),
+	.uio_wr          (cdtv_wr              ),
+	.uio_rd          (cdtv_rd              ),
+	.uio_din         (cdtv_uio_din         ),
+	.uio_dout        (cdtv_uio_dout        ),
+	.uio_req         (cdtv_req             ),
 
-	.sec_byte_push   (cdtv_sec_byte_push   ),
-	.sec_byte_data   (cdtv_sec_byte_data   ),
-	.sec_space       (cdtv_sec_space       ),
+	.nvr_addr        (cdtv_nvr_addr        ),
+	.nvr_dout        (cdtv_nvr_save_dout   ),
+	.nvr_load_din    (cdtv_nvr_load_din    ),
+	.nvr_load_we     (cdtv_nvr_load_we     ),
+	.nvr_clear_dirty (cdtv_nvr_clear_dirty ),
+
+	.card_addr       (cdtv_card_addr       ),
+	.card_dout       (cdtv_card_save_dout  ),
+	.card_load_din   (cdtv_card_load_din   ),
+	.card_load_we    (cdtv_card_load_we    ),
+	.card_clear_dirty(cdtv_card_clear_dirty),
+
 	.sec_fifo_empty  (cdtv_sec_fifo_empty  ),
 
 	.subq_push       (cdtv_subq_push       ),
 	.subq_byte       (cdtv_subq_byte       ),
 
-	.stch_pulse      (cdtv_stch_pulse      ),
-	.stch_ack        (cdtv_stch_ack        ),
-	.stch_ack_clr    (cdtv_stch_ack_clr    ),
 	.sten_pulse_ext  (cdtv_sten_pulse      ),
 	.scor_pulse      (cdtv_scor_pulse      ),
 	.sbcp_pulse      (cdtv_sbcp_pulse      ),
@@ -1292,15 +1307,40 @@ cdtv_nvram cdtv_nvram_inst
 	.hwr             (cpu_hwr              ),
 	.lwr             (cpu_lwr              ),
 
-	.hps_load_addr   (cdtv_nvr_load_addr   ),
+	.hps_load_addr   (cdtv_nvr_addr        ),
 	.hps_load_din    (cdtv_nvr_load_din    ),
 	.hps_load_we     (cdtv_nvr_load_we     ),
 
-	.hps_save_addr   (cdtv_nvr_save_addr   ),
+	.hps_save_addr   (cdtv_nvr_addr        ),
 	.hps_save_dout   (cdtv_nvr_save_dout   ),
 
 	.dirty           (cdtv_nvr_dirty       ),
 	.clear_dirty     (cdtv_nvr_clear_dirty )
+);
+
+// The memory card is the same module at 8 KB, in the $E00000 window.
+cdtv_nvram #(.ADDR_W(13)) cdtv_card_inst
+(
+	.clk             (clk                  ),
+	.reset           (reset                ),
+
+	.sel             (sel_cdtv_card        ),
+	.addr            (cpu_address_out      ),
+	.din             (cpu_data_out         ),
+	.dout            (cdtv_card_dout       ),
+	.rd              (cpu_rd               ),
+	.hwr             (cpu_hwr              ),
+	.lwr             (cpu_lwr              ),
+
+	.hps_load_addr   (cdtv_card_addr       ),
+	.hps_load_din    (cdtv_card_load_din   ),
+	.hps_load_we     (cdtv_card_load_we    ),
+
+	.hps_save_addr   (cdtv_card_addr       ),
+	.hps_save_dout   (cdtv_card_save_dout  ),
+
+	.dirty           (cdtv_card_dirty      ),
+	.clear_dirty     (cdtv_card_clear_dirty)
 );
 
 // Bridge → cpu_wrapper short-circuit. Either the bridge ($E9 window) or
@@ -1308,8 +1348,9 @@ cdtv_nvram cdtv_nvram_inst
 // cpu_wrapper bypasses the chip-bus DTACK wait. 8-bit NVRAM byte mirrors
 // into both halves of the 16-bit word (the chip-bus is byte-decomposed
 // upstream by CIA per spec section 5.2).
-assign cdtv_din    = sel_cdtv_nvram ? cdtv_nvr_dout : cdtv_bridge_dout;
-assign cdtv_selack = cdtv_bridge_selack | sel_cdtv_nvram;
+assign cdtv_din    = sel_cdtv_nvram ? cdtv_nvr_dout :
+                     sel_cdtv_card  ? cdtv_card_dout : cdtv_bridge_dout;
+assign cdtv_selack = cdtv_bridge_selack | sel_cdtv_nvram | sel_cdtv_card;
 //-------------------------------------------------------------------------------------
 
 //data multiplexer

@@ -80,7 +80,10 @@ wire        akiko_req = 1'b0, akiko_sec_req = 1'b0, akiko_rx_busy = 1'b0, akiko_
 wire [15:0] cdtv_din = 16'hCCCC;
 wire [15:0] cdtv_dout;
 wire        cdtv_wr, cdtv_rd, cdtv_cs, cdtv_cs_sec, cdtv_cs_stch;
+wire        cdtv_cs_nvr, cdtv_cs_card;
 wire        cdtv_req = 1'b0;
+wire        cdtv_nvr_dirty = 1'b0;
+wire        cdtv_card_dirty = 1'b0;
 
 // The diagnostic window, filled with a value per word that could not be
 // confused with any other word, with any tied-off bridge input above, or with

@@ -107,7 +107,7 @@ initial forever #5 clk = ~clk;
 
 logic        reset = 1;
 logic        sec_push = 0;
-logic  [7:0] sec_byte = 8'h00;
+logic [15:0] sec_word = 16'h0000;
 logic        ss_ld    = 0;
 logic [SS_W-1:0] ss_ld_data = {SS_W{1'b0}};
 
@@ -126,13 +126,11 @@ akiko #(.NATIVE_CD32(1)) u_dut (
 	.hps_cmd_pop(1'b0), .hps_cmd_done(1'b0),
 	.hps_result_push(1'b0), .hps_result_byte(8'h00), .hps_result_done(1'b0),
 	.hps_sec_req(), .hps_sec_status(),
-	.hps_sec_push(sec_push), .hps_sec_byte(sec_byte), .hps_sec_done(1'b0),
+	.hps_sec_push(sec_push), .hps_sec_word(sec_word), .hps_sec_done(1'b0),
 	.hps_rx_busy(),
 	.hps_nvr_addr(10'd0),
 	.hps_nvr_dout(), .hps_nvr_clear_dirty(1'b0), .hps_nvr_dirty(),
 	.nvr_load_addr(10'd0), .nvr_load_din(8'h00), .nvr_load_we(1'b0),
-	.hps_sec_dma_active(1'b0), .hps_sec_dma_byte(8'h00),
-	.hps_sec_dma_addr(14'd0), .hps_sec_dma_we(1'b0),
 	.hps_subcode_push(1'b0), .hps_subcode_byte(8'h00), .hps_subcode_done(1'b0),
 	.ss_state(ss_state), .ss_ld(ss_ld), .ss_ld_data(ss_ld_data),
 	.ss_idle(ss_idle)
@@ -259,9 +257,9 @@ initial begin
 	@(posedge clk); #1;
 	check_b("staged data does not hold off the freeze", 1'b1, ss_idle);
 
-	// One byte in flight on the UIO fast path is different: that is a
-	// transfer happening now, not one that has finished.
-	@(negedge clk); sec_byte = 8'h5A; sec_push = 1;
+	// A word pushed and finished is not a transfer in flight, so it must
+	// not hold the freeze off.
+	@(negedge clk); sec_word = 16'h5A5A; sec_push = 1;
 	@(posedge clk);
 	@(negedge clk); sec_push = 0;
 	#1;

@@ -149,12 +149,10 @@ module cpu_wrapper
 	input      [15:0] cdtv_din,
 	input             cdtv_selack,
 
-	// AC ROM mirror feed. The BIOS reads back the autoconfig identity
-	// bytes at $E900-$E93F after relocating the board. cdtv_bridge.v
-	// provides the byte offset; cpu_wrapper looks up the 8-bit ROM value
-	// from its existing ac_rom table.
-	input       [5:0] cdtv_ac_rom_addr,
-	output      [7:0] cdtv_ac_rom_byte,
+	// Autoconfig-assigned base for the CDTV bridge window. gary.v decodes
+	// $xx0000 from this instead of the hard-wired $E9.
+	output reg  [7:0] cdtv_base,
+
 
 	output reg  [1:0] cpustate,
 	output reg  [3:0] cacr,
@@ -210,6 +208,7 @@ memory_router u_memory_router
 	.ckick         (ckick         ),
 	.wr            (wr            ),
 	.bootrom       (bootrom       ),
+	.cdtv_mode     (cdtv_mode     ),
 	.z2ram_ena     (z2ram_ena     ),
 	.z3ram_base0   (z3ram_base0   ),
 	.z3ram_ena0    (z3ram_ena0    ),
@@ -568,7 +567,6 @@ reg       ac_a2065;
 reg       ac_cdtv;
 reg [2:0] ac_memcard;
 reg [3:0] autocfg_data;
-reg [7:0] cdtv_base;
 
 
 always @(*) begin
@@ -695,67 +693,12 @@ end
 
 wire sel_autoconfig = (chip_addr[23:16] == 8'b11101000) && (ac_memcard || ac_toccata || ac_a2065 || ac_cdtv); //$E80000 - $E8FFFF
 
-// CDTV AC ROM byte mirror — spec section 2.2 + section 2.3 row 1.
-// The BIOS reads $E900-$E93F (AC ROM at the post-relocation base) to
-// re-identify the board. Returned bytes are the Z2-encoded NIBBLE form
-// stored in WinUAE's dmacmemory[] array — the BIOS does NOT see the
-// raw logical value, it sees the encoded nibbles split across two
-// adjacent offsets.
-//
-// ew() helper at cdtv.cpp:1610-1619 splits each logical byte:
-//   * Offsets $00/$02/$40/$42 use the NOT-inverted form:
-//       dmacmemory[addr  ] = value & 0xF0
-//       dmacmemory[addr+2] = (value & 0x0F) << 4
-//   * Other offsets use the INVERTED form (Z2 complement):
-//       dmacmemory[addr  ] = ~(value & 0xF0) & 0xF0
-//       dmacmemory[addr+2] = ~((value & 0x0F) << 4) & 0xF0
-// Untouched slots stay at 0xFF (per memset(dmacmemory, 0xff) at line 1753).
-//
-// cdtv_ac_rom_addr [5:0] is the byte offset / 2 — so addr=0 hits the
-// AC ROM at byte $00, addr=1 hits byte $02, etc.
-//
-// ew() calls in cdtv_init (cdtv.cpp:1755-1769):
-//   ew(0x00, 0xC1)  type=Z2+linked+ROM (NOT inv)
-//   ew(0x04, 0x03)  product number = 3
-//   ew(0x08, 0x40)  size flag = 64 KB
-//   ew(0x10, 0x02)  manuf hi = 2
-//   ew(0x14, 0x02)  manuf lo = 2
-//   ew(0x18..0x24, 0)  serial = 0
-//
-// Resulting bytes at the AC ROM offsets used by the BIOS:
-reg [7:0] cdtv_ac_rom_byte_r;
-always @* begin
-	cdtv_ac_rom_byte_r = 8'hFF;
-	case (cdtv_ac_rom_addr)
-		6'h00: cdtv_ac_rom_byte_r = 8'hC0;   // byte $00 = 0xC1 hi nibble (NOT inv)
-		6'h01: cdtv_ac_rom_byte_r = 8'h10;   // byte $02 = 0xC1 lo nibble << 4 (NOT inv)
-		6'h02: cdtv_ac_rom_byte_r = 8'hF0;   // byte $04 = ~(0x03 hi nibble) = 0xF0 (inv)
-		6'h03: cdtv_ac_rom_byte_r = 8'hC0;   // byte $06 = ~(0x03 lo nibble << 4) = 0xC0 (inv)
-		6'h04: cdtv_ac_rom_byte_r = 8'hB0;   // byte $08 = ~(0x40 hi nibble) = 0xB0 (inv)
-		6'h05: cdtv_ac_rom_byte_r = 8'hF0;   // byte $0A = ~(0x40 lo nibble << 4) = 0xF0
-		6'h08: cdtv_ac_rom_byte_r = 8'hF0;   // byte $10 = ~(0x02 hi) = 0xF0
-		6'h09: cdtv_ac_rom_byte_r = 8'hD0;   // byte $12 = ~(0x02 lo << 4) = 0xD0
-		6'h0A: cdtv_ac_rom_byte_r = 8'hF0;   // byte $14 = ~(0x02 hi) = 0xF0
-		6'h0B: cdtv_ac_rom_byte_r = 8'hD0;   // byte $16 = ~(0x02 lo << 4) = 0xD0
-		// Serial bytes $18 / $1C / $20 / $24 = ew(_, 0): both nibbles 0 inv -> 0xF0
-		6'h0C: cdtv_ac_rom_byte_r = 8'hF0;   // byte $18
-		6'h0D: cdtv_ac_rom_byte_r = 8'hF0;   // byte $1A
-		6'h0E: cdtv_ac_rom_byte_r = 8'hF0;   // byte $1C
-		6'h0F: cdtv_ac_rom_byte_r = 8'hF0;   // byte $1E
-		6'h10: cdtv_ac_rom_byte_r = 8'hF0;   // byte $20
-		6'h11: cdtv_ac_rom_byte_r = 8'hF0;   // byte $22
-		6'h12: cdtv_ac_rom_byte_r = 8'hF0;   // byte $24
-		6'h13: cdtv_ac_rom_byte_r = 8'hF0;   // byte $26
-		default: cdtv_ac_rom_byte_r = 8'hFF; // memset(0xff) default
-	endcase
-end
-assign cdtv_ac_rom_byte = cdtv_ac_rom_byte_r;
-
 reg       z2ram_ena;
 reg [4:0] z3ram_base0;
 reg [3:0] z3ram_base1;
 reg       z3ram_ena0;
 reg       z3ram_ena1;
+
 always @(posedge clk) begin
 	reg old_uds;
 	old_uds <= chip_uds;

@@ -32,6 +32,10 @@ module memory_router
 	// KS lower-half flag. Affects ramaddr[18] when sel_kicklower fires.
 	input             bootrom,
 
+	// CDTV moves its memory card into the $e0xxxx window, so the turbo-kick
+	// write mirror must not claim that range there.
+	input             cdtv_mode,
+
 	// AutoConfig'd fast-RAM enable + base state. Owned by cpu_wrapper
 	// today (lines 549-619); exported via new ports for the bridge.
 	input             z2ram_ena,
@@ -73,7 +77,7 @@ assign sel_rtg      = (cpu_addr[31:24] == 8'h02);
 
 // don't sel_kickram when writing
 // CD32 mirrors $a8xxxx (mirror of $f8xxxx) and $b0xxxx (mirror of $e0xxxx)
-assign sel_kickram   = !cpu_addr[31:24] && (&cpu_addr[23:19] || (cpu_addr[23:19] == 5'b11100) || (cpu_addr[23:19] == 5'b10101) || (cpu_addr[23:19] == 5'b10110)) && ckick && wr;
+assign sel_kickram   = !cpu_addr[31:24] && (&cpu_addr[23:19] || (!cdtv_mode && cpu_addr[23:19] == 5'b11100) || (cpu_addr[23:19] == 5'b10101) || (cpu_addr[23:19] == 5'b10110)) && ckick && wr;
 assign sel_kicklower = !cpu_addr[31:24] && (cpu_addr[23:18] == 6'b111110);
 assign sel_chipram   = !cpu_addr[31:21] && cchip;
 

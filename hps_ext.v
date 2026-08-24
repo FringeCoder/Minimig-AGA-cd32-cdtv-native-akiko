@@ -104,7 +104,11 @@ module hps_ext
 	output reg        cdtv_cs,
 	output reg        cdtv_cs_sec,     // sector-push sub-channel
 	output reg        cdtv_cs_stch,    // STCH-inject sub-channel
+	output reg        cdtv_cs_nvr,     // battery-RAM sub-channel
+	output reg        cdtv_cs_card,    // memory-card sub-channel
 	input             cdtv_req,        // bit 6 of status word
+	input             cdtv_nvr_dirty,  // bit 12 of status word
+	input             cdtv_card_dirty, // bit 13 of status word
 
 	// Save state diagnostics -- UIO class 0xF600 = io_din[15:9] == 7'b1111011.
 	//
@@ -222,6 +226,8 @@ always@(posedge clk_sys) begin : main_proc
 		cdtv_cs <= 0;
 		cdtv_cs_sec <= 0;
 		cdtv_cs_stch <= 0;
+		cdtv_cs_nvr  <= 0;
+		cdtv_cs_card <= 0;
 		ss_diag_cs <= 0;
 		ss_peek_cs <= 0;
 		ss_peek_arm <= 0;
@@ -254,6 +260,8 @@ always@(posedge clk_sys) begin : main_proc
 			cdtv_cs_sec      <= (io_din[15:9] == 7'b1111100) && !io_din[7] && !io_din[6] &&  io_din[5];
 			// CDTV STCH inject sub-channel — io_din[7]=0, io_din[6]=1.
 			cdtv_cs_stch     <= (io_din[15:9] == 7'b1111100) && !io_din[7] &&  io_din[6];
+			cdtv_cs_nvr      <= (io_din[15:9] == 7'b1111100) &&  io_din[7] && !io_din[6];
+			cdtv_cs_card     <= (io_din[15:9] == 7'b1111100) &&  io_din[7] &&  io_din[6];
 			// Save state diagnostics, and the peek sub-channel beside it.
 			// io_din[5] picks between them, so the status window is unchanged
 			// for any host that never asks for a peek.
@@ -289,11 +297,16 @@ always@(posedge clk_sys) begin : main_proc
 				// bit [10] = akiko_sec_req (M4: PBX wants a sector pushed)
 				// Bit  [9] = akiko_rx_busy
 				// bit  [8] = cdda_req (legacy stock-Minimig CDDA — dormant in NATIVE_CD32)
+				// bit [13] = cdtv_card_dirty (memory card written since last clear)
+				// bit [12] = cdtv_nvr_dirty (CDTV battery RAM written since last clear)
 				// bit  [7] = akiko_nvr_dirty (NVRAM written since last clear)
 				// bit  [6] = cdtv_req (CDTV cmd_in_fifo has data)
 				// bits [5:0] = ide_req
-				io_dout <= {4'hE, akiko_req, akiko_sec_req, akiko_rx_busy, cdda_req, akiko_nvr_dirty, cdtv_req, ide_req};
+				io_dout <= {2'b00, cdtv_card_dirty, cdtv_nvr_dirty, akiko_req, akiko_sec_req, akiko_rx_busy, cdda_req, akiko_nvr_dirty, cdtv_req, ide_req};
 			end
+			// A core that answers 1 here is telling userspace it carries the
+			// Akiko/CDTV hardware, which is what gates the CD polls.
+			if(io_din == UIO_GET_VMODE) io_dout <= 1;
 		end else begin
 			case(cmd)
 
@@ -359,12 +372,11 @@ always@(posedge clk_sys) begin : main_proc
 						cdda_wr  <= cdda_cs;
 						ide_wr   <= ide_cs;
 						akiko_wr <= akiko_cs;
-						// cdtv_wr feeds the cmd-byte channel, the STCH-inject
-						// sub-channel, and the sector-push sub-channel.
-						// cdtv_hps_bridge gates its outputs with its own cs
-						// signals, so OR'ing here just routes the write strobe
-						// to whichever sub-channel is selected.
-						cdtv_wr  <= cdtv_cs | cdtv_cs_stch | cdtv_cs_sec;
+						// cdtv_wr feeds the cmd-byte channel plus the STCH,
+						// sector, battery-RAM and memory-card sub-channels.
+						// cdtv_bridge gates each on its own cs, so OR'ing here
+						// just routes the strobe to whichever is selected.
+						cdtv_wr  <= cdtv_cs | cdtv_cs_stch | cdtv_cs_sec | cdtv_cs_nvr | cdtv_cs_card;
 					end
 				end
 
@@ -377,12 +389,10 @@ always@(posedge clk_sys) begin : main_proc
 						io_dout  <= akiko_din;
 						akiko_rd <= 1;
 					end
-					// cdtv_cs_sec joins the read path so userspace can read
-					// back the sector FIFO free-space credit (sec_space) before
-					// streaming a sector. cdtv_hps_bridge muxes it in on cs_sec;
-					// the three cdtv cs_* are mutually exclusive, so this can
-					// neither pop the cmd FIFO nor clear the STCH ack.
-					if(byte_cnt >= 3 && (cdtv_cs | cdtv_cs_stch | cdtv_cs_sec)) begin
+					// cdtv_cs_sec is write-only, so it stays out of the read
+					// path. The cs_* are mutually exclusive, so a read here can
+					// neither pop the cmd FIFO nor disturb the sector stream.
+					if(byte_cnt >= 3 && (cdtv_cs | cdtv_cs_stch | cdtv_cs_nvr | cdtv_cs_card)) begin
 						io_dout <= cdtv_din;
 						cdtv_rd <= 1;
 					end

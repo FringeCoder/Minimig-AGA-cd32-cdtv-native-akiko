@@ -146,18 +146,7 @@ wire [21:0] gamma_bus;
 
 wire  [7:0] uart_mode;
 
-// VDNUM=2: slot 0 = NVRAM .nvr file (load via canonical SD-block path).
-//          slot 1 = akiko sector DMA target. Userspace sends UIO_SECTOR_RD |
-//                   (1<<8) followed by 2352 raw bytes; hps_io drives sd_ack[1]
-//                   high for the transfer and pulses sd_buff_wr per byte with
-//                   sd_buff_addr auto-incrementing 0..2351. akiko.v captures
-//                   into sector_buffer at full SPI rate (replaces the slow
-//                   per-byte SSPI_ACK path on UIO_DMA_WRITE).
-// BLKSZ=3: 1024 bytes per LBA. NVR fits in 1 block; akiko sector path
-//          ignores LBA (userspace addresses bytes via sd_buff_addr directly,
-//          but the protocol still requires BLKSZ — 1024 is fine because the
-//          sector path doesn't gate on LBA boundaries).
-hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0), .VDNUM(2), .BLKSZ(3)) hps_io
+hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS({HPS_BUS[45:42],ce_pix,HPS_BUS[40:0]}),
@@ -182,20 +171,6 @@ hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0), .VDNUM(2), .BLKSZ(3)) hps_io
 	.joystick_l_analog_1(JOYA1),
 
 	.ioctl_wait(io_wait),
-
-	.img_mounted(img_mounted),
-	.img_readonly(img_readonly),
-	.img_size(img_size),
-
-	.sd_lba(sd_lba),
-	.sd_blk_cnt(sd_blk_cnt),
-	.sd_rd(sd_rd),
-	.sd_wr(sd_wr),
-	.sd_ack(sd_ack),
-	.sd_buff_addr(sd_buff_addr),
-	.sd_buff_dout(sd_buff_dout),
-	.sd_buff_din(sd_buff_din),
-	.sd_buff_wr(sd_buff_wr),
 
 	.buttons(buttons),
 	.forced_scandoubler(forced_scandoubler),
@@ -232,97 +207,23 @@ wire        akiko_sec_req; // FROM fastchip TO hps_ext (M4 sector status bit)
 wire        akiko_rx_busy; // FROM fastchip TO hps_ext (RX engine busy)
 wire        akiko_nvr_dirty; // FROM fastchip TO hps_ext (NVRAM dirty bit)
 
-// CDTV HPS bridge wires (M2 phase-1a). Bound to hps_ext's cdtv_* ports
-// via wildcard instantiation. cmd byte-stream sub-channel only —
-// sector / status pulses come later phases.
-wire [15:0] cdtv_din;          // FROM cdtv_hps_bridge TO hps_ext
-wire [15:0] cdtv_dout;         // FROM hps_ext TO cdtv_hps_bridge
+// CDTV ext-bus wires. cdtv_bridge inside minimig.v takes these straight
+// from hps_ext, so there is no separate host-side bridge module any more.
+wire [15:0] cdtv_din;          // FROM minimig TO hps_ext
+wire [15:0] cdtv_dout;         // FROM hps_ext TO minimig
 wire        cdtv_wr;
 wire        cdtv_rd;
 wire        cdtv_cs;
-wire        cdtv_cs_sec;       // phase-1b sector-push sub-channel
-wire        cdtv_cs_stch;      // phase-1e STCH-inject sub-channel
-wire        cdtv_stch_inject;  // 1-clk pulse from cdtv_hps_bridge -> minimig
-wire        cdtv_stch_ack;     // BIOS took the STCH interrupt
-wire        cdtv_stch_ack_clr;
-wire        cdtv_sec_byte_push_w; // 1-clk pulse per UIO sec byte
-wire  [7:0] cdtv_sec_byte_data_w;
-wire  [7:0] cdtv_sec_space_w;  // sector FIFO free space, 32-byte units
+wire        cdtv_cs_sec;       // sector-push sub-channel
+wire        cdtv_cs_stch;      // STCH-inject sub-channel
+wire        cdtv_cs_nvr;       // battery-RAM sub-channel
+wire        cdtv_cs_card;      // memory-card sub-channel
 wire        cdtv_sec_empty_w;  // sector FIFO exactly empty
 wire        cdtv_req;          // bit 6 of 0x63 status word
-
-// NVRAM load-from-disk via canonical SD-block path (the pattern SNES,
-// Saturn, GBA, NeoGeo, CDi all use). Userspace calls user_io_file_mount
-// with the .nvr path; hps_io fires img_mounted[0], we kick off a single
-// 1024-byte read by raising sd_rd_nvr with sd_lba_nvr=0, hps_io streams
-// each byte on sd_buff_dout / sd_buff_addr / sd_buff_wr, and we forward
-// directly to akiko_nvram's load_we BRAM port. Sidesteps the gp_out CDC
-// race that broke the ioctl_download path on hardware (data freezes at
-// the first byte-value transition; bench-clean, hw-broken).
-//
-// VDNUM=1 (slot 0 = NVR), BLKSZ=3 (1024 B/block — whole NVR fits in one
-// LBA), WIDE=0 (byte-wide sd_buff_dout — direct match for our 8-bit
-// BRAM port, no unpack needed). The akiko_nvram BRAM write port lives
-// outside the CD32 CPU reset domain (akiko.v nvram_inst has .reset(1'b0)),
-// so the load works whether or not cpu_rst is asserted at mount time.
-wire        img_mounted;
-wire        img_readonly;
-wire [63:0] img_size;
-wire [31:0] sd_lba   [1:0];
-wire  [5:0] sd_blk_cnt[1:0];
-wire  [1:0] sd_ack;
-wire [13:0] sd_buff_addr;
-wire  [7:0] sd_buff_dout;
-wire  [7:0] sd_buff_din[1:0];
-wire        sd_buff_wr;
-
-reg         sd_rd_nvr;
-reg         sd_wr_nvr;        // unused for now (save still goes via UIO dump)
-reg         img_mounted_d;
-
-// Slot 0 = NVR. Slot 1 = akiko sector DMA target — sd_rd/sd_wr stay 0
-// (userspace pushes UIO_SECTOR_RD on demand without going through the
-// menu-driven sd_rd/sd_wr handshake; hps_io still asserts sd_ack[1] on
-// receipt of the opcode, which is all the akiko path needs).
-wire  [1:0] sd_rd = {1'b0, sd_rd_nvr};
-wire  [1:0] sd_wr = {1'b0, sd_wr_nvr};
-assign sd_lba[0]      = 32'd0;
-assign sd_lba[1]      = 32'd0;        // unused: akiko addresses by sd_buff_addr
-assign sd_blk_cnt[0]  = 6'd0;         // single 1024-byte block per NVR load
-assign sd_blk_cnt[1]  = 6'd0;         // unused; tied off
-assign sd_buff_din[0] = 8'h00;        // NVR save not wired through this path
-assign sd_buff_din[1] = 8'h00;        // akiko slot is read-only from the host
-
-always @(posedge clk_sys) begin
-	img_mounted_d <= img_mounted;
-	// Rising edge of img_mounted with the right size kicks off the
-	// load by raising sd_rd_nvr. hps_io picks this up, asserts sd_ack
-	// (HIGH for the *entire* transfer — see sys/hps_io.sv 'h17/0X18
-	// case) and streams bytes on sd_buff_dout/_addr/_wr. We drop
-	// sd_rd_nvr the moment sd_ack rises so the request isn't re-issued.
-	if (img_mounted && !img_mounted_d &&
-	    (img_size == 64'd1024) && !img_readonly) begin
-		sd_rd_nvr <= 1'b1;
-	end else if (sd_ack[0]) begin
-		sd_rd_nvr <= 1'b0;
-	end
-	sd_wr_nvr <= 1'b0;
-end
-
-// Gate by sd_ack[0] (HIGH for the whole NVR transfer), NOT sd_rd_nvr (which
-// drops one cycle after the transfer starts and would mask every byte).
-wire [9:0]  nvr_load_addr  = sd_buff_addr[9:0];
-wire [7:0]  nvr_load_din   = sd_buff_dout;
-wire        nvr_load_we    = sd_buff_wr & sd_ack[0];
-
-// Akiko sector DMA path (slot 1). sd_ack[1] gates capture in akiko.v;
-// sd_buff_dout/_addr/_wr are shared with the NVR slot but the gate keeps
-// transfers exclusive (only one slot's sd_ack is HIGH at a time per the
-// hps_io.sv `'h0X17: sd_ack <= disk[VD:0]` assignment).
-wire        akiko_sec_dma_active = sd_ack[1];
-wire  [7:0] akiko_sec_dma_byte   = sd_buff_dout;
-wire [13:0] akiko_sec_dma_addr   = sd_buff_addr;
-wire        akiko_sec_dma_we     = sd_buff_wr;
+wire        cdtv_nvr_dirty;    // bit 12
+wire        cdtv_card_dirty;   // bit 13
+wire  [9:0] cdtv_cdda_volume_w;
+wire        cdtv_cdda_volume_valid_w;
 
 // Akiko chip-RAM master wires (M5). akiko's DMA engines emit single-byte
 // requests; chipdma_arb (instantiated below sdram_ctrl) muxes them onto
@@ -1088,54 +989,15 @@ wire cdtv_mode;
 // fastchip_selack.
 wire [15:0] cdtv_din_w;
 wire        cdtv_selack_w;
-wire  [5:0] cdtv_ac_rom_addr_w;
-wire  [7:0] cdtv_ac_rom_byte_w;
+wire  [7:0] cdtv_base_w;
 
-// UIO / HPS-side ports.
-// cmd_in_pending / cmd_in_byte come up from cdtv_bridge → cpu_wrapper.
-// The cdtv_hps_bridge (instantiated below) drives the *_to_bridge_w
-// signals that feed back down through cpu_wrapper into cdtv_bridge.
-wire        cdtv_cmd_in_pending_w;
-wire  [7:0] cdtv_cmd_in_byte_w;
-wire        cdtv_cmd_in_pop_w;
-wire        cdtv_cmd_out_push_w;
-wire  [7:0] cdtv_cmd_out_data_w;
-wire  [9:0] cdtv_cdda_volume_w;
-wire        cdtv_nvr_dirty_w;
-wire  [7:0] cdtv_nvr_save_dout_w;
-
-// CDTV chip-RAM master DMA wires. cdtv_bridge → chipdma_arb.
+// CDTV chip-RAM master DMA wires. cdtv_bridge -> chipdma_arb. 32 bits wide:
+// a truncated address aliased Z3 fast RAM onto the vector table.
 wire        cdtv_dma_req_w;
 wire        cdtv_dma_we_w;
-wire [23:0] cdtv_dma_baddr_w;
+wire [31:0] cdtv_dma_baddr_w;
 wire  [7:0] cdtv_dma_wbyte_w;
 wire        cdtv_dma_ack_w;
-
-// CDTV HPS bridge — UIO byte-stream adapter for cdtv_bridge cmd channel.
-cdtv_hps_bridge cdtv_hps_bridge_inst
-(
-	.clk            (clk_sys                ),
-	.reset          (reset                  ),
-	.uio_cs         (cdtv_cs                ),
-	.uio_cs_sec     (cdtv_cs_sec            ),
-	.uio_cs_stch    (cdtv_cs_stch           ),
-	.uio_wr         (cdtv_wr                ),
-	.uio_rd         (cdtv_rd                ),
-	.uio_din        (cdtv_dout[7:0]         ),
-	.uio_dout       (cdtv_din               ),
-	.cmd_in_pending (cdtv_cmd_in_pending_w  ),
-	.cmd_in_byte    (cdtv_cmd_in_byte_w     ),
-	.cmd_in_pop     (cdtv_cmd_in_pop_w      ),
-	.cmd_out_push   (cdtv_cmd_out_push_w    ),
-	.cmd_out_data   (cdtv_cmd_out_data_w    ),
-	.sec_byte_push  (cdtv_sec_byte_push_w   ),
-	.sec_byte_data  (cdtv_sec_byte_data_w   ),
-	.sec_space      (cdtv_sec_space_w       ),
-	.stch_inject    (cdtv_stch_inject       ),
-	.stch_ack       (cdtv_stch_ack          ),
-	.stch_ack_clr   (cdtv_stch_ack_clr      ),
-	.req            (cdtv_req               )
-);
 
 cpu_wrapper cpu_wrapper
 (
@@ -1223,8 +1085,7 @@ cpu_wrapper cpu_wrapper
 	// same cycle cdtv_selack fires, same shape as the fastchip path above.
 	.cdtv_din           (cdtv_din_w           ),
 	.cdtv_selack        (cdtv_selack_w        ),
-	.cdtv_ac_rom_addr   (cdtv_ac_rom_addr_w   ),
-	.cdtv_ac_rom_byte   (cdtv_ac_rom_byte_w   ),
+	.cdtv_base          (cdtv_base_w          ),
 
 	.ramsel       (ram_sel         ),
 	.ramaddr      (ram_addr        ),
@@ -1595,17 +1456,6 @@ fastchip fastchip
 	.akiko_uio_rx_busy   (akiko_rx_busy   ),
 	.akiko_uio_nvr_dirty (akiko_nvr_dirty ),
 
-	// NVRAM load-from-disk (canonical hps_io.ioctl_download path).
-	.nvr_load_addr (nvr_load_addr),
-	.nvr_load_din  (nvr_load_din ),
-	.nvr_load_we   (nvr_load_we  ),
-
-	// M5+ fast sector DMA (canonical UIO_SECTOR_RD pipeline, slot 1).
-	.hps_sec_dma_active (akiko_sec_dma_active),
-	.hps_sec_dma_byte   (akiko_sec_dma_byte  ),
-	.hps_sec_dma_addr   (akiko_sec_dma_addr  ),
-	.hps_sec_dma_we     (akiko_sec_dma_we    ),
-
 	// Akiko save state. See the wires next to the CIA pair above.
 	.akiko_ss_state     (ss_akiko_raw        ),
 	.akiko_ss_ld        (ss_restored_akiko_we),
@@ -1761,6 +1611,7 @@ minimig minimig
 	//toccata soundcard
 	.toccata_ena  (toccata_ena),
 	.toccata_base (toccata_base),
+	.cdtv_base    (cdtv_base),
 	.a2065_ena  (a2065_ena),
 	.a2065_base (a2065_base),
 	.toccata_aud_left (toccata_aud_left),
@@ -1771,27 +1622,22 @@ minimig minimig
 	// CDTV bridge — short-circuit data path back up to cpu_wrapper.
 	.cdtv_din            (cdtv_din_w           ),
 	.cdtv_selack         (cdtv_selack_w        ),
-	.cdtv_ac_rom_addr    (cdtv_ac_rom_addr_w   ),
-	.cdtv_ac_rom_byte    (cdtv_ac_rom_byte_w   ),
+	.cdtv_base           (cdtv_base_w          ),
 
-	// CDTV bridge — UIO / HPS-side ports. cmd byte-stream wired via
-	// cdtv_hps_bridge_inst above (M2 phase-1a). Sector-push channel added
-	// in phase-1b alongside the chip-RAM master DMA path. Subq/status
-	// optional channels still tied off — those come in later phases.
-	.cdtv_cmd_in_pop     (cdtv_cmd_in_pop_w    ),
-	.cdtv_cmd_in_pending (cdtv_cmd_in_pending_w),
-	.cdtv_cmd_in_byte    (cdtv_cmd_in_byte_w   ),
-	.cdtv_cmd_out_push   (cdtv_cmd_out_push_w  ),
-	.cdtv_cmd_out_data   (cdtv_cmd_out_data_w  ),
-	.cdtv_sec_byte_push  (cdtv_sec_byte_push_w ),
-	.cdtv_sec_byte_data  (cdtv_sec_byte_data_w ),
-	.cdtv_sec_space      (cdtv_sec_space_w     ),
+	// CDTV bridge — ext bus straight from hps_ext, no host-side adapter.
+	.cdtv_cs             (cdtv_cs              ),
+	.cdtv_cs_sec         (cdtv_cs_sec          ),
+	.cdtv_cs_stch        (cdtv_cs_stch         ),
+	.cdtv_cs_nvr         (cdtv_cs_nvr          ),
+	.cdtv_cs_card        (cdtv_cs_card         ),
+	.cdtv_wr             (cdtv_wr              ),
+	.cdtv_rd             (cdtv_rd              ),
+	.cdtv_uio_din        (cdtv_dout            ),
+	.cdtv_uio_dout       (cdtv_din             ),
+	.cdtv_req            (cdtv_req             ),
 	.cdtv_sec_fifo_empty (cdtv_sec_empty_w     ),
 	.cdtv_subq_push      (1'b0                 ),
 	.cdtv_subq_byte      (8'h00                ),
-	.cdtv_stch_pulse     (cdtv_stch_inject     ),
-	.cdtv_stch_ack       (cdtv_stch_ack        ),
-	.cdtv_stch_ack_clr   (cdtv_stch_ack_clr    ),
 	.cdtv_sten_pulse     (1'b0                 ),
 	.cdtv_scor_pulse     (1'b0                 ),
 	.cdtv_sbcp_pulse     (1'b0                 ),
@@ -1803,15 +1649,11 @@ minimig minimig
 	.cdtv_dma_wbyte      (cdtv_dma_wbyte_w     ),
 	.cdtv_dma_ack        (cdtv_dma_ack_w       ),
 
-	.cdtv_nvr_load_addr  (14'h0                ),
-	.cdtv_nvr_load_din   (8'h0                 ),
-	.cdtv_nvr_load_we    (1'b0                 ),
-	.cdtv_nvr_save_addr  (14'h0                ),
-	.cdtv_nvr_save_dout  (cdtv_nvr_save_dout_w ),
-	.cdtv_nvr_dirty      (cdtv_nvr_dirty_w     ),
-	.cdtv_nvr_clear_dirty(1'b0                 ),
+	.cdtv_nvr_dirty      (cdtv_nvr_dirty       ),
+	.cdtv_card_dirty     (cdtv_card_dirty      ),
 
 	.cdtv_cdda_volume    (cdtv_cdda_volume_w   ),
+	.cdtv_cdda_volume_valid(cdtv_cdda_volume_valid_w),
 
 	//user i/o
 	.cpucfg       (cpucfg           ), // CPU config
@@ -3035,12 +2877,24 @@ cdda #(28375160) cdda
 	.AUDIO_R(cdda_r)
 );
 
+wire [10:0] cdda_gain = (cdtv_mode && cdtv_cdda_volume_valid) ? {1'b0, cdtv_cdda_volume} : 11'd1023;
+
+reg signed [15:0] cdda_sl, cdda_sr;
+always @(posedge CLK_AUDIO) begin
+	reg signed [26:0] pl, pr;
+
+	pl = $signed(cdda_l) * $signed(cdda_gain);
+	pr = $signed(cdda_r) * $signed(cdda_gain);
+	cdda_sl <= pl[25:10];
+	cdda_sr <= pr[25:10];
+end
+
 reg [15:0] out_l, out_r;
 always @(posedge CLK_AUDIO) begin
 	reg [16:0] tmp_l, tmp_r;
 
-	tmp_l <= {aud_l[15],aud_l} + {toccata_aud_left[15],toccata_aud_left} + (mt32_mute ? 17'd0 : {mt32_i2s_l[15],mt32_i2s_l}) + {cdda_l[15], cdda_l};
-	tmp_r <= {aud_r[15],aud_r} + {toccata_aud_right[15],toccata_aud_right} + (mt32_mute ? 17'd0 : {mt32_i2s_r[15],mt32_i2s_r}) + {cdda_r[15], cdda_r};
+	tmp_l <= {aud_l[15],aud_l} + {toccata_aud_left[15],toccata_aud_left} + (mt32_mute ? 17'd0 : {mt32_i2s_l[15],mt32_i2s_l}) + {cdda_sl[15], cdda_sl};
+	tmp_r <= {aud_r[15],aud_r} + {toccata_aud_right[15],toccata_aud_right} + (mt32_mute ? 17'd0 : {mt32_i2s_r[15],mt32_i2s_r}) + {cdda_sr[15], cdda_sr};
 
 	// clamp the output
 	out_l <= (^tmp_l[16:15]) ? {tmp_l[16], {15{tmp_l[15]}}} : tmp_l[15:0];

@@ -80,6 +80,7 @@ module gary
 	input   [7:0] a2065_base,
 	input         toccata_ena,
 	input   [7:0] toccata_base,
+	input   [7:0] cdtv_base,
 
 	// CDTV mode (chipset_config[5]). When 1, $F00000-$F7FFFF is treated as
 	// the CDTV extended-ROM window. Real CDTV maps its BIOS ROM there; on
@@ -115,6 +116,9 @@ module gary
 	// cpu_data_in in rtl/minimig.v alongside toccata_out / rtc_out / etc.
 	output       sel_cdtv,
 	output       sel_cdtv_nvram,
+	// $E00000-$E7FFFF memory card window, CDTV only. It overlaps the
+	// 1MB-kickstart read window, so sel_kick1mb has to stand down for it.
+	output       sel_cdtv_card,
 
 	output reg   rom_readonly = 0, //when zero allows to write to $fc-$ff, blocks effect of kick256kmirror.
 
@@ -155,6 +159,9 @@ assign ram_lwr = dbr ?  dbwe : cpu_lwr;
 wire kick_mirror_a8 = cpu_address_in[23:19] == 5'b1010_1;
 wire kick_mirror_b0 = cpu_address_in[23:19] == 5'b1011_0;
 wire kick_mirror_f0 = cdtv_mode && cpu_address_in[23:19] == 5'b1111_0;
+// Memory card at $E00000. cpu_hlt (bootrom overlay) still wins, so a CDTV
+// boots its ROM out of the same window before the card is reachable.
+wire cdtv_card_win  = cdtv_mode && cpu_address_in[23:19] == 5'b1110_0 && !cpu_hlt;
 wire [4:0] cpu_addr_hi_remap = kick_mirror_a8 ? 5'b1111_1 :
                                kick_mirror_b0 ? 5'b1110_0 :
                                kick_mirror_f0 ? 5'b1110_0 :
@@ -201,7 +208,7 @@ begin
 		sel_slow[1] = t_sel_slow[1];
 		sel_slow[2] = t_sel_slow[2];
 		sel_kick    = (cpu_address_in[23:19]==5'b1111_1 && (cpu_rd || cpu_hlt || (!rom_readonly && cpu_address_in[18])))  || (cpu_rd && ovl && cpu_address_in[23:19]==5'b0000_0) || (cpu_rd && kick_mirror_a8); //$F80000-$FFFFFF + $A80000-$AFFFFF mirror (CD32)
-		sel_kick1mb = (cpu_address_in[23:19]==5'b1110_0 && (cpu_rd || cpu_hlt)) || (cpu_rd && kick_mirror_b0) || (cpu_rd && kick_mirror_f0); // $E00000-$E7FFFF + $B00000-$B7FFFF mirror (CD32) + $F00000-$F7FFFF CDTV BIOS mirror
+		sel_kick1mb = (cpu_address_in[23:19]==5'b1110_0 && ((cpu_rd && !cdtv_card_win) || cpu_hlt)) || (cpu_rd && kick_mirror_b0) || (cpu_rd && kick_mirror_f0); // $E00000-$E7FFFF + $B00000-$B7FFFF mirror (CD32) + $F00000-$F7FFFF CDTV BIOS mirror
 		sel_kick256kmirror = cpu_address_in[23:19]==5'b1111_1 &&  cpu_rd && rom_readonly && !cpu_hlt && bootrom;
 	end
 end
@@ -229,8 +236,9 @@ assign sel_a2065   = a2065_ena && cpu_address_in[23:16]==a2065_base;
 //   $DC8000-$DCFFFF = battery RAM (inside the $DC0000 clock_bank window).
 // The CDTV mode also suppresses sel_toccata (cpu_wrapper forces
 // toccata_ena=0 when cdtv_mode), so there's no overlap at $E9xxxx.
-assign sel_cdtv       = cdtv_mode && cpu_address_in[23:16]==8'hE9;
+assign sel_cdtv       = cdtv_mode && cpu_address_in[23:16]==cdtv_base;
 assign sel_cdtv_nvram = cdtv_mode && cpu_address_in[23:15]==9'b1101_1100_1;
+assign sel_cdtv_card  = cdtv_card_win;
 
 //data bus slow down
 assign dbs = cpu_address_in[23:21]==3'b000 || cpu_address_in[23:20]==4'b1100 || cpu_address_in[23:19]==5'b1101_0 || cpu_address_in[23:16]==8'b1101_1111;

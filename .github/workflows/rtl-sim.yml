@@ -93,16 +93,27 @@ jobs:
 
       # Akiko's savestate ports: the idle rule that lets the state vector leave
       # the staging buffers out, the capture-side bit offsets, and a full
-      # capture/reset/restore round trip. Needs the altsyncram stub under
-      # rtl/sim/akiko/, because akiko_nvram.v instantiates the Altera primitive
-      # directly and Icarus has no model for it -- which is why the rest of the
-      # akiko benches are still ModelSim-only.
+      # capture/reset/restore round trip. Needs the dpram model under
+      # rtl/sim/cache/, because akiko_nvram.v instantiates bram.vhd's dpram and
+      # Icarus has no VHDL -- which is why the rest of the akiko benches are
+      # still ModelSim-only.
       - name: Akiko save state
         run: |
           set -euo pipefail
-          iverilog -g2012 -I. -o tb_akiko_ss             rtl/akiko.v rtl/akiko_nvram.v             rtl/sim/akiko/altsyncram_sim.v rtl/sim/akiko/tb_akiko_savestate.sv
+          iverilog -g2012 -I. -o tb_akiko_ss             rtl/akiko.v rtl/akiko_nvram.v             rtl/sim/cache/dpram_sim.v rtl/sim/akiko/tb_akiko_savestate.sv
           vvp tb_akiko_ss | tee out_akiko_ss.log
           grep -q "RUN: PASS" out_akiko_ss.log
+
+      # The Akiko sector channel itself: 1176 words in, 2352 bytes out, at
+      # three different strobe spacings. This is upstream's bench for the
+      # word-wide ingest, run here against our akiko.v with the savestate
+      # ports on it.
+      - name: Akiko sector ingest
+        run: |
+          set -euo pipefail
+          iverilog -g2012 -I. -o tb_sec_ingest             rtl/akiko.v rtl/akiko_nvram.v rtl/akiko_hps_bridge.v             rtl/sim/cache/dpram_sim.v rtl/sim/akiko/tb_akiko_sec_ingest.sv
+          vvp tb_sec_ingest | tee out_sec_ingest.log
+          grep -q "tb_akiko_sec_ingest PASS" out_sec_ingest.log
 
       # Where each memory region lands in SDRAM. The savestate names chip RAM,
       # slow RAM and the Kickstart by the address sdram_ctrl's CPU port expects,
