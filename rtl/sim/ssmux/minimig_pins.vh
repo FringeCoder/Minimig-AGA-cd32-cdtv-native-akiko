@@ -93,38 +93,32 @@ wire [7:0]   a2065_base;
 wire         cdtv_mode;
 wire [15:0]  cdtv_din;
 wire         cdtv_selack;
-wire [5:0]   cdtv_ac_rom_addr;
-wire [7:0]   cdtv_ac_rom_byte;
-wire         cdtv_cmd_in_pop;
-wire         cdtv_cmd_in_pending;
-wire [7:0]   cdtv_cmd_in_byte;
-wire         cdtv_cmd_out_push;
-wire [7:0]   cdtv_cmd_out_data;
-wire         cdtv_sec_byte_push;
-wire [7:0]   cdtv_sec_byte_data;
-wire [7:0]   cdtv_sec_space;
+wire [7:0]   cdtv_base;
+wire         cdtv_cs;
+wire         cdtv_cs_sec;
+wire         cdtv_cs_stch;
+wire         cdtv_cs_nvr;
+wire         cdtv_cs_card;
+wire         cdtv_wr;
+wire         cdtv_rd;
+wire [15:0]  cdtv_uio_din;
+wire [15:0]  cdtv_uio_dout;
+wire         cdtv_req;
 wire         cdtv_sec_fifo_empty;
 wire         cdtv_subq_push;
 wire [7:0]   cdtv_subq_byte;
-wire         cdtv_stch_pulse;
-wire         cdtv_stch_ack;
-wire         cdtv_stch_ack_clr;
 wire         cdtv_sten_pulse;
 wire         cdtv_scor_pulse;
 wire         cdtv_sbcp_pulse;
 wire         cdtv_dma_req;
 wire         cdtv_dma_we;
-wire [23:0]  cdtv_dma_baddr;
+wire [31:0]  cdtv_dma_baddr;
 wire [7:0]   cdtv_dma_wbyte;
 wire         cdtv_dma_ack;
-wire [13:0]  cdtv_nvr_load_addr;
-wire [7:0]   cdtv_nvr_load_din;
-wire         cdtv_nvr_load_we;
-wire [13:0]  cdtv_nvr_save_addr;
-wire [7:0]   cdtv_nvr_save_dout;
 wire         cdtv_nvr_dirty;
-wire         cdtv_nvr_clear_dirty;
+wire         cdtv_card_dirty;
 wire [9:0]   cdtv_cdda_volume;
+wire         cdtv_cdda_volume_valid;
 wire [1:0]   cpucfg;
 wire [3:0]   cachecfg;
 wire [6:0]   memcfg;
@@ -224,25 +218,21 @@ reg          drv_toccata_ena;
 reg  [7:0]   drv_toccata_base;
 reg          drv_a2065_ena;
 reg  [7:0]   drv_a2065_base;
-reg  [7:0]   drv_cdtv_ac_rom_byte;
-reg          drv_cdtv_cmd_in_pop;
-reg          drv_cdtv_cmd_out_push;
-reg  [7:0]   drv_cdtv_cmd_out_data;
-reg          drv_cdtv_sec_byte_push;
-reg  [7:0]   drv_cdtv_sec_byte_data;
+reg  [7:0]   drv_cdtv_base;
+reg          drv_cdtv_cs;
+reg          drv_cdtv_cs_sec;
+reg          drv_cdtv_cs_stch;
+reg          drv_cdtv_cs_nvr;
+reg          drv_cdtv_cs_card;
+reg          drv_cdtv_wr;
+reg          drv_cdtv_rd;
+reg  [15:0]  drv_cdtv_uio_din;
 reg          drv_cdtv_subq_push;
 reg  [7:0]   drv_cdtv_subq_byte;
-reg          drv_cdtv_stch_pulse;
-reg          drv_cdtv_stch_ack_clr;
 reg          drv_cdtv_sten_pulse;
 reg          drv_cdtv_scor_pulse;
 reg          drv_cdtv_sbcp_pulse;
 reg          drv_cdtv_dma_ack;
-reg  [13:0]  drv_cdtv_nvr_load_addr;
-reg  [7:0]   drv_cdtv_nvr_load_din;
-reg          drv_cdtv_nvr_load_we;
-reg  [13:0]  drv_cdtv_nvr_save_addr;
-reg          drv_cdtv_nvr_clear_dirty;
 reg          drv_ide_ext_irq;
 reg          drv_akiko_irq;
 reg  [4:0]   drv_ide_address;
@@ -300,25 +290,21 @@ assign toccata_ena = drv_toccata_ena;
 assign toccata_base = drv_toccata_base;
 assign a2065_ena = drv_a2065_ena;
 assign a2065_base = drv_a2065_base;
-assign cdtv_ac_rom_byte = drv_cdtv_ac_rom_byte;
-assign cdtv_cmd_in_pop = drv_cdtv_cmd_in_pop;
-assign cdtv_cmd_out_push = drv_cdtv_cmd_out_push;
-assign cdtv_cmd_out_data = drv_cdtv_cmd_out_data;
-assign cdtv_sec_byte_push = drv_cdtv_sec_byte_push;
-assign cdtv_sec_byte_data = drv_cdtv_sec_byte_data;
+assign cdtv_base = drv_cdtv_base;
+assign cdtv_cs = drv_cdtv_cs;
+assign cdtv_cs_sec = drv_cdtv_cs_sec;
+assign cdtv_cs_stch = drv_cdtv_cs_stch;
+assign cdtv_cs_nvr = drv_cdtv_cs_nvr;
+assign cdtv_cs_card = drv_cdtv_cs_card;
+assign cdtv_wr = drv_cdtv_wr;
+assign cdtv_rd = drv_cdtv_rd;
+assign cdtv_uio_din = drv_cdtv_uio_din;
 assign cdtv_subq_push = drv_cdtv_subq_push;
 assign cdtv_subq_byte = drv_cdtv_subq_byte;
-assign cdtv_stch_pulse = drv_cdtv_stch_pulse;
-assign cdtv_stch_ack_clr = drv_cdtv_stch_ack_clr;
 assign cdtv_sten_pulse = drv_cdtv_sten_pulse;
 assign cdtv_scor_pulse = drv_cdtv_scor_pulse;
 assign cdtv_sbcp_pulse = drv_cdtv_sbcp_pulse;
 assign cdtv_dma_ack = drv_cdtv_dma_ack;
-assign cdtv_nvr_load_addr = drv_cdtv_nvr_load_addr;
-assign cdtv_nvr_load_din = drv_cdtv_nvr_load_din;
-assign cdtv_nvr_load_we = drv_cdtv_nvr_load_we;
-assign cdtv_nvr_save_addr = drv_cdtv_nvr_save_addr;
-assign cdtv_nvr_clear_dirty = drv_cdtv_nvr_clear_dirty;
 assign ide_ext_irq = drv_ide_ext_irq;
 assign akiko_irq = drv_akiko_irq;
 assign ide_address = drv_ide_address;
@@ -379,25 +365,21 @@ begin
 	drv_toccata_base = 0;
 	drv_a2065_ena = 0;
 	drv_a2065_base = 0;
-	drv_cdtv_ac_rom_byte = 0;
-	drv_cdtv_cmd_in_pop = 0;
-	drv_cdtv_cmd_out_push = 0;
-	drv_cdtv_cmd_out_data = 0;
-	drv_cdtv_sec_byte_push = 0;
-	drv_cdtv_sec_byte_data = 0;
+	drv_cdtv_base = 0;
+	drv_cdtv_cs = 0;
+	drv_cdtv_cs_sec = 0;
+	drv_cdtv_cs_stch = 0;
+	drv_cdtv_cs_nvr = 0;
+	drv_cdtv_cs_card = 0;
+	drv_cdtv_wr = 0;
+	drv_cdtv_rd = 0;
+	drv_cdtv_uio_din = 0;
 	drv_cdtv_subq_push = 0;
 	drv_cdtv_subq_byte = 0;
-	drv_cdtv_stch_pulse = 0;
-	drv_cdtv_stch_ack_clr = 0;
 	drv_cdtv_sten_pulse = 0;
 	drv_cdtv_scor_pulse = 0;
 	drv_cdtv_sbcp_pulse = 0;
 	drv_cdtv_dma_ack = 0;
-	drv_cdtv_nvr_load_addr = 0;
-	drv_cdtv_nvr_load_din = 0;
-	drv_cdtv_nvr_load_we = 0;
-	drv_cdtv_nvr_save_addr = 0;
-	drv_cdtv_nvr_clear_dirty = 0;
 	drv_ide_ext_irq = 0;
 	drv_akiko_irq = 0;
 	drv_ide_address = 0;
@@ -511,22 +493,20 @@ minimig dut (
 	.cdtv_mode(cdtv_mode),
 	.cdtv_din(cdtv_din),
 	.cdtv_selack(cdtv_selack),
-	.cdtv_ac_rom_addr(cdtv_ac_rom_addr),
-	.cdtv_ac_rom_byte(cdtv_ac_rom_byte),
-	.cdtv_cmd_in_pop(cdtv_cmd_in_pop),
-	.cdtv_cmd_in_pending(cdtv_cmd_in_pending),
-	.cdtv_cmd_in_byte(cdtv_cmd_in_byte),
-	.cdtv_cmd_out_push(cdtv_cmd_out_push),
-	.cdtv_cmd_out_data(cdtv_cmd_out_data),
-	.cdtv_sec_byte_push(cdtv_sec_byte_push),
-	.cdtv_sec_byte_data(cdtv_sec_byte_data),
-	.cdtv_sec_space(cdtv_sec_space),
+	.cdtv_base(cdtv_base),
+	.cdtv_cs(cdtv_cs),
+	.cdtv_cs_sec(cdtv_cs_sec),
+	.cdtv_cs_stch(cdtv_cs_stch),
+	.cdtv_cs_nvr(cdtv_cs_nvr),
+	.cdtv_cs_card(cdtv_cs_card),
+	.cdtv_wr(cdtv_wr),
+	.cdtv_rd(cdtv_rd),
+	.cdtv_uio_din(cdtv_uio_din),
+	.cdtv_uio_dout(cdtv_uio_dout),
+	.cdtv_req(cdtv_req),
 	.cdtv_sec_fifo_empty(cdtv_sec_fifo_empty),
 	.cdtv_subq_push(cdtv_subq_push),
 	.cdtv_subq_byte(cdtv_subq_byte),
-	.cdtv_stch_pulse(cdtv_stch_pulse),
-	.cdtv_stch_ack(cdtv_stch_ack),
-	.cdtv_stch_ack_clr(cdtv_stch_ack_clr),
 	.cdtv_sten_pulse(cdtv_sten_pulse),
 	.cdtv_scor_pulse(cdtv_scor_pulse),
 	.cdtv_sbcp_pulse(cdtv_sbcp_pulse),
@@ -535,14 +515,10 @@ minimig dut (
 	.cdtv_dma_baddr(cdtv_dma_baddr),
 	.cdtv_dma_wbyte(cdtv_dma_wbyte),
 	.cdtv_dma_ack(cdtv_dma_ack),
-	.cdtv_nvr_load_addr(cdtv_nvr_load_addr),
-	.cdtv_nvr_load_din(cdtv_nvr_load_din),
-	.cdtv_nvr_load_we(cdtv_nvr_load_we),
-	.cdtv_nvr_save_addr(cdtv_nvr_save_addr),
-	.cdtv_nvr_save_dout(cdtv_nvr_save_dout),
 	.cdtv_nvr_dirty(cdtv_nvr_dirty),
-	.cdtv_nvr_clear_dirty(cdtv_nvr_clear_dirty),
+	.cdtv_card_dirty(cdtv_card_dirty),
 	.cdtv_cdda_volume(cdtv_cdda_volume),
+	.cdtv_cdda_volume_valid(cdtv_cdda_volume_valid),
 	.cpucfg(cpucfg),
 	.cachecfg(cachecfg),
 	.memcfg(memcfg),

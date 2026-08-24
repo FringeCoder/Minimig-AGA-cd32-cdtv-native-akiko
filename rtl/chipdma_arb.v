@@ -38,7 +38,7 @@
 //
 // Priority: combinational gating gives minimig priority on every cycle.
 // We never override chip_in_dma when minimig has it asserted -- our
-// arb_drive is masked by ~minimig_busy. This prevents a stale view of
+// arb_drive is masked by minimig_idle. This prevents a stale view of
 // chip_in_dma from corrupting a slot minimig is about to use (the v8
 // hardware regression that caused screen flicker).
 //
@@ -267,7 +267,6 @@ assign cdtv_dma_ack    = cdtv_ack_r;
 //     scheduler). At sdram_ctrl's sample point this value reflects
 //     the current slot.
 wire minimig_idle = chip_in_dma & chip_in_rw;
-wire minimig_busy = ~minimig_idle;
 
 // --- pending_req: either master wants the bus. Selector picks akiko if
 //     both raise simultaneously (static priority).
@@ -305,7 +304,7 @@ wire arb_request = arm_now | (state == S_DRIVE);
 //     freeze the serving engine (arm_now picks akiko when ~arming_is_cdtv).
 assign akiko_arm = arm_now & ~arming_is_cdtv;
 
-// --- arb_drive: the actual override. Masked by minimig_busy on EVERY
+// --- arb_drive: the actual override. Masked by minimig_idle on EVERY
 //     cycle so a slot minimig grabs (e.g. across a c_7m boundary into
 //     the next slot) wins immediately. arb_request is registered for
 //     subsequent cycles, so we keep driving as long as minimig stays
