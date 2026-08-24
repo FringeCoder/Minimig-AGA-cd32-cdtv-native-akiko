@@ -1611,7 +1611,6 @@ minimig minimig
 	//toccata soundcard
 	.toccata_ena  (toccata_ena),
 	.toccata_base (toccata_base),
-	.cdtv_base    (cdtv_base),
 	.a2065_ena  (a2065_ena),
 	.a2065_base (a2065_base),
 	.toccata_aud_left (toccata_aud_left),
@@ -2877,7 +2876,7 @@ cdda #(28375160) cdda
 	.AUDIO_R(cdda_r)
 );
 
-wire [10:0] cdda_gain = (cdtv_mode && cdtv_cdda_volume_valid) ? {1'b0, cdtv_cdda_volume} : 11'd1023;
+wire [10:0] cdda_gain = (cdtv_mode && cdtv_cdda_volume_valid_w) ? {1'b0, cdtv_cdda_volume_w} : 11'd1023;
 
 reg signed [15:0] cdda_sl, cdda_sr;
 always @(posedge CLK_AUDIO) begin
