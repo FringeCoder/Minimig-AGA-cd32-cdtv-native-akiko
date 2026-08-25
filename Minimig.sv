@@ -18,9 +18,25 @@ assign HDMI_FREEZE = 0;
 assign HDMI_BLACKOUT = 0;
 assign HDMI_BOB_DEINT = 0;
 
+// MT32-pi, MiSTer Floppy and PSX SNAC share the SNAC user port, so USER_OUT
+// is muxed between them. Declared as wires (Rob uses reg); all are driven
+// by module outputs, and a wire says that unambiguously.
+wire  [1:0] user_port_mode;              // 0 = MT32-pi, 1 = MiSTer Floppy, 2 = PSX SNAC
+wire  [5:0] snac_mode;                   // {port2[2:0], port1[2:0]}
+wire  [2:0] mister_floppy_status;        // {cable, drive type, detected}
+wire  [6:0] IndirectUserOutmt32;
+wire  [6:0] IndirectUserOutFlop;
+wire  [6:0] IndirectUserOutSnac;
+
+// One tenant at a time -- they collide on every user-port pin.
+assign USER_OUT = (user_port_mode == 2'd2) ? IndirectUserOutSnac :
+                  (user_port_mode == 2'd1) ? IndirectUserOutFlop :
+                                             IndirectUserOutmt32;
+
 `include "build_id.v" 
+`include "rtl/ss_state.vh"
 localparam CONF_STR = {
-	"AmigaCD;UART115200:230400,MIDI;",
+	"AmigaCD;UART115200:230400,MIDI,SS3C000000:C00000;",
 	"J,Red(Fire),Blue,Yellow,Green,RT,LT,Pause;",
 	"jn,A,B,X,Y,R,L,Start;",
 	"jp,B,A,X,Y,R,L,Start;",
@@ -37,7 +53,24 @@ localparam CONF_STR = {
 	"MT32-pi: MT-32 v1,",
 	"MT32-pi: MT-32 v2,",
 	"MT32-pi: CM-32L,",
-	"MT32-pi: Unknown mode;",
+	"MT32-pi: Unknown mode,",
+	// Save state outcomes. These are indices 13..22 of this list, which is what
+	// SS_INFO_BASE names; user_io.cpp's show_core_info() counts substrings from
+	// 1, so inserting anything above here shifts them and must shift
+	// SS_INFO_BASE with it. Order after "restored" is ss_ctrl's load_fail_code
+	// 1..6, in order, then the unknown-code fallback.
+	"Save state: saved,",
+	"Save state: FAILED,",
+	"State restored,",
+	"Restore: not a save state,",
+	"Restore: wrong version,",
+	"Restore: not for this core,",
+	"Restore: corrupt file,",
+	"Restore: wrong Kickstart,",
+	// No comma inside a message: substrcpy() (user_io.cpp:512) splits this line
+	// on commas, so one here would truncate the toast at "Restore: busy".
+	"Restore: busy - try again,",
+	"Restore: FAILED;",
 	"V,v",`BUILD_DATE
 };
 
@@ -47,6 +80,50 @@ wire [15:0] JOY2;
 wire [15:0] JOY3;
 wire [15:0] JOYA0;
 wire [15:0] JOYA1;
+
+wire [15:0] snac_pad0, snac_pad1;
+wire [31:0] snac_axes0, snac_axes1;
+wire  [7:0] snac_id0, snac_id1;
+wire [10:0] snac_joy0, snac_joy1;
+wire  [6:0] snac_user_out_raw;
+
+// Packed for hps_io's 'hFE read case, so the OSD/menu-side reader (and the
+// userspace analog-stick mouse) can see the raw pad. 112 bits = 32+16+32+16+8+8.
+// Matches core-menu's concatenation and the byte_cnt/word order userspace
+// reads in snac_psx_poll(): status, pad[0], axes0_lo, axes0_hi, pad[1],
+// axes1_lo, axes1_hi.
+wire [111:0] snac_state = { snac_axes1, snac_pad1, snac_axes0, snac_pad0,
+                            snac_id1, snac_id0 };
+
+snac_psx #(.CLK_KHZ(28688), .BAUD_KHZ(250)) snac
+(
+	.clk(clk_sys),
+	.reset(reset),
+	.enable(user_port_mode == 2'd2),
+	.user_in(USER_IN),
+	.user_out(snac_user_out_raw),
+	.pad0(snac_pad0), .pad1(snac_pad1),
+	.axes0(snac_axes0), .axes1(snac_axes1),
+	.id0(snac_id0), .id1(snac_id1)
+);
+
+snac_cd32 snac_map0 (.psx(snac_pad0), .joy(snac_joy0));
+snac_cd32 snac_map1 (.psx(snac_pad1), .joy(snac_joy1));
+
+// A GunCon derives its timing from the displayed raster, so it needs composite
+// sync fed back. hs/vs are active low, so a wired-AND is the classic composite.
+// Only driven when a port is actually in light-gun mode; otherwise the reader's
+// own idle level goes out.
+wire snac_lightgun = (snac_mode[2:0] == 3'd4) || (snac_mode[5:3] == 3'd4);
+assign IndirectUserOutSnac = { snac_lightgun ? (hs & vs) : snac_user_out_raw[6],
+                               snac_user_out_raw[5:0] };
+
+// OR rather than replace: a USB pad and a SNAC pad can both be connected, and
+// locking one out would be a surprise. Bits are active high here; they are
+// inverted at the minimig instantiation below.
+wire [15:0] JOY0_MUX = JOY0 | {5'd0, snac_joy0};
+wire [15:0] JOY1_MUX = JOY1 | {5'd0, snac_joy1};
+
 wire  [7:0] kbd_mouse_data;
 wire        kbd_mouse_level;
 wire  [1:0] kbd_mouse_type;
@@ -69,26 +146,22 @@ wire [21:0] gamma_bus;
 
 wire  [7:0] uart_mode;
 
-// VDNUM=2: slot 0 = NVRAM .nvr file (load via canonical SD-block path).
-//          slot 1 = akiko sector DMA target. Userspace sends UIO_SECTOR_RD |
-//                   (1<<8) followed by 2352 raw bytes; hps_io drives sd_ack[1]
-//                   high for the transfer and pulses sd_buff_wr per byte with
-//                   sd_buff_addr auto-incrementing 0..2351. akiko.v captures
-//                   into sector_buffer at full SPI rate (replaces the slow
-//                   per-byte SSPI_ACK path on UIO_DMA_WRITE).
-// BLKSZ=3: 1024 bytes per LBA. NVR fits in 1 block; akiko sector path
-//          ignores LBA (userspace addresses bytes via sd_buff_addr directly,
-//          but the protocol still requires BLKSZ — 1024 is fine because the
-//          sector path doesn't gate on LBA boundaries).
-hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0), .VDNUM(2), .BLKSZ(3)) hps_io
+hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS({HPS_BUS[45:42],ce_pix,HPS_BUS[40:0]}),
 
 	.status(status),
-	.status_menumask({mt32_cfg,mt32_available}),
-	.info_req(mt32_info_req),
-	.info(mt32_info_disp),
+	.status_menumask({mister_floppy_status,mt32_cfg,mt32_available}),
+	.snac_state(snac_state),
+	// Two producers, one channel. hps_io latches `info` on the rising edge of
+	// `info_req`, so the mux has to present the right code on the same cycle
+	// the request rises -- hence selecting on ss_info_req rather than latching
+	// a winner. A simultaneous MT32-pi mode change would lose its message;
+	// that costs a soundfont name once, against a save state outcome that has
+	// no other way to be seen at all.
+	.info_req(mt32_info_req | ss_info_req),
+	.info(ss_info_req ? ss_info_code : {4'd0, mt32_info_disp}),
 
 	.joystick_0(JOY0),
 	.joystick_1(JOY1),
@@ -98,20 +171,6 @@ hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0), .VDNUM(2), .BLKSZ(3)) hps_io
 	.joystick_l_analog_1(JOYA1),
 
 	.ioctl_wait(io_wait),
-
-	.img_mounted(img_mounted),
-	.img_readonly(img_readonly),
-	.img_size(img_size),
-
-	.sd_lba(sd_lba),
-	.sd_blk_cnt(sd_blk_cnt),
-	.sd_rd(sd_rd),
-	.sd_wr(sd_wr),
-	.sd_ack(sd_ack),
-	.sd_buff_addr(sd_buff_addr),
-	.sd_buff_dout(sd_buff_dout),
-	.sd_buff_din(sd_buff_din),
-	.sd_buff_wr(sd_buff_wr),
 
 	.buttons(buttons),
 	.forced_scandoubler(forced_scandoubler),
@@ -148,95 +207,23 @@ wire        akiko_sec_req; // FROM fastchip TO hps_ext (M4 sector status bit)
 wire        akiko_rx_busy; // FROM fastchip TO hps_ext (RX engine busy)
 wire        akiko_nvr_dirty; // FROM fastchip TO hps_ext (NVRAM dirty bit)
 
-// CDTV HPS bridge wires (M2 phase-1a). Bound to hps_ext's cdtv_* ports
-// via wildcard instantiation. cmd byte-stream sub-channel only —
-// sector / status pulses come later phases.
-wire [15:0] cdtv_din;          // FROM cdtv_hps_bridge TO hps_ext
-wire [15:0] cdtv_dout;         // FROM hps_ext TO cdtv_hps_bridge
+// CDTV ext-bus wires. cdtv_bridge inside minimig.v takes these straight
+// from hps_ext, so there is no separate host-side bridge module any more.
+wire [15:0] cdtv_din;          // FROM minimig TO hps_ext
+wire [15:0] cdtv_dout;         // FROM hps_ext TO minimig
 wire        cdtv_wr;
 wire        cdtv_rd;
 wire        cdtv_cs;
-wire        cdtv_cs_sec;       // phase-1b sector-push sub-channel
-wire        cdtv_cs_stch;      // phase-1e STCH-inject sub-channel
-wire        cdtv_stch_inject;  // 1-clk pulse from cdtv_hps_bridge -> minimig
-wire        cdtv_stch_ack;     // BIOS took the STCH interrupt
-wire        cdtv_stch_ack_clr;
-wire        cdtv_sec_byte_push_w; // 1-clk pulse per UIO sec byte
-wire  [7:0] cdtv_sec_byte_data_w;
+wire        cdtv_cs_sec;       // sector-push sub-channel
+wire        cdtv_cs_stch;      // STCH-inject sub-channel
+wire        cdtv_cs_nvr;       // battery-RAM sub-channel
+wire        cdtv_cs_card;      // memory-card sub-channel
+wire        cdtv_sec_empty_w;  // sector FIFO exactly empty
 wire        cdtv_req;          // bit 6 of 0x63 status word
-
-// NVRAM load-from-disk via canonical SD-block path (the pattern SNES,
-// Saturn, GBA, NeoGeo, CDi all use). Userspace calls user_io_file_mount
-// with the .nvr path; hps_io fires img_mounted[0], we kick off a single
-// 1024-byte read by raising sd_rd_nvr with sd_lba_nvr=0, hps_io streams
-// each byte on sd_buff_dout / sd_buff_addr / sd_buff_wr, and we forward
-// directly to akiko_nvram's load_we BRAM port. Sidesteps the gp_out CDC
-// race that broke the ioctl_download path on hardware (data freezes at
-// the first byte-value transition; bench-clean, hw-broken).
-//
-// VDNUM=1 (slot 0 = NVR), BLKSZ=3 (1024 B/block — whole NVR fits in one
-// LBA), WIDE=0 (byte-wide sd_buff_dout — direct match for our 8-bit
-// BRAM port, no unpack needed). The akiko_nvram BRAM write port lives
-// outside the CD32 CPU reset domain (akiko.v nvram_inst has .reset(1'b0)),
-// so the load works whether or not cpu_rst is asserted at mount time.
-wire        img_mounted;
-wire        img_readonly;
-wire [63:0] img_size;
-wire [31:0] sd_lba   [1:0];
-wire  [5:0] sd_blk_cnt[1:0];
-wire  [1:0] sd_ack;
-wire [13:0] sd_buff_addr;
-wire  [7:0] sd_buff_dout;
-wire  [7:0] sd_buff_din[1:0];
-wire        sd_buff_wr;
-
-reg         sd_rd_nvr;
-reg         sd_wr_nvr;        // unused for now (save still goes via UIO dump)
-reg         img_mounted_d;
-
-// Slot 0 = NVR. Slot 1 = akiko sector DMA target — sd_rd/sd_wr stay 0
-// (userspace pushes UIO_SECTOR_RD on demand without going through the
-// menu-driven sd_rd/sd_wr handshake; hps_io still asserts sd_ack[1] on
-// receipt of the opcode, which is all the akiko path needs).
-wire  [1:0] sd_rd = {1'b0, sd_rd_nvr};
-wire  [1:0] sd_wr = {1'b0, sd_wr_nvr};
-assign sd_lba[0]      = 32'd0;
-assign sd_lba[1]      = 32'd0;        // unused: akiko addresses by sd_buff_addr
-assign sd_blk_cnt[0]  = 6'd0;         // single 1024-byte block per NVR load
-assign sd_blk_cnt[1]  = 6'd0;         // unused; tied off
-assign sd_buff_din[0] = 8'h00;        // NVR save not wired through this path
-assign sd_buff_din[1] = 8'h00;        // akiko slot is read-only from the host
-
-always @(posedge clk_sys) begin
-	img_mounted_d <= img_mounted;
-	// Rising edge of img_mounted with the right size kicks off the
-	// load by raising sd_rd_nvr. hps_io picks this up, asserts sd_ack
-	// (HIGH for the *entire* transfer — see sys/hps_io.sv 'h17/0X18
-	// case) and streams bytes on sd_buff_dout/_addr/_wr. We drop
-	// sd_rd_nvr the moment sd_ack rises so the request isn't re-issued.
-	if (img_mounted && !img_mounted_d &&
-	    (img_size == 64'd1024) && !img_readonly) begin
-		sd_rd_nvr <= 1'b1;
-	end else if (sd_ack[0]) begin
-		sd_rd_nvr <= 1'b0;
-	end
-	sd_wr_nvr <= 1'b0;
-end
-
-// Gate by sd_ack[0] (HIGH for the whole NVR transfer), NOT sd_rd_nvr (which
-// drops one cycle after the transfer starts and would mask every byte).
-wire [9:0]  nvr_load_addr  = sd_buff_addr[9:0];
-wire [7:0]  nvr_load_din   = sd_buff_dout;
-wire        nvr_load_we    = sd_buff_wr & sd_ack[0];
-
-// Akiko sector DMA path (slot 1). sd_ack[1] gates capture in akiko.v;
-// sd_buff_dout/_addr/_wr are shared with the NVR slot but the gate keeps
-// transfers exclusive (only one slot's sd_ack is HIGH at a time per the
-// hps_io.sv `'h0X17: sd_ack <= disk[VD:0]` assignment).
-wire        akiko_sec_dma_active = sd_ack[1];
-wire  [7:0] akiko_sec_dma_byte   = sd_buff_dout;
-wire [13:0] akiko_sec_dma_addr   = sd_buff_addr;
-wire        akiko_sec_dma_we     = sd_buff_wr;
+wire        cdtv_nvr_dirty;    // bit 12
+wire        cdtv_card_dirty;   // bit 13
+wire  [9:0] cdtv_cdda_volume_w;
+wire        cdtv_cdda_volume_valid_w;
 
 // Akiko chip-RAM master wires (M5). akiko's DMA engines emit single-byte
 // requests; chipdma_arb (instantiated below sdram_ctrl) muxes them onto
@@ -260,7 +247,49 @@ wire        arb_chip_dma;
 wire [15:0] arb_chip_wr;
 
 wire [35:0] EXT_BUS;
-hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata));
+
+// Save state diagnostics, published on hps_ext's 0xF600 UIO read
+// sub-channel. Assembled at the bottom of the save state section below;
+// declared here because the `.*` connection needs the net to exist, and
+// connected by name rather than left to `.*` so the instance says out loud
+// that this port is wired.
+wire [127:0] ss_diag;
+
+// Live memory peek: hps_ext (clk_sys) asks, ss_ctrl (clk_114) answers.
+//
+// The request is a single clk_sys pulse and clk_114 is four times faster, so
+// it cannot be missed -- but it would be sampled on several clk_114 edges, and
+// ss_ctrl must act once. Carried as a toggle and edge-detected on the far side.
+wire [24:1]  ss_peek_addr;
+wire         ss_peek_req_sys;
+wire [127:0] ss_peek_data;
+wire         ss_peek_valid;
+wire         ss_peek_busy;
+wire         ss_peek_scan;
+wire [127:0] ss_pc_snapshot;
+wire  [63:0] ss_kick_pair;
+
+reg  ss_peek_tgl = 1'b0;
+always @(posedge clk_sys) if (ss_peek_req_sys) ss_peek_tgl <= ~ss_peek_tgl;
+
+reg  ss_peek_tgl_meta, ss_peek_tgl_sync, ss_peek_tgl_d;
+always @(posedge clk_114) begin
+	ss_peek_tgl_meta <= ss_peek_tgl;
+	ss_peek_tgl_sync <= ss_peek_tgl_meta;
+	ss_peek_tgl_d    <= ss_peek_tgl_sync;
+end
+wire ss_peek_req_114 = ss_peek_tgl_sync ^ ss_peek_tgl_d;
+
+hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata), .ss_diag(ss_diag),
+	.ss_peek_addr(ss_peek_addr), .ss_peek_req(ss_peek_req_sys),
+	.ss_peek_data(ss_peek_data), .ss_peek_valid(ss_peek_valid),
+	.ss_pc_snapshot(ss_pc_snapshot), .ss_kick_pair(ss_kick_pair),
+	.ss_intena_live(ss_intena), .ss_intreq_live(ss_intreq),
+	.ss_frame_count(ss_frame_count),
+	.ss_vpos(ss_beam_vpos_q), .ss_vpos_max(ss_vpos_max),
+	.ss_hpos_max(ss_hpos_max), .ss_vbl_int_count(ss_vbl_int_count),
+	.ss_htotal(ss_beam_htotal), .ss_varbeamen(ss_beam_varbeamen),
+	.ss_harddis(ss_beam_harddis));
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
@@ -354,6 +383,24 @@ always @(posedge clk_sys, posedge reset) begin
 end
 
 //// amiga clocks ////
+//
+// Both amiga_clk instances are reset from ~reset_d, never from ~reset.
+// `reset` is ~locked | buttons[1] | RESET -- asynchronous to clk_sys -- and
+// amiga_clk recovers it with `always @(posedge clk_28, negedge reset_n)`.
+// With two instances that is two INDEPENDENT recoveries of the same
+// asynchronous release edge: one metastable capture and the two phase
+// generators come out of reset a clk_28 cycle apart and stay that way for
+// the whole session. chipdma_arb (see its header) requires minimig's chip
+// DMA inputs to be aligned to the c_7m it samples, and those now come from
+// different generators, so a permanent one-cycle skew is a permanent
+// chip-RAM slot corruption -- nondeterministic, boot-time, and invisible
+// until something tears.
+//
+// reset_d is the clk_sys-synchronised reset already used by sdram_ctrl,
+// ddram_ctrl, chipdma_arb, minimig, ss_ctrl and ss_freeze_7m. It is only
+// ever written on posedge clk_sys (the async `posedge reset` branch of its
+// always block writes reset_s, not reset_d), so both its assertion and its
+// release are synchronous and both instances leave reset on the same edge.
 wire       clk7_en;
 wire       clk7n_en;
 wire       c1;
@@ -370,8 +417,479 @@ amiga_clk amiga_clk
 	.c3       ( c3         ), // clk28m clock domain signal synchronous with clk signal delayed by 90 degrees
 	.cck      ( cck        ), // colour clock output (3.54 MHz)
 	.eclk     ( eclk       ), // 0.709379 MHz clock enable output (clk domain pulse)
-	.reset_n  ( ~reset     )
+	.ce       ( 1'b1       ), // free-running: this copy drives sdram_ctrl and chipdma_arb
+	.reset_n  ( ~reset_d   )  // synchronous release -- see note above
 );
+
+
+//////////////////////////  SAVE STATES (phase 1A)  /////////////////////////
+//
+// Declarations only; the sequencer itself is below the minimig instance,
+// where every signal it observes already exists.
+//
+// The freeze does not gate clk7_en/clk7n_en the way the plan described. c1,
+// c3, cck and eclk are Gray-coded phase LEVELS shared by agnus, denise, the
+// CIAs and the sram bridge, and a one-in-four phase decode off them becomes
+// true *every* cycle if the levels are held, so ANDing them with ~freeze
+// speeds the chipset up rather than stopping it. Instead the whole 7 MHz
+// timebase feeding minimig comes from a second amiga_clk whose ce can be
+// dropped. The original instance is untouched and still drives sdram_ctrl
+// and chipdma_arb: SDRAM refresh must not stop for the ~150 ms a 2 MB chip
+// RAM dump takes, and the dump itself reads chip RAM through sdram_ctrl's
+// CPU port.
+wire        ss_freeze;
+wire        ss_save_busy;
+
+wire        am_clk7_en;
+wire        am_clk7n_en;
+wire        am_c1;
+wire        am_c3;
+wire        am_cck;
+wire  [9:0] am_eclk;
+
+// The freeze's two clk_sys-domain signals: the enable that stops the Amiga's
+// timebase, and the register-decode tick a replay needs while it is stopped.
+// Both live in rtl/ss_freeze_phase.v rather than here, because the core repo's
+// rtl/sim/ssmux bench instantiates the same module around a real minimig --
+// written out twice, the sampling phase in particular would drift between the
+// hardware and the bench that is supposed to check it. The reasoning for the
+// phase, and why its polarity reads backwards, is in that file.
+wire ss_freeze_7m;
+wire ss_replay_tick;
+
+ss_freeze_phase ss_freeze_phase_inst
+(
+	.clk         ( clk_sys       ),
+	.rst_n       ( ~reset_d      ),
+	// The MASTER generator's outputs, not am_*: the Amiga's stop when the
+	// freeze takes hold.
+	.clk7_en     ( clk7_en       ),
+	.cck         ( cck           ),
+	.freeze      ( ss_freeze     ),
+	.replay_we   ( ss_replay_we  ),
+	.freeze_7m   ( ss_freeze_7m  ),
+	.replay_tick ( ss_replay_tick)
+);
+
+amiga_clk amiga_clk_am
+(
+	.clk_28   ( clk_sys       ),
+	.clk7_en  ( am_clk7_en    ),
+	.clk7n_en ( am_clk7n_en   ),
+	.c1       ( am_c1         ),
+	.c3       ( am_c3         ),
+	.cck      ( am_cck        ),
+	.eclk     ( am_eclk       ),
+	.ce       ( ~ss_freeze_7m ),
+	.reset_n  ( ~reset_d      )  // same synchronous release as the master copy
+);
+
+// TG68K register file sweep. One read port, so the sixteen registers are
+// sampled one per clk_sys cycle while the CPU is parked.
+reg  [3:0]  ss_reg_index;
+wire [31:0] ss_reg_data;
+// The saved PC is the kernel's ARCHITECTURAL PC (exe_pc), not TG68_PC.
+// TG68_PC is a fetch pointer: mid-instruction it has already run on into the
+// operand words, so a state saved with it resumes the CPU decoding data as
+// code. That is what the restores that ended in a reset were doing.
+wire [31:0] ss_pc;
+wire        ss_cpu_at_boundary;
+wire        ss_cpu_bus_settled;
+wire [15:0] ss_sr;
+wire [31:0] ss_usp;
+wire [31:0] ss_vbr;
+wire  [3:0] ss_cacr;
+reg  [31:0] ss_cpu_d0, ss_cpu_d1, ss_cpu_d2, ss_cpu_d3;
+reg  [31:0] ss_cpu_d4, ss_cpu_d5, ss_cpu_d6, ss_cpu_d7;
+reg  [31:0] ss_cpu_a0, ss_cpu_a1, ss_cpu_a2, ss_cpu_a3;
+reg  [31:0] ss_cpu_a4, ss_cpu_a5, ss_cpu_a6, ss_cpu_a7;
+reg         ss_regs_valid;
+
+// From minimig.
+wire  [3:0] ss_map;
+wire        ss_blit_busy;
+wire        ss_disk_busy;
+wire        ss_audio_busy;
+
+// INTREQ by value, straight out of paula_intcontroller. The register shadow
+// rebuilds the other three set/clear registers from bus writes; this one is
+// raised by hardware as well as by the CPU, so it has to be read, not inferred.
+wire [14:0] ss_intreq;
+// Diagnostics only. ss_intena is Paula's live enable mask and ss_frame_count
+// counts vertical blanks, so a single readback answers the two questions a
+// restore that resumes into a frame-wait loop cannot otherwise distinguish:
+// is the chipset still running at all, and did the INTENA replay land.
+wire [14:0] ss_intena;
+reg  [7:0]  ss_frame_count;   // incremented below, where ss_frame_tick exists
+
+// ------------------------------------------------------------------ beam diag
+//
+// A restore that comes back with the game spinning on a frame-wait loop tells
+// you nothing on its own: memory can be byte-perfect, the CPU can be taking
+// interrupts, and the machine can still be dead because the beam never reaches
+// vertical blank. ss_frame_count already answers "were there any vertical
+// blanks" (it read zero over 250 seconds on hardware, which is what sent this
+// here); these answer the next question, which is why.
+//
+//   vpos_max / hpos_max  -- how far each counter gets. A vpos_max well below
+//                           the frame height means the beam is running but the
+//                           frame never completes; a vpos_max of zero with a
+//                           moving hpos means only the vertical half is stuck.
+//   vbl_int_count        -- Paula's actual VERTB request. This is the signal
+//                           the game is waiting on, one step upstream of the
+//                           interrupt it never sees.
+//   htotal/varbeamen/harddis -- the ECS variable-beam geometry, which decides
+//                           where vertical blank falls at all.
+//
+// All cleared when a restore starts, so they describe the restored machine and
+// not the one before it.
+wire [10:0] ss_beam_vpos;
+wire  [8:0] ss_beam_hpos;
+wire        ss_beam_vbl_int;
+wire  [8:0] ss_beam_htotal;
+wire        ss_beam_varbeamen;
+wire        ss_beam_harddis;
+
+reg  [10:0] ss_vpos_max;
+reg   [8:0] ss_hpos_max;
+reg   [7:0] ss_vbl_int_count;
+reg         ss_vbl_int_d;
+
+// The beam is registered before anything looks at it. vpos and hpos come from
+// flops inside agnus_beamcounter, out through agnus and minimig, and the
+// trackers below are magnitude comparators -- combinational the whole way,
+// which cost 0.46 ns of setup on a clock that was already the tightest in the
+// design and turned a clean fit into a failing one. A diagnostic that violates
+// timing can report the wrong number, which is worse than not having it.
+//
+// One cycle of latency changes nothing here: these are maxima accumulated over
+// seconds, and the readback is sampled by a host poller at 1 Hz.
+reg  [10:0] ss_beam_vpos_q;
+reg   [8:0] ss_beam_hpos_q;
+always @(posedge clk_sys) begin
+	ss_beam_vpos_q <= ss_beam_vpos;
+	ss_beam_hpos_q <= ss_beam_hpos;
+end
+
+always @(posedge clk_sys) begin
+	ss_vbl_int_d <= ss_beam_vbl_int;
+	if (ss_reset_src_clr) begin
+		ss_vpos_max      <= 11'd0;
+		ss_hpos_max      <= 9'd0;
+		ss_vbl_int_count <= 8'd0;
+	end
+	else begin
+		if (ss_beam_vpos_q > ss_vpos_max) ss_vpos_max <= ss_beam_vpos_q;
+		if (ss_beam_hpos_q > ss_hpos_max) ss_hpos_max <= ss_beam_hpos_q;
+		if (ss_beam_vbl_int && !ss_vbl_int_d && ss_vbl_int_count != 8'hFF)
+			ss_vbl_int_count <= ss_vbl_int_count + 8'd1;
+	end
+end
+// A restore starting. The beam trackers above and the frame counter below clear
+// on this, so what they hold afterwards describes the restored machine rather
+// than the one it replaced.
+reg         ss_load_busy_d;
+always @(posedge clk_sys) ss_load_busy_d <= ss_load_busy;
+wire        ss_reset_src_clr = ss_load_busy & ~ss_load_busy_d;
+
+// The reboot forensics that used to live here -- reset source and reset PC,
+// the first-fault latch, the interrupt and level-3 counters, the entry and
+// from-PC snapshots -- are gone. They were built to find out why a restore
+// rebooted the Amiga, that bug is fixed, and every failure since has been
+// diagnosed by the beam readback and by comparing the save file against
+// memory instead. See docs/superpowers/plans/ for what they proved.
+//
+// The beam counters below stayed: they named an htotal of zero on a hung
+// machine in one line, which is the only reason the last bug was findable.
+
+// Custom chipset register shadow. Most Amiga custom registers are write-only in
+// hardware and this core is faithful about that, so they cannot be exported the
+// way the CPU's register file was -- but every write to them passes through the
+// two wires minimig.v routes to agnus, paula, denise and both CIAs. The shadow
+// snoops those and replays them back through the same buses.
+//
+// Instantiated here rather than inside minimig.v so all the save state logic
+// stays next to ss_ctrl, which owns the freeze and the ordering.
+wire  [8:1] ss_rga_addr;
+wire [15:0] ss_rga_data;
+wire        ss_replay_we;
+wire  [8:1] ss_replay_addr;
+wire [15:0] ss_replay_data;
+wire        ss_replay_active;
+wire        ss_replay_done;
+wire [15:0] ss_shadow_data;
+wire        ss_shadow_writable;
+wire        ss_shadow_setclear;
+
+// Driven by ss_ctrl: it reads the shadow out into the payload on a save, loads
+// it back on a restore, and starts the replay once chip RAM is in place.
+wire        ss_replay_start;
+wire  [7:0] ss_shadow_rd;
+wire        ss_shadow_ld_we;
+wire  [7:0] ss_shadow_ld_addr;
+wire [15:0] ss_shadow_ld_data;
+
+ss_regshadow ss_regshadow_inst
+(
+	.clk            (clk_sys           ),
+	.clk7_en        (clk7_en           ),
+	.rst_n          (~reset_d          ),
+	.reg_address_in (ss_rga_addr       ),
+	.data_in        (ss_rga_data       ),
+	.rd_addr        (ss_shadow_rd      ),
+	.ld_we          (ss_shadow_ld_we   ),
+	.ld_addr        (ss_shadow_ld_addr ),
+	.ld_data        (ss_shadow_ld_data ),
+	.rd_data        (ss_shadow_data    ),
+	.rd_writable    (ss_shadow_writable),
+	.rd_setclear    (ss_shadow_setclear),
+	.replay_start   (ss_replay_start   ),
+	// The RESTORED INTREQ, not Paula's live one. The shadow cannot
+	// accumulate this register from bus writes -- Paula raises its bits in
+	// hardware too -- so it is carried by value in the state vector and
+	// comes back out of ss_state_fanout. Wired to ss_intreq, a restore
+	// reinstalled the pending interrupts of the machine it was replacing.
+	// ss_intreq itself is still the CAPTURE side: it feeds the vector.
+	.intreq_in      (ss_restored_intreq),
+	.replay_active  (ss_replay_active  ),
+	.replay_we      (ss_replay_we      ),
+	.replay_addr    (ss_replay_addr    ),
+	.replay_data    (ss_replay_data    ),
+	.replay_done    (ss_replay_done    )
+);
+
+// From chipdma_arb: a bridge (Akiko / CDTV) chip-RAM slot is armed or in
+// flight. Joins cpu_boundary so the freeze is never taken with a bridge
+// write half-committed; the ss_freeze_7m hold on the arbiter keeps new ones
+// from starting once it is.
+wire        ss_dma_busy;
+
+// Borrowed sdram_ctrl CPU port.
+wire [24:1] ss_sd_addr;
+wire        ss_sd_cs;
+wire  [1:0] ss_sd_state;
+wire        ss_sd_uds_n;
+wire        ss_sd_lds_n;
+wire        ss_sd_cache_inhibit;
+wire [15:0] ss_sd_wr;
+
+// ss_ctrl raises this whenever it is walking the Kickstart ROM for the
+// fingerprint. On a SAVE that pass runs inside the freeze and ss_freeze alone
+// would have covered it. On a RESTORE it runs before the freeze, deliberately:
+// the fingerprint is the last gate, and a gate that stopped the Amiga in order
+// to refuse a file would be worse than the file it was guarding against. So
+// there is a window where ss_ctrl needs this port with ss_freeze low, and
+// ss_rom_scan is what announces it.
+wire        ss_rom_scan;
+
+// Invalidate the 68020's cache at the end of a restore, while the machine is
+// still frozen. Driven into cpu_cache_ctrl[3] below -- the CACR clear bit,
+// which cpu_cache_new edge-detects -- so this reuses the machine's own
+// invalidate instead of adding a second mechanism.
+//
+// DRIVEN, not ORed, and that distinction is the whole of a bug. cpu_cache_new
+// clears on a RISING EDGE of bit 3, and TG68K stores CACR bit 3 exactly as
+// MOVEC wrote it (TG68KdotC_Kernel.vhd: CACR <= reg_QA(3 downto 0)). Bit 3 is
+// the 68020's "clear data cache" bit, which AmigaOS sets -- so a state saved
+// with it set restores a CACR that already holds bit 3 high, an OR then
+// produces no edge, and the invalidate silently does not happen.
+//
+// It shows up as a restore that works within a session and destroys the
+// machine after a reboot: in-session the stale lines still describe nearly the
+// right memory, so nothing visibly breaks. Measured on AmigaVision -- the file
+// verified byte-perfect and its CRC passed, the Kickstart fingerprint matched,
+// and the machine still faulted LINE-F inside Kickstart without completing a
+// single video frame.
+//
+// It is needed because the restore writes chip RAM through the borrowed SDRAM
+// CPU port, while the cache's snoop port is tied to chipWE, the chip DMA write
+// path (sdram_ctrl.v:135). DMA writes update the cache; the restore's 2 MB do
+// not go near it, so without this the CPU resumes against a cache still
+// describing the memory that was there before the restore.
+wire        ss_cache_flush;
+// Denise's colour table, borrowed by the savestate while the machine is frozen.
+wire        ss_clut_active;
+wire  [7:0] ss_clut_addr;
+wire [31:0] ss_clut_rd_data;
+wire        ss_clut_wr_en;
+wire [31:0] ss_clut_wr_data;
+
+// Who owns sdram_ctrl's CPU port this cycle. One expression, used for all
+// seven of the port's signals at the ram1 instance below.
+//
+// The 68k is off the port for both windows, by cpu_wrapper's ss_arm rather
+// than by anything here: ss_arm is tied to (save_busy | load_busy | fan-out
+// busy) at the cpu_wrapper instance, and it parks the CPU at its next
+// instruction boundary. That does NOT drop ram_cs on its own -- an
+// instruction boundary never has an idle bus -- which is why the freeze also
+// waits for ss_cpu_bus_settled, so the outstanding cycle is finished and
+// acked before the port changes hands. Both busies are high for
+// milliseconds before ss_rom_scan can rise (a restore has an entire payload
+// CRC pass to get through first, a save is already frozen), so the CPU is long
+// since parked. Even in the impossible case where it were not, the failure is
+// benign: the CPU's chip select stops being routed, its ramready never
+// arrives, and it resumes the same cycle the scan gives the port back. That is
+// the bus stall this design accepts -- ~20 ms once per restore, with the
+// chipset still running -- not a freeze.
+// ss_peek_scan is the debug window's own port claim. Kept separate from
+// ss_rom_scan inside ss_ctrl -- driving that one from the peek states as
+// well widened its fan-in enough to fail setup -- and merged here, where
+// it costs a single OR gate.
+wire        ss_port_own = ss_freeze | ss_rom_scan | ss_peek_scan;
+
+// Where the Kickstart ROM physically lives in SDRAM, as the CPU port's own
+// word address -- DERIVED, not assumed. Amiga $F80000 goes through
+// memory_router.v (the CPU-side map, which minimig_sram_bridge.v:70-74 mirrors
+// for the DMA side):
+//
+//   ramaddr[26:23] = 4'b0000       -- not z3/rtg/dd, so bit 23 is DROPPED
+//                                     ("map a0-ff to 20-7f", memory_router:93)
+//   ramaddr[22:19] = cpu_addr[22:19] = 4'b1111
+//   ramaddr[18]    = cpu_addr[18]  = 0   at $F80000
+//   ramaddr[17:1]  = 0
+//
+// so the byte address is $F80000 with bit 23 cleared = $780000, and ram1's
+// cpuAddr is {2'b00, ram_addr[22:1]}, a WORD address: $780000 >> 1 =
+// $3C0000. ss_sd_addr[24:1] is that same vector, so kick_base is 24'h3C0000
+// and the 512 KB (0x40000-word) default scan covers $F80000-$FFFFFF.
+//
+// This is right for every ROM size the uploader supports, which is what makes
+// the fingerprint reproducible across a power cycle:
+//   512 KB and 1 MB images  -- minimig_config.cpp:286,315 send $F80000, so
+//                              the whole 512 KB region is written.
+//   256 KB images           -- minimig_config.cpp:336-338 send the image TWICE,
+//                              to $F80000 and again to $FC0000, so both halves
+//                              of the region hold it. The fingerprint is then a
+//                              CRC of the image twice over: still deterministic
+//                              and still distinguishing, which is all it has to
+//                              be.
+// The one gap is an 8 KB A1000 boot ROM (minimig_config.cpp:301,308), where
+// only the first 8 KB is ever written and the rest of the region is whatever
+// SDRAM powered up holding. A state saved in that configuration will not
+// restore across a power cycle -- it refuses with "wrong Kickstart", which is
+// a safe direction to be wrong in, and that configuration boots its Kickstart
+// off a floppy anyway.
+// 24 bits, matching ss_ctrl's kick_base[24:1] port by width.
+localparam [23:0] SS_KICK_BASE = 24'h3C0000;
+
+// Borrowed DDR3 arbiter master 0. Both directions: the save path writes, the
+// restore path reads the window back out and checks it before touching
+// anything.
+wire [28:0] ss_ddr_address;
+wire [63:0] ss_ddr_writedata;
+wire  [7:0] ss_ddr_byteenable;
+wire        ss_ddr_write;
+wire        ss_ddr_read;
+wire [63:0] ss_ddr_readdata;
+wire        ss_ddr_readdatavalid;
+wire        ss_ddr_waitrequest;
+wire        ss_ram_idle;
+
+// Restore path.
+wire        ss_load_busy;
+wire [`SS_STATE_W-1:0] ss_state_out;
+wire        ss_state_we;
+
+// Outcomes, for the OSD toast. Levels held by ss_ctrl until the next attempt.
+wire        ss_save_ok;
+wire        ss_save_fail;
+wire        ss_load_ok;
+wire        ss_load_fail;
+wire  [3:0] ss_load_fail_code;
+
+// ss_ctrl's diagnostic ports. Observation only; see the ss_diag block at
+// the end of this section.
+wire  [5:0] ss_dbg_state;
+wire [23:0] ss_dbg_idx;
+wire        ss_dbg_kick_warn;
+wire        ss_dbg_kick_unstable;
+
+// ss_state_fanout's outputs. It runs on clk_sys, which is both the CPU's
+// clock and minimig.v's, so nothing it drives needs a domain crossing.
+wire  [3:0] ss_fanout_wr_index;
+wire [31:0] ss_fanout_wr_data;
+wire        ss_fanout_wr_en;
+wire        ss_fanout_pc_wr;
+wire        ss_fanout_sr_wr;
+wire        ss_fanout_usp_wr;
+wire        ss_fanout_vbr_wr;
+wire        ss_fanout_cacr_wr;
+wire        ss_fanout_resume;
+wire  [3:0] ss_fanout_map_in;
+wire        ss_fanout_map_we;
+// The INTREQ that came out of the file, as opposed to the one Paula is
+// holding right now. ss_regshadow's replay writes this into Paula.
+wire [14:0] ss_restored_intreq;
+
+// The CIAs. ss_cia_a/ss_cia_b are the capture side, straight out of minimig;
+// the _restored pair and the pulse are the restore side. Both CIAs take their
+// whole word on one clk_sys edge, so there is no sequence here to get wrong.
+//
+// The capture side is REGISTERED into clk_114 before it joins the state vector.
+// The CIA flops live in minimig's clk_sys domain and ss_serdes shifts on
+// clk_114, so putting them in the vector raw hands the fitter ~400 timed
+// crossings into one shift register -- which failed hold by 0.567 ns across a
+// few dozen of them, CIAB1's timer counters into serdes|shifter. One flop on
+// this side breaks every one of those paths.
+//
+// Safe because the data is static exactly when it is read: ss_ctrl serialises
+// the vector inside the freeze, and a frozen machine has no clk7_en, so no CIA
+// register can change while the capture runs. This is a retiming stage, not a
+// synchroniser, and the two clocks come from the same PLL at 4:1.
+wire [190:0] ss_cia_a_raw;
+wire [202:0] ss_cia_b_raw;
+
+reg  [190:0] ss_cia_a;
+reg  [202:0] ss_cia_b;
+always @(posedge clk_114) begin
+	ss_cia_a <= ss_cia_a_raw;
+	ss_cia_b <= ss_cia_b_raw;
+end
+wire [190:0] ss_restored_cia_a;
+wire [202:0] ss_restored_cia_b;
+wire         ss_restored_cia_we;
+
+// Registered into clk_sys before they reach the CIAs, for the same reason the
+// capture side is registered into clk_114: ss_state_fanout unpacks these
+// combinationally from ss_ctrl's clk_114 state_out, so raw they are ~400 timed
+// crossings landing directly in CIA flip-flops. One of them failed hold by
+// 0.318 ns -- state_out[324] into CIAA1's TOD read latch.
+//
+// Safe for the same reason too. ss_state_out is loaded once and held, and the
+// fan-out does not pulse cia_we until step 22 of its sequence, so these have
+// been stable for twenty-odd cycles by the time anything samples them.
+reg  [190:0] ss_restored_cia_a_q;
+reg  [202:0] ss_restored_cia_b_q;
+always @(posedge clk_sys) begin
+	ss_restored_cia_a_q <= ss_restored_cia_a;
+	ss_restored_cia_b_q <= ss_restored_cia_b;
+end
+// Akiko, the same shape as the CIAs above and registered across the same
+// clock boundary for the same reason: akiko.v runs on clk_sys, ss_serdes
+// shifts on clk_114, and 1052 raw bits into one shift register is another few
+// hundred timed crossings the fitter does not need.
+//
+// Safe on the same grounds. The capture side is static while it is read (the
+// machine is frozen, and Akiko was required to be idle before the freeze was
+// granted -- see akiko.v's ss_idle); the restore side has been held stable for
+// twenty-odd cycles by the time the fan-out's akiko_we pulses at step 22.
+wire [`SS_AKIKO_W-1:0] ss_akiko_raw;
+reg  [`SS_AKIKO_W-1:0] ss_akiko;
+always @(posedge clk_114) ss_akiko <= ss_akiko_raw;
+
+wire [`SS_AKIKO_W-1:0] ss_restored_akiko;
+wire                   ss_restored_akiko_we;
+reg  [`SS_AKIKO_W-1:0] ss_restored_akiko_q;
+always @(posedge clk_sys) ss_restored_akiko_q <= ss_restored_akiko;
+
+// Akiko has no DMA in flight and nothing staged. One of ss_quiesce's freeze
+// conditions; without it a snapshot taken mid-sector-ship would drop the
+// bytes the HPS has already handed over and will never send again.
+wire        ss_akiko_idle;
+
+wire        ss_fanout_busy;
+wire        ss_fanout_ack;
+/////////////////////////////////////////////////////////////////////////////
 
 
 wire cpu_type = cpucfg[1];
@@ -412,6 +930,27 @@ end
 wire  [1:0] cpu_state;
 wire        cpu_nrst_out;
 wire  [3:0] cpu_cacr;
+// The cache control the two memory controllers actually see.
+//
+// While the machine is FROZEN, bit 3 is ss_cache_flush alone. ss_ctrl holds it
+// low until its flush state and raises it there, so the rising edge
+// cpu_cache_new needs is produced no matter what the machine's own CACR
+// happens to hold -- which is the point, since a restored CACR can already
+// have bit 3 set and an OR would then produce no edge at all.
+//
+// Gated on the freeze rather than on save_busy | load_busy, and the difference
+// matters: those two are already high through the quiesce wait, which is up to
+// two seconds with the CPU still RUNNING. Overriding the bit there would
+// swallow the machine's own cache-clear requests -- MOVEC with bit 3 set is
+// how AmigaOS makes modified code visible, so suppressing it for two seconds
+// is its own corruption. A frozen CPU cannot issue one, so inside the freeze
+// there is nothing to swallow.
+//
+// The low three bits stay the CPU's throughout: they are cache ENABLE and
+// friends, and overriding those would change whether the cache is on, not
+// merely when it is emptied.
+wire [3:0] ss_cache_ctrl = ss_freeze ? {ss_cache_flush, cpu_cacr[2:0]}
+                                     : cpu_cacr;
 wire [31:0] cpu_nmi_addr;
 wire        cpu_rst;
 
@@ -450,53 +989,15 @@ wire cdtv_mode;
 // fastchip_selack.
 wire [15:0] cdtv_din_w;
 wire        cdtv_selack_w;
-wire  [5:0] cdtv_ac_rom_addr_w;
-wire  [7:0] cdtv_ac_rom_byte_w;
+wire  [7:0] cdtv_base_w;
 
-// UIO / HPS-side ports.
-// cmd_in_pending / cmd_in_byte come up from cdtv_bridge → cpu_wrapper.
-// The cdtv_hps_bridge (instantiated below) drives the *_to_bridge_w
-// signals that feed back down through cpu_wrapper into cdtv_bridge.
-wire        cdtv_cmd_in_pending_w;
-wire  [7:0] cdtv_cmd_in_byte_w;
-wire        cdtv_cmd_in_pop_w;
-wire        cdtv_cmd_out_push_w;
-wire  [7:0] cdtv_cmd_out_data_w;
-wire  [9:0] cdtv_cdda_volume_w;
-wire        cdtv_nvr_dirty_w;
-wire  [7:0] cdtv_nvr_save_dout_w;
-
-// CDTV chip-RAM master DMA wires. cdtv_bridge → chipdma_arb.
+// CDTV chip-RAM master DMA wires. cdtv_bridge -> chipdma_arb. 32 bits wide:
+// a truncated address aliased Z3 fast RAM onto the vector table.
 wire        cdtv_dma_req_w;
 wire        cdtv_dma_we_w;
-wire [23:0] cdtv_dma_baddr_w;
+wire [31:0] cdtv_dma_baddr_w;
 wire  [7:0] cdtv_dma_wbyte_w;
 wire        cdtv_dma_ack_w;
-
-// CDTV HPS bridge — UIO byte-stream adapter for cdtv_bridge cmd channel.
-cdtv_hps_bridge cdtv_hps_bridge_inst
-(
-	.clk            (clk_sys                ),
-	.reset          (reset                  ),
-	.uio_cs         (cdtv_cs                ),
-	.uio_cs_sec     (cdtv_cs_sec            ),
-	.uio_cs_stch    (cdtv_cs_stch           ),
-	.uio_wr         (cdtv_wr                ),
-	.uio_rd         (cdtv_rd                ),
-	.uio_din        (cdtv_dout[7:0]         ),
-	.uio_dout       (cdtv_din               ),
-	.cmd_in_pending (cdtv_cmd_in_pending_w  ),
-	.cmd_in_byte    (cdtv_cmd_in_byte_w     ),
-	.cmd_in_pop     (cdtv_cmd_in_pop_w      ),
-	.cmd_out_push   (cdtv_cmd_out_push_w    ),
-	.cmd_out_data   (cdtv_cmd_out_data_w    ),
-	.sec_byte_push  (cdtv_sec_byte_push_w   ),
-	.sec_byte_data  (cdtv_sec_byte_data_w   ),
-	.stch_inject    (cdtv_stch_inject       ),
-	.stch_ack       (cdtv_stch_ack          ),
-	.stch_ack_clr   (cdtv_stch_ack_clr      ),
-	.req            (cdtv_req               )
-);
 
 cpu_wrapper cpu_wrapper
 (
@@ -528,6 +1029,49 @@ cpu_wrapper cpu_wrapper
 
 	.cpucfg       (cpucfg          ),
 	.cachecfg     (cachecfg        ),
+
+	// Save state export, and the park request that makes it meaningful.
+	//
+	// A restore parks the CPU too, and for longer: ss_load_busy rises the
+	// moment the request is taken and stays up through validation (a CRC scan
+	// of the whole payload) and the replay. Parking that early is not just
+	// tidiness -- the DDR3 read master the validation needs is master 0, the
+	// same port the CPU's fast RAM uses, and ddram_ctrl will not grant it
+	// until that port is idle.
+	//
+	// ss_fanout_busy extends the park past ss_load_busy's fall, over the
+	// handful of cycles in which the register file is actually being written.
+	// Releasing the CPU into a half-written register file is the one ordering
+	// error in this path that would look like a game bug rather than a save
+	// state bug.
+	// ss_peek_busy joins them: the SDRAM CPU port will not answer a
+	// borrowed read while the 68k is still driving it, which is why the
+	// first live peek timed out.
+	.ss_arm       (ss_save_busy | ss_load_busy | ss_fanout_busy | ss_peek_busy),
+	.ss_reg_index (ss_reg_index    ),
+	.ss_reg_data  (ss_reg_data     ),
+	.ss_exe_pc    (ss_pc           ),
+	.ss_at_boundary(ss_cpu_at_boundary),
+	.ss_bus_settled(ss_cpu_bus_settled),
+	.ss_sr        (ss_sr           ),
+	.ss_usp       (ss_usp          ),
+	.ss_vbr       (ss_vbr          ),
+	.ss_cacr      (ss_cacr         ),
+
+	// Restore write port into the TG68K register file, driven by
+	// ss_state_fanout at the bottom of this file. One shared data bus and one
+	// enable per destination, so the fan-out presents them one per cycle --
+	// the register file has a single write port and the sixteen registers go
+	// in one at a time, mirroring the Phase 1A read sweep above.
+	.ss_wr_index  (ss_fanout_wr_index),
+	.ss_wr_data   (ss_fanout_wr_data ),
+	.ss_wr_en     (ss_fanout_wr_en   ),
+	.ss_pc_wr     (ss_fanout_pc_wr   ),
+	.ss_sr_wr     (ss_fanout_sr_wr   ),
+	.ss_usp_wr    (ss_fanout_usp_wr  ),
+	.ss_vbr_wr    (ss_fanout_vbr_wr  ),
+	.ss_cacr_wr   (ss_fanout_cacr_wr ),
+	.ss_resume    (ss_fanout_resume  ),
 	.fastramcfg   (memcfg[6:4]     ),
 	.bootrom      (bootrom         ),
 
@@ -541,8 +1085,7 @@ cpu_wrapper cpu_wrapper
 	// same cycle cdtv_selack fires, same shape as the fastchip path above.
 	.cdtv_din           (cdtv_din_w           ),
 	.cdtv_selack        (cdtv_selack_w        ),
-	.cdtv_ac_rom_addr   (cdtv_ac_rom_addr_w   ),
-	.cdtv_ac_rom_byte   (cdtv_ac_rom_byte_w   ),
+	.cdtv_base          (cdtv_base_w          ),
 
 	.ramsel       (ram_sel         ),
 	.ramaddr      (ram_addr        ),
@@ -606,7 +1149,7 @@ sdram_ctrl ram1
 	.c_7m         (c1              ),
 
 	.cache_rst    (cpu_rst         ),
-	.cpu_cache_ctrl(cpu_cacr       ),
+	.cpu_cache_ctrl(ss_cache_ctrl),
 	.dcache_sw_en (dcache_sw_en_w  ),
 
 	.sd_data      (SDRAM_DQ        ),
@@ -620,12 +1163,34 @@ sdram_ctrl ram1
 	.sd_cke       (SDRAM_CKE       ),
 	.sd_clk       (SDRAM_CLK       ),
 
-	.cpuWR        (ram_din         ),
-	.cpuAddr      (ram_addr[22:1]  ),
-	.cpuU         (ram_uds         ),
-	.cpuL         (ram_lds         ),
-	.cpustate     (cpu_state       ),
-	.cpuCS        (~zram_sel&ram_cs),
+	// While frozen the CPU port belongs to ss_dma. The CPU itself is parked
+	// at an instruction boundary with its last bus cycle settled (see
+	// ss_cpu_settled_q), so nothing is in flight to be displaced.
+	// cache_inhibit was previously unconnected (and so tied low); ss_dma
+	// asserts it for the whole dump because chip DMA writes do not pass
+	// through this cache and a cached read could return a stale word.
+	//
+	// cpuWR has to be muxed as well now that the restore direction exists:
+	// ss_dma drives cpustate 3 ("write data") and puts the word on ss_sd_wr.
+	// Leaving this tied to ram_din would write whatever the parked CPU
+	// happened to leave on its data bus into every chip RAM address the
+	// restore touched -- silently, since the addresses and the handshake
+	// would all still look correct.
+	//
+	// ss_port_own, not ss_freeze. See its declaration above: the Kickstart
+	// fingerprint pass on the RESTORE side needs this port while ss_freeze is
+	// still low, by design, and every one of the seven signals has to move
+	// together -- a mux that switched the address but not the chip select, or
+	// the state but not the address, would issue the scan's reads against the
+	// CPU's address or the CPU's cycle against the scan's, and both of those
+	// corrupt a running machine rather than merely failing a restore.
+	.cpuWR        (ss_port_own ? ss_sd_wr     : ram_din),
+	.cpuAddr      (ss_port_own ? ss_sd_addr   : {2'b00, ram_addr[22:1]}),
+	.cpuU         (ss_port_own ? ss_sd_uds_n  : ram_uds),
+	.cpuL         (ss_port_own ? ss_sd_lds_n  : ram_lds),
+	.cpustate     (ss_port_own ? ss_sd_state  : cpu_state),
+	.cpuCS        (ss_port_own ? ss_sd_cs     : (~zram_sel & ram_cs)),
+	.cache_inhibit(ss_port_own & ss_sd_cache_inhibit),
 	.cpuRD        (ram_dout1       ),
 	.ramready     (ram_ready1      ),
 
@@ -699,7 +1264,17 @@ chipdma_arb chipdma_arb
 	.ddr_out_cs      (dma_ddr_cs_w         ),
 	.ddr_out_wr      (dma_ddr_wr_w         ),
 	.ddr_in_ack      (dma_ddr_ack_w        ),
-	.ddr_in_rd       (dma_ddr_rd_w         )
+	.ddr_in_rd       (dma_ddr_rd_w         ),
+
+	// Save state: stop granting bridge slots for the duration of the chip
+	// RAM dump, and tell the quiescer when a bridge transfer is in flight.
+	// ss_freeze_7m rather than ss_freeze because chipdma_arb is a clk_sys
+	// module and ss_freeze_7m is already the clk_sys-domain, clk7_en-aligned
+	// copy that stops the chipset -- using it makes the bridge stop on the
+	// same edge the chipset does. Both are 0 when no save is in progress, so
+	// arm_now is unchanged on an idle machine.
+	.dma_hold        (ss_freeze_7m         ),
+	.dma_busy        (ss_dma_busy          )
 );
 
 wire [15:0] ram_dout2;
@@ -711,7 +1286,7 @@ ddram_ctrl ram2
 	.reset_n      (~reset_d        ),
 
 	.cache_rst    (cpu_rst         ),
-	.cpu_cache_ctrl(cpu_cacr       ),
+	.cpu_cache_ctrl(ss_cache_ctrl),
 	.dcache_sw_en (dcache_sw_en_w  ),
 
 	.DDRAM_CLK    (DDRAM_CLK       ),
@@ -744,6 +1319,22 @@ ddram_ctrl ram2
 	.cpuRD        (ram_dout2       ),
 	.ramshared    (ramshared       ),
 	.ramready     (ram_ready2      ),
+
+	// Save state port, muxed onto DDR3 arbiter master 0. The write side is
+	// taken while frozen; the read side is taken for the whole of a restore,
+	// which starts well before the freeze because the window is validated
+	// against the running machine. ss_load_busy is what asks for it.
+	.ss_freeze    (ss_freeze          ),
+	.ss_load_busy (ss_load_busy       ),
+	.ss_address   (ss_ddr_address     ),
+	.ss_writedata (ss_ddr_writedata   ),
+	.ss_byteenable(ss_ddr_byteenable  ),
+	.ss_write     (ss_ddr_write       ),
+	.ss_read      (ss_ddr_read        ),
+	.ss_readdata  (ss_ddr_readdata    ),
+	.ss_readdatavalid(ss_ddr_readdatavalid),
+	.ss_waitrequest(ss_ddr_waitrequest),
+	.ss_ram_idle  (ss_ram_idle        ),
 
 	// Bridge (Akiko/CDTV) DMA port — see chipdma_arb.
 	// dmaRD carries the read-return word so the
@@ -865,16 +1456,11 @@ fastchip fastchip
 	.akiko_uio_rx_busy   (akiko_rx_busy   ),
 	.akiko_uio_nvr_dirty (akiko_nvr_dirty ),
 
-	// NVRAM load-from-disk (canonical hps_io.ioctl_download path).
-	.nvr_load_addr (nvr_load_addr),
-	.nvr_load_din  (nvr_load_din ),
-	.nvr_load_we   (nvr_load_we  ),
-
-	// M5+ fast sector DMA (canonical UIO_SECTOR_RD pipeline, slot 1).
-	.hps_sec_dma_active (akiko_sec_dma_active),
-	.hps_sec_dma_byte   (akiko_sec_dma_byte  ),
-	.hps_sec_dma_addr   (akiko_sec_dma_addr  ),
-	.hps_sec_dma_we     (akiko_sec_dma_we    )
+	// Akiko save state. See the wires next to the CIA pair above.
+	.akiko_ss_state     (ss_akiko_raw        ),
+	.akiko_ss_ld        (ss_restored_akiko_we),
+	.akiko_ss_ld_data   (ss_restored_akiko_q ),
+	.akiko_ss_idle      (ss_akiko_idle       )
 );
 
 
@@ -954,12 +1540,15 @@ minimig minimig
 	.rst_ext      (reset_d          ), // reset from ctrl block
 	.rst_out      (                 ), // minimig reset status
 	.clk          (clk_sys          ), // output clock c1 ( 28.687500MHz)
-	.clk7_en      (clk7_en          ), // 7MHz clock enable
-	.clk7n_en     (clk7n_en         ), // 7MHz negedge clock enable
-	.c1           (c1               ), // clk28m clock domain signal synchronous with clk signal
-	.c3           (c3               ), // clk28m clock domain signal synchronous with clk signal delayed by 90 degrees
-	.cck          (cck              ), // colour clock output (3.54 MHz)
-	.eclk         (eclk             ), // 0.709379 MHz clock enable output (clk domain pulse)
+	// Freezable copy of the Amiga timebase -- see amiga_clk_am above. The
+	// RTC block inside minimig runs off raw clk and is deliberately not
+	// frozen, so a state resumed tomorrow sees tomorrow's time.
+	.clk7_en      (am_clk7_en       ), // 7MHz clock enable
+	.clk7n_en     (am_clk7n_en      ), // 7MHz negedge clock enable
+	.c1           (am_c1            ), // clk28m clock domain signal synchronous with clk signal
+	.c3           (am_c3            ), // clk28m clock domain signal synchronous with clk signal delayed by 90 degrees
+	.cck          (am_cck           ), // colour clock output (3.54 MHz)
+	.eclk         (am_eclk          ), // 0.709379 MHz clock enable output (clk domain pulse)
 
 	//rs232 pins
 	.rxd          (uart_rx          ), // RS232 receive
@@ -972,8 +1561,8 @@ minimig minimig
 	.ri           (1                ), // RS232 Ring Indicator
 
 	//I/O
-	._joy1        (~JOY0            ), // joystick 1 [fire4,fire3,fire2,fire,up,down,left,right] (default mouse port)
-	._joy2        (~JOY1            ), // joystick 2 [fire4,fire3,fire2,fire,up,down,left,right] (default joystick port)
+	._joy1        (~JOY0_MUX        ), // joystick 1 [fire4,fire3,fire2,fire,up,down,left,right] (default mouse port)
+	._joy2        (~JOY1_MUX        ), // joystick 2 [fire4,fire3,fire2,fire,up,down,left,right] (default joystick port)
 	._joy3        (~JOY2            ), // joystick 1 [fire4,fire3,fire2,fire,up,down,left,right]
 	._joy4        (~JOY3            ), // joystick 2 [fire4,fire3,fire2,fire,up,down,left,right]
 	.joya1        (JOYA0            ),
@@ -1032,25 +1621,22 @@ minimig minimig
 	// CDTV bridge — short-circuit data path back up to cpu_wrapper.
 	.cdtv_din            (cdtv_din_w           ),
 	.cdtv_selack         (cdtv_selack_w        ),
-	.cdtv_ac_rom_addr    (cdtv_ac_rom_addr_w   ),
-	.cdtv_ac_rom_byte    (cdtv_ac_rom_byte_w   ),
+	.cdtv_base           (cdtv_base_w          ),
 
-	// CDTV bridge — UIO / HPS-side ports. cmd byte-stream wired via
-	// cdtv_hps_bridge_inst above (M2 phase-1a). Sector-push channel added
-	// in phase-1b alongside the chip-RAM master DMA path. Subq/status
-	// optional channels still tied off — those come in later phases.
-	.cdtv_cmd_in_pop     (cdtv_cmd_in_pop_w    ),
-	.cdtv_cmd_in_pending (cdtv_cmd_in_pending_w),
-	.cdtv_cmd_in_byte    (cdtv_cmd_in_byte_w   ),
-	.cdtv_cmd_out_push   (cdtv_cmd_out_push_w  ),
-	.cdtv_cmd_out_data   (cdtv_cmd_out_data_w  ),
-	.cdtv_sec_byte_push  (cdtv_sec_byte_push_w ),
-	.cdtv_sec_byte_data  (cdtv_sec_byte_data_w ),
+	// CDTV bridge — ext bus straight from hps_ext, no host-side adapter.
+	.cdtv_cs             (cdtv_cs              ),
+	.cdtv_cs_sec         (cdtv_cs_sec          ),
+	.cdtv_cs_stch        (cdtv_cs_stch         ),
+	.cdtv_cs_nvr         (cdtv_cs_nvr          ),
+	.cdtv_cs_card        (cdtv_cs_card         ),
+	.cdtv_wr             (cdtv_wr              ),
+	.cdtv_rd             (cdtv_rd              ),
+	.cdtv_uio_din        (cdtv_dout            ),
+	.cdtv_uio_dout       (cdtv_din             ),
+	.cdtv_req            (cdtv_req             ),
+	.cdtv_sec_fifo_empty (cdtv_sec_empty_w     ),
 	.cdtv_subq_push      (1'b0                 ),
 	.cdtv_subq_byte      (8'h00                ),
-	.cdtv_stch_pulse     (cdtv_stch_inject     ),
-	.cdtv_stch_ack       (cdtv_stch_ack        ),
-	.cdtv_stch_ack_clr   (cdtv_stch_ack_clr    ),
 	.cdtv_sten_pulse     (1'b0                 ),
 	.cdtv_scor_pulse     (1'b0                 ),
 	.cdtv_sbcp_pulse     (1'b0                 ),
@@ -1062,15 +1648,11 @@ minimig minimig
 	.cdtv_dma_wbyte      (cdtv_dma_wbyte_w     ),
 	.cdtv_dma_ack        (cdtv_dma_ack_w       ),
 
-	.cdtv_nvr_load_addr  (14'h0                ),
-	.cdtv_nvr_load_din   (8'h0                 ),
-	.cdtv_nvr_load_we    (1'b0                 ),
-	.cdtv_nvr_save_addr  (14'h0                ),
-	.cdtv_nvr_save_dout  (cdtv_nvr_save_dout_w ),
-	.cdtv_nvr_dirty      (cdtv_nvr_dirty_w     ),
-	.cdtv_nvr_clear_dirty(1'b0                 ),
+	.cdtv_nvr_dirty      (cdtv_nvr_dirty       ),
+	.cdtv_card_dirty     (cdtv_card_dirty      ),
 
 	.cdtv_cdda_volume    (cdtv_cdda_volume_w   ),
+	.cdtv_cdda_volume_valid(cdtv_cdda_volume_valid_w),
 
 	//user i/o
 	.cpucfg       (cpucfg           ), // CPU config
@@ -1098,8 +1680,765 @@ minimig minimig
 	.a2065_mem_writedata(a2065_mem_writedata),
 	.a2065_mem_byteenable(a2065_mem_byteenable),
 	.a2065_mem_write(a2065_mem_write),
-	.a2065_mem_waitrequest(a2065_mem_waitrequest)
+	.a2065_mem_waitrequest(a2065_mem_waitrequest),
+
+	.USER_IN              (USER_IN              ),
+	.USER_OUT             (IndirectUserOutFlop  ),
+	.user_port_mode       (user_port_mode       ),
+	.snac_mode            (snac_mode            ),
+	.mister_floppy_status (mister_floppy_status ),
+
+	.ss_blit_busy         (ss_blit_busy         ),
+	.ss_disk_busy         (ss_disk_busy         ),
+	.ss_audio_busy        (ss_audio_busy        ),
+	.ss_intreq            (ss_intreq            ),
+	.ss_intena            (ss_intena            ),
+	.ss_clut_active       (ss_clut_active       ),
+	.ss_clut_addr         (ss_clut_addr         ),
+	.ss_clut_rd_data      (ss_clut_rd_data      ),
+	.ss_clut_wr_en        (ss_clut_wr_en        ),
+	.ss_clut_wr_data      (ss_clut_wr_data      ),
+	.ss_reset_src_clr     (ss_reset_src_clr     ),
+	.ss_rga_addr          (ss_rga_addr          ),
+	.ss_rga_data          (ss_rga_data          ),
+	.ss_replay_we         (ss_replay_we         ),
+	.ss_replay_addr       (ss_replay_addr       ),
+	.ss_replay_data       (ss_replay_data       ),
+	.ss_replay_tick       (ss_replay_tick       ),
+	.ss_map               (ss_map               ),
+	// Restore side of the same four bits, in the same bit order. minimig.v
+	// applies [3] to ovl and [2] to gary's rom_readonly; [1:0] are
+	// combinational address decodes with no target -- see rtl/ss_state.vh.
+	.ss_map_in            (ss_fanout_map_in     ),
+	.ss_map_we            (ss_fanout_map_we     ),
+	.ss_cia_a             (ss_cia_a_raw         ),
+	.ss_cia_b             (ss_cia_b_raw         ),
+	.ss_cia_a_in          (ss_restored_cia_a_q  ),
+	.ss_cia_b_in          (ss_restored_cia_b_q  ),
+	.ss_cia_we            (ss_restored_cia_we   ),
+	.ss_vpos              (ss_beam_vpos         ),
+	.ss_hpos              (ss_beam_hpos         ),
+	.ss_vbl_int           (ss_beam_vbl_int      ),
+	.ss_htotal            (ss_beam_htotal       ),
+	.ss_varbeamen         (ss_beam_varbeamen    ),
+	.ss_harddis           (ss_beam_harddis      )
 );
+
+//////////////////////////  SAVE STATES (phase 1A)  /////////////////////////
+
+// Request source. menu.cpp's System page drives these: status[51] is the save
+// request, status[53:52] picks one of the four DDR3 slot windows the host maps
+// (user_io.cpp process_ss). The slot is written immediately before the request
+// and never while a save is running, so slot_base below is stable for the whole
+// dump.
+wire       ss_save_req_osd = status[51];
+wire [1:0] ss_slot         = status[53:52];
+// The restore request. status[54] is set by the "Restore state" row on
+// menu.cpp's AmigaCD Settings page (MENU_AMIGACD_SETTINGS1/2, menusub 6). The
+// two have to agree on the bit number or the row does nothing at all and says
+// nothing about it.
+wire       ss_load_req_osd = status[54];
+
+// *** fx68k lockout ***
+// cpu_wrapper's ss_* export is taken from cpu_inst_p (TG68K) unconditionally,
+// bypassing the cpucfg mux at cpu_wrapper.v:211. When cpucfg == 0 the running
+// CPU is fx68k, which has no equivalent export at all -- not the register
+// file, not PC, SR or USP -- so a state captured in that mode would describe a
+// CPU that is not executing. fx68k is deferred to a later phase, and until it
+// lands save states are refused rather than silently wrong. Gating the request
+// is enough: save_busy (and therefore freeze, the CPU park and every port
+// takeover below) can only ever rise out of ss_ctrl's S_IDLE on save_req.
+wire ss_supported   = |cpucfg;
+// *** the request is an EDGE, and it is made one HERE, not in userspace ***
+// ss_ctrl re-arms out of S_IDLE on any clock where save_req is high, and it
+// drops back to S_IDLE the moment a save finishes. Feeding it status[51] as a
+// LEVEL therefore starts the next save on the cycle after the previous one
+// ends, forever: the machine spends ~0.2 s frozen out of every ~0.2 s and the
+// Amiga never runs again. Userspace does clear the bit after setting it, but
+// that clear must not be what stands between the user and a wedged machine --
+// one dropped SPI write, one stalled menu task, or one .cfg that happens to
+// carry bit 51 set would be enough. So the one-shot is enforced in RTL.
+//
+// ss_save_pending is SET by the 0->1 edge of status[51] and CLEARED as soon as
+// ss_ctrl has taken the request (save_busy). It cannot re-trigger:
+//  - Holding status[51] high yields exactly one edge and therefore exactly one
+//    save; ss_save_req_d is 1 on every subsequent cycle, so ss_save_edge is 0.
+//  - The clear branches are ahead of the set branch, so an edge arriving while
+//    a save is already running is dropped, not queued.
+//  - save_busy stays high for the whole ~0.2 s dump and pending is cleared one
+//    clock after it rises, so by the time ss_ctrl is back in S_IDLE the request
+//    has been low for millions of cycles. S_IDLE only ever sees a request it
+//    just got a fresh edge for.
+//  - ss_save_req_d is clocked unconditionally, INCLUDING while reset_d is
+//    asserted, so a status bit that is already high when reset releases reads
+//    as a level, not as an edge, and does not fire a save.
+//
+// The latch is also what makes the CDTV sector-FIFO hold-off below work: that
+// state machine needs a request that stays asserted across several video
+// frames, which a bare one-cycle pulse could not provide.
+//
+// !ss_supported clears the latch rather than merely masking it downstream, so
+// a request made in an unsupported configuration is discarded outright instead
+// of lying in wait for the CPU to be switched back to TG68K.
+//
+// status[] is an hps_io register in clk_sys and this samples it in clk_114.
+// The two come off the same PLL at 4:1, so this is a timed path, not a CDC --
+// the same argument ss_dma_busy and cdtv_sec_empty_w already rely on. One SPI
+// update of the bit therefore produces exactly one clk_114 edge, at worst one
+// clk_114 cycle late.
+reg  ss_save_req_d;
+reg  ss_save_pending;
+wire ss_save_edge = ss_save_req_osd & ~ss_save_req_d;
+
+always @(posedge clk_114) begin
+	ss_save_req_d <= ss_save_req_osd;
+	if (reset_d || !ss_supported) ss_save_pending <= 1'b0;
+	else if (ss_save_busy)        ss_save_pending <= 1'b0;
+	else if (ss_save_edge)        ss_save_pending <= 1'b1;
+end
+
+// The raw request. ss_save_req itself is derived further down, after the
+// CDTV sector-FIFO hold-off (it needs ss_frame_tick, declared below).
+wire ss_save_req_raw = ss_save_pending;
+
+// Restore request, latched by exactly the same rules and for exactly the same
+// reasons -- ss_ctrl re-arms out of S_IDLE on any clock where load_req is
+// high, so a level would restore over and over and the Amiga would never run
+// again. Cleared on load_busy, which ss_ctrl raises the cycle it takes the
+// request. The ss_supported lockout applies unchanged: there is no way to
+// write fx68k's registers, so a restore in that mode would put chip RAM back
+// underneath a CPU whose own state was never restored -- worse than refusing.
+reg  ss_load_req_d;
+reg  ss_load_pending;
+wire ss_load_edge = ss_load_req_osd & ~ss_load_req_d;
+
+always @(posedge clk_114) begin
+	ss_load_req_d <= ss_load_req_osd;
+	if (reset_d || !ss_supported) ss_load_pending <= 1'b0;
+	else if (ss_load_busy)        ss_load_pending <= 1'b0;
+	else if (ss_load_edge)        ss_load_pending <= 1'b1;
+end
+
+wire ss_load_req_raw = ss_load_pending;
+
+// Sweep the TG68K register file read port while the CPU is parked. Sixteen
+// cycles at 28 MHz is 560 ns, which is nothing against the dump itself.
+//
+// This runs *before* the freeze, not during it: ss_serdes latches the entire
+// state vector on the one cycle ss_ctrl asserts save_start, which is a single
+// clock after quiesced, so a sweep that only started at freeze time would
+// serialise sixteen uninitialised registers. ss_save_busy parks the CPU at
+// its next instruction boundary (see cpu_wrapper's ss_arm), the sweep runs
+// there, and ss_regs_valid is what finally lets cpu_boundary go true.
+//
+// ss_load_busy is in here as well as ss_save_busy, and it has to be: it is
+// what makes cpu_boundary reachable at all on a restore. ss_quiesce will not
+// declare the machine quiesced without it, so a restore whose park condition
+// only looked at ss_save_busy would validate the file, request the freeze and
+// then time out with FAIL_QUIESCE every single time. The register sweep the
+// block below performs during a restore is harmless -- it is a read port, and
+// the values it lands in ss_cpu_d0..a7 are overwritten by the next save.
+//
+// The park point is the CPU's instruction boundary, not cpu_state==1. A
+// no-memaccess cycle is an internal step in the MIDDLE of an instruction: the
+// state captured there is half-executed, and restoring it derails the machine
+// even though the PC written back is exactly the one that was saved. That is
+// the whole of the reset-on-restore bug.
+//
+// ss_cpu_bus_settled is latched rather than used directly: the ready it
+// reports can be a single cycle, and the parked CPU never consumes it, so
+// sampling it live would deadlock the sixteen-cycle register sweep below.
+// The latch clears whenever the CPU is not on a boundary, so it can only be
+// set by a ready seen during THIS park.
+reg ss_cpu_settled_q;
+always @(posedge clk_sys) begin
+	if (!ss_cpu_at_boundary)     ss_cpu_settled_q <= 1'b0;
+	else if (ss_cpu_bus_settled) ss_cpu_settled_q <= 1'b1;
+end
+
+// ss_peek_busy belongs here for the same reason ss_load_busy does. The live
+// peek freezes the machine to borrow the SDRAM CPU port, and ss_quiesce will
+// not declare it quiesced without cpu_boundary, so a peek that was not in this
+// term reached S_PEEK_FREEZE, waited, and fell back to idle with freeze still
+// low -- every peek returning "not valid yet" and never a byte of memory.
+wire ss_cpu_parked = (ss_save_busy | ss_load_busy | ss_peek_busy)
+                     & ss_cpu_at_boundary & ss_cpu_settled_q;
+
+always @(posedge clk_sys) begin
+	if (!ss_cpu_parked) begin
+		ss_reg_index  <= 4'd0;
+		ss_regs_valid <= 1'b0;
+	end
+	else if (!ss_regs_valid) begin
+		case (ss_reg_index)
+		4'd0:  ss_cpu_d0 <= ss_reg_data;
+		4'd1:  ss_cpu_d1 <= ss_reg_data;
+		4'd2:  ss_cpu_d2 <= ss_reg_data;
+		4'd3:  ss_cpu_d3 <= ss_reg_data;
+		4'd4:  ss_cpu_d4 <= ss_reg_data;
+		4'd5:  ss_cpu_d5 <= ss_reg_data;
+		4'd6:  ss_cpu_d6 <= ss_reg_data;
+		4'd7:  ss_cpu_d7 <= ss_reg_data;
+		4'd8:  ss_cpu_a0 <= ss_reg_data;
+		4'd9:  ss_cpu_a1 <= ss_reg_data;
+		4'd10: ss_cpu_a2 <= ss_reg_data;
+		4'd11: ss_cpu_a3 <= ss_reg_data;
+		4'd12: ss_cpu_a4 <= ss_reg_data;
+		4'd13: ss_cpu_a5 <= ss_reg_data;
+		4'd14: ss_cpu_a6 <= ss_reg_data;
+		4'd15: ss_cpu_a7 <= ss_reg_data;
+		endcase
+		if (ss_reg_index == 4'd15) ss_regs_valid <= 1'b1;
+		ss_reg_index <= ss_reg_index + 4'd1;
+	end
+end
+
+// Gary's memory map state, unpacked into the names ss_state.vh uses.
+wire ss_ovl                = ss_map[3];
+wire ss_rom_readonly       = ss_map[2];
+wire ss_sel_kick1mb        = ss_map[1];
+wire ss_sel_kick256kmirror = ss_map[0];
+
+wire [`SS_STATE_W-1:0] ss_state_in = `SS_STATE_LIST;
+
+// Quiesce timeout reference. vbl is minimig's raw vertical blank, so it stops
+// once the chipset freezes -- which is fine, the timeout only matters before
+// the freeze.
+reg ss_vbl_d;
+always @(posedge clk_114) ss_vbl_d <= vbl;
+wire ss_frame_tick = vbl & ~ss_vbl_d;
+
+// The same edge, detected in clk_sys, for the frame COUNTER below.
+//
+// ss_frame_tick is a clk_114 pulse and the counter runs on clk_sys, which is
+// four times slower -- so an 8.8 ns pulse fell between clk_sys edges nearly
+// every time and the counter sat at zero on a perfectly healthy machine. It
+// read zero next to a saturated vbl_int and a vpos_max of 312, which is how it
+// was caught; before that it was taken as proof the display had stopped and
+// sent a diagnosis down the wrong path entirely.
+//
+// vbl is a clk_sys signal (minimig runs on clk_sys), so detecting the edge
+// there is not a crossing at all -- it is where it should have been. The
+// clk_114 copy stays: ss_quiesce runs on clk_114 and needs it in that domain.
+reg ss_vbl_sys_d;
+always @(posedge clk_sys) ss_vbl_sys_d <= vbl;
+wire ss_frame_tick_sys = vbl & ~ss_vbl_sys_d;
+
+// Vertical blanks between the restore and the reboot. Cleared when a restore
+// starts and frozen when the machine resets, so it answers both questions at
+// once: whether the chipset is running at all (nonzero) and how long the
+// machine survived (0 means it died inside a single frame, which rules out
+// anything that only goes wrong once per frame).
+always @(posedge clk_sys) begin
+	if (ss_reset_src_clr)                             ss_frame_count <= 8'd0;
+	else if (ss_frame_tick_sys
+	         && ss_frame_count != 8'hFF)              ss_frame_count <= ss_frame_count + 8'd1;
+end
+
+// --- CDTV sector-FIFO hold-off on the save request ---------------------------
+//
+// The freeze holds chipdma_arb off for the whole ~0.2 s chip RAM dump
+// (dma_hold), so cdtv_bridge's 8 KB sector FIFO cannot drain a single byte
+// while a save is running. Userspace throttles against the FIFO's free-space
+// credit (cdtv_bridge.sec_space, read back over the 0xF820 sub-channel), which
+// is what actually prevents byte loss. This hold-off is the cheap second half:
+// starting the freeze with the FIFO already drained hands userspace the full
+// 8 KB of headroom before it has to block, which at 1x (~150 KB/s) covers the
+// first ~53 ms of the dump for free and keeps the CD stream from visibly
+// stalling on a short save.
+//
+// It is deliberately a PREFERENCE, not a precondition. cdtv_bridge carries
+// leftover bytes in sec_fifo between DMA chunks by design (see the "No
+// dmac_dma gate" comment there), so "FIFO empty" is a state a healthy CDTV can
+// sit out of indefinitely -- gating the request on it outright would make
+// saves fail forever on some titles. The hold expires after SS_SEC_HOLD_FRAMES
+// video frames and the save proceeds regardless; correctness at that point
+// rests entirely on the userspace credit throttle, which is where it belongs.
+//
+// Inert on every non-CDTV configuration: cdtv_bridge's sec_wr_p / sec_rd_p
+// both reset to 0 and only move on a UIO sector push, so cdtv_sec_empty_w is
+// constantly 1 when nothing is streaming, ss_sec_go is set on the first clock
+// after the request and the request passes through with no delay at all.
+// cdtv_sec_empty_w is a clk_sys signal sampled here in clk_114; the two clocks
+// come off the same PLL at 4:1, so this is a timed path, not a CDC -- the same
+// argument ss_dma_busy already relies on below.
+//
+// ss_sec_go LATCHES the moment the hold-off is satisfied and stays latched
+// until the request itself drops. It must not be a live comparison: once the
+// freeze is up the FIFO stops draining and userspace immediately refills it, so
+// a live term would go false mid-dump, drop save_req and abort the save it was
+// meant to protect.
+//
+// A RESTORE freezes the machine for the same reasons and for a comparable
+// length of time, so it is held off by the same latch. The two requests share
+// it because they cannot be pending together: ss_ctrl serves one at a time and
+// each pending latch is cleared the cycle its own busy rises.
+localparam [3:0] SS_SEC_HOLD_FRAMES = 4'd4;
+
+wire ss_ss_req_raw = ss_save_req_raw | ss_load_req_raw;
+
+reg [3:0] ss_sec_wait;
+reg       ss_sec_go;
+always @(posedge clk_114) begin
+	if (reset_d || !ss_ss_req_raw) begin
+		ss_sec_wait <= 4'd0;
+		ss_sec_go   <= 1'b0;
+	end
+	else begin
+		if (ss_frame_tick && (ss_sec_wait != SS_SEC_HOLD_FRAMES))
+			ss_sec_wait <= ss_sec_wait + 4'd1;
+		if (cdtv_sec_empty_w || (ss_sec_wait == SS_SEC_HOLD_FRAMES))
+			ss_sec_go   <= 1'b1;
+	end
+end
+
+wire ss_save_req = ss_save_req_raw & ss_sec_go;
+wire ss_load_req = ss_load_req_raw & ss_sec_go;
+
+// Save state window: 0x3C000000, four 12 MB slots. DDRAM_ADDR is a 64-bit word
+// address, so the byte base is shifted right by three.
+//
+// 12 MB per slot, not 4: a machine with 8 MB of Zorro II fast RAM has 11.5 MB
+// of state, and every slot has to hold the largest case because the slot a
+// save lands in is the user's choice, not the payload's. The window moved down
+// from 0x3E000000 to fit four of them below 0x3F000000 -- the top 16 MB of
+// DDR3 is left alone, as it was before.
+//
+// This does not change which configurations can be saved. Zorro III fast RAM
+// still overlaps the window (Z3_1 covers 0x30000000-0x3FFFFFFF whatever the
+// window's base within it) and is still refused in the OSD; Zorro II sits at
+// 0x30000000-0x307FFFFF and is clear of it either way.
+//
+// The byte address must be written as a 32-bit literal, not the 29-bit one
+// the plan used: 0x3E000000 has bit 29 set, so 29'h3E000000 is truncated to
+// 0x1E000000 before the shift and the window lands at byte 0xF000000 --
+// below DDR3's valid base, and squarely inside fast RAM. The shifted result
+// does fit in 29 bits, which is why the destination width is still 29.
+localparam [28:0] SS_SLOT_BASE   = 29'h07800000;   // byte 0x3C000000 >> 3
+localparam [28:0] SS_SLOT_STRIDE = 29'h00180000;   // byte 0x00C00000 >> 3
+
+ss_ctrl #(.STATE_W(`SS_STATE_W), .CHIP_WORDS(24'h100000)) savestate
+(
+	.clk          (clk_114),
+	.rst_n        (~reset_d),
+	.slot_base    (SS_SLOT_BASE + SS_SLOT_STRIDE * ss_slot),
+
+	.save_req     (ss_save_req),
+	.save_busy    (ss_save_busy),
+	// Outcomes. All five are levels, held until the next attempt starts, and
+	// all five reach the user as an OSD toast -- see the ss_info_* block after
+	// this instance. An unconnected outcome makes a refusal silent, which is
+	// the exact failure mode the fail codes exist to remove.
+	.save_ok      (ss_save_ok),
+	.save_fail    (ss_save_fail),
+
+	// The restore path is live end to end: the OSD's "Restore state" row sets
+	// status[54], the edge latch above turns it into one request, the DDR3
+	// read master below is real, and the state vector reaches the machine
+	// through ss_state_fanout at the bottom of this file.
+	.load_req     (ss_load_req),
+	.load_busy    (ss_load_busy),
+	.load_ok      (ss_load_ok),
+	.load_fail    (ss_load_fail),
+	.load_fail_code(ss_load_fail_code),
+
+	.state_in     (ss_state_in),
+	.state_out    (ss_state_out),
+	.state_we     (ss_state_we),
+
+	// cpu_boundary carries three extra conditions beyond "the CPU is parked".
+	// ss_regs_valid, because the register sweep must be complete before the
+	// vector is latched (see above). ss_ram_idle, because a DDR3 read already
+	// accepted for master 0 returns its data out of band, and taking master 0
+	// away in that window would lose the readdatavalid pulse -- see
+	// ddram_ctrl.v. ~ss_dma_busy, because chipdma_arb is a chip RAM WRITE
+	// master for the Akiko and CDTV bridges and neither is stopped by the CPU
+	// park or the chipset freeze; freezing with one of their slots
+	// half-committed would put a write into chip RAM at an unknown point
+	// relative to the dump. None of the three is a property of the CPU, but
+	// cpu_boundary is the only input ss_quiesce has left for "not yet".
+	//
+	// ~ss_dma_busy closes the freeze INSTANT only. The rest of the ~0.2 s
+	// dump is closed by chipdma_arb's dma_hold input (tied to ss_freeze_7m
+	// above), which stops the arbiter granting any further bridge slot. The
+	// two together are what make the snapshot self-consistent; either alone
+	// only moves the tear.
+	//
+	// ss_dma_busy is a clk_sys signal sampled here in clk_114. So are
+	// ss_blit_busy / ss_disk_busy / ss_audio_busy (minimig.v runs on
+	// clk_sys): the two clocks come from the same PLL at 4:1, so these are
+	// timed paths, not CDCs.
+	.blit_busy    (ss_blit_busy),
+	.disk_busy    (ss_disk_busy),
+	.audio_busy   (ss_audio_busy),
+	// ss_akiko_idle rides along in cpu_boundary rather than getting its own
+	// port: ss_quiesce takes a single "not yet" term and the reason a freeze
+	// is refused is uniform from its point of view. What it adds is that no
+	// Akiko engine is mid-transfer and no sector or subcode block is staged,
+	// which is what lets the state vector carry Akiko's registers and leave
+	// its buffers out. akiko.v's ss_idle has the argument in full.
+	.cpu_boundary (ss_cpu_parked & ss_regs_valid & ss_ram_idle & ~ss_dma_busy
+	               & ss_akiko_idle),
+	.frame_tick   (ss_frame_tick),
+	.freeze       (ss_freeze),
+
+	.chip_base    (24'h000000),
+
+	// Zorro II fast RAM present. Taken from the CONFIGURATION rather than
+	// from cpu_wrapper's z2ram_ena, which only goes high once Kickstart has
+	// autoconfigured the board: that would make the payload length change
+	// part-way through a boot, so two saves in one session could disagree
+	// about it and the second could not be restored over the first.
+	//
+	// The decode mirrors cpu_wrapper's ac_memcard. On 68020 the three bits are
+	// used as-is and bit 2 selects a Zorro III board; on 68000 a set bit 2 is
+	// folded down to the 8 MB Zorro II entry, so any non-zero value is Z2.
+	.fast_ena     (cpu_type ? (~memcfg[6] & |memcfg[5:4]) : (|memcfg[6:4])),
+
+	// Kickstart fingerprint. See SS_KICK_BASE for the derivation and
+	// ss_port_own for the mux this output drives. KICK_WORDS keeps its 512 KB
+	// default, which is exactly the $F80000-$FFFFFF region SS_KICK_BASE points
+	// at.
+	.kick_base    (SS_KICK_BASE),
+	.rom_scan     (ss_rom_scan),
+	.cache_flush  (ss_cache_flush),
+	.clut_active  (ss_clut_active),
+	.clut_addr    (ss_clut_addr),
+	.clut_rd_data (ss_clut_rd_data),
+	.clut_wr_en   (ss_clut_wr_en),
+	.clut_wr_data (ss_clut_wr_data),
+
+	// Chipset register shadow. See ss_regshadow above.
+	.shadow_rd_addr (ss_shadow_rd      ),
+	.shadow_rd_data (ss_shadow_data    ),
+	.shadow_ld_we   (ss_shadow_ld_we   ),
+	.shadow_ld_addr (ss_shadow_ld_addr ),
+	.shadow_ld_data (ss_shadow_ld_data ),
+	.replay_start   (ss_replay_start   ),
+	.replay_done    (ss_replay_done    ),
+
+	.sd_addr      (ss_sd_addr),
+	.sd_cs        (ss_sd_cs),
+	.sd_state     (ss_sd_state),
+	.sd_uds_n     (ss_sd_uds_n),
+	.sd_lds_n     (ss_sd_lds_n),
+	.sd_cache_inhibit(ss_sd_cache_inhibit),
+	.sd_wr        (ss_sd_wr),
+	.sd_rd        (ram_dout1),
+	.sd_ready     (ram_ready1),
+
+	.ddr_address  (ss_ddr_address),
+	.ddr_writedata(ss_ddr_writedata),
+	.ddr_byteenable(ss_ddr_byteenable),
+	.ddr_write    (ss_ddr_write),
+	// The read master is real: ddram_ctrl grants master 0 to the savestate
+	// port for the whole of a restore (see its ss_port_own), and returns the
+	// beat on ss_readdatavalid. All three go together with load_req -- the
+	// read step in ss_ctrl has no watchdog, so a half-wiring parks the
+	// machine rather than failing it.
+	.ddr_read     (ss_ddr_read),
+	.ddr_readdata (ss_ddr_readdata),
+	.ddr_readdatavalid(ss_ddr_readdatavalid),
+	.ddr_waitrequest(ss_ddr_waitrequest),
+
+	.dbg_state    (ss_dbg_state),
+	.dbg_idx      (ss_dbg_idx),
+	// Advisory: a restore ran with a Kickstart fingerprint that did not
+	// match the file's. The gate is off while the scan is untrustworthy;
+	// this is how the host still hears about it.
+	.dbg_kick_warn(ss_dbg_kick_warn),
+	// Live peek. The address is stable for as long as the request stands,
+	// so it crosses without synchronising; only the pulse needs care.
+	.peek_req(ss_peek_req_114),
+	.peek_addr(ss_peek_addr),
+	.peek_data(ss_peek_data),
+	.peek_valid(ss_peek_valid),
+	.peek_busy(ss_peek_busy),
+	.peek_scan(ss_peek_scan),
+	.cpu_pc(ss_pc),
+	.pc_snapshot(ss_pc_snapshot),
+	.kick_pair(ss_kick_pair),
+	.dbg_kick_unstable(ss_dbg_kick_unstable)
+);
+
+// --- outcome toast -----------------------------------------------------------
+//
+// Every save and every restore ends by naming what happened, in words, on the
+// OSD. Without this a refusal is a no-op the user cannot tell from a row that
+// did nothing: the fail codes exist precisely so that "it didn't work" can be
+// "this state was made under a different Kickstart", and a code that reaches no
+// display is a code that was never computed.
+//
+// The transport is the framework's own: hps_io latches `info` on a rising edge
+// of `info_req` and holds it until user_io.cpp's once-a-second UIO_INFO_GET
+// poll reads and clears it (hps_io.sv:296,337); show_core_info() then indexes
+// the CONF_STR "I" line by that number and calls Info(). So the strings live in
+// CONF_STR at the top of this file and no host code changes at all -- which
+// matters, because there is no local ARM toolchain to compile host changes
+// against.
+//
+// This runs in clk_sys, hps_io's domain, sampling ss_ctrl's clk_114 levels.
+// Same-PLL 4:1, so these are timed paths and not CDCs -- the same argument
+// ss_dma_busy and cdtv_sec_empty_w already rely on. Levels, not pulses, is what
+// makes sampling at the slower rate sound: each one is held until the next
+// request starts, which is millions of cycles.
+localparam [7:0] SS_INFO_BASE = 8'd13;   // "Save state saved" -- see CONF_STR
+
+reg  [7:0] ss_info_code;
+reg        ss_info_req;
+// ss_ctrl runs on clk_114; this block runs on clk_sys at 28.6 MHz, so its four
+// outcome signals are a clock-domain crossing. They used to be sampled straight
+// into the edge-detect flops with no synchroniser at all.
+//
+// Two things had to be true for a toast to appear and neither was. The outcome
+// had to be a LEVEL -- a single 8.8 ns clk_114 pulse is invisible to a 35 ns
+// sampler, and ss_ctrl's save_ok was exactly that until it was changed to hold
+// until the next save. And the crossing had to be synchronised. Measured on
+// hardware: the core's toast never fired for either a save or a restore, so a
+// restore that validated and refused looked identical to one that never ran.
+//
+// The fail code comes from its own synchronised copy. It is set in the same
+// clk_114 cycle as load_fail and held just as long, so by the time the
+// synchronised flag edge arrives it has been stable for two clk_sys cycles.
+reg  [3:0] ss_out_meta, ss_out_sync, ss_out_d;
+reg  [3:0] ss_code_meta, ss_code_sync;
+// Sticky advisory bit from ss_ctrl (clk_114), two-flopped into clk_sys like
+// the outcomes beside it. It only ever goes 0 -> 1, so there is nothing to
+// miss between samples.
+reg        ss_kick_warn_meta, ss_kick_warn_sync;
+
+always @(posedge clk_sys) begin
+	ss_info_req  <= 1'b0;
+
+	ss_out_meta  <= {ss_load_fail, ss_load_ok, ss_save_fail, ss_save_ok};
+	ss_out_sync  <= ss_out_meta;
+	ss_out_d     <= ss_out_sync;
+
+	ss_code_meta <= ss_load_fail_code;
+	ss_code_sync <= ss_code_meta;
+
+	ss_kick_warn_meta <= ss_dbg_kick_warn;
+	ss_kick_warn_sync <= ss_kick_warn_meta;
+
+	// At most one of the four can rise on a given cycle: ss_ctrl serves one
+	// request at a time and clears the previous attempt's outcomes when it
+	// takes the next, so the priority below never actually arbitrates.
+	if (ss_out_sync[0] & ~ss_out_d[0]) begin
+		ss_info_code <= SS_INFO_BASE;
+		ss_info_req  <= 1'b1;
+	end
+	else if (ss_out_sync[1] & ~ss_out_d[1]) begin
+		ss_info_code <= SS_INFO_BASE + 8'd1;
+		ss_info_req  <= 1'b1;
+	end
+	else if (ss_out_sync[2] & ~ss_out_d[2]) begin
+		ss_info_code <= SS_INFO_BASE + 8'd2;
+		ss_info_req  <= 1'b1;
+	end
+	else if (ss_out_sync[3] & ~ss_out_d[3]) begin
+		// Codes 1..6 map straight onto the six strings after "restored"; a code
+		// this build does not know about still says something rather than
+		// indexing off the end of the list into silence.
+		ss_info_code <= (ss_code_sync >= 4'd1 && ss_code_sync <= 4'd6)
+		                ? (SS_INFO_BASE + 8'd2 + {4'd0, ss_code_sync})
+		                : (SS_INFO_BASE + 8'd9);
+		ss_info_req  <= 1'b1;
+	end
+end
+
+// --- diagnostic readback -----------------------------------------------------
+//
+// Everything above this line is invisible from userspace. A save that never
+// started, a restore refused at its first gate, a restore that ran the whole
+// sequence and then crashed the Amiga, and a toast that was raised and never
+// displayed all present identically: nothing on screen and nothing in any log.
+// This block publishes enough of ss_ctrl's internals -- and of this file's own
+// toast request -- to tell those apart, on hps_ext's 0xF600 UIO read
+// sub-channel. support/minimig/minimig_ssdiag.cpp polls it and logs changes to
+// /tmp/ss_dbg.log.
+//
+// WHY THE AGGREGATION IS IN RTL. ss_ctrl runs at 113.5 MHz and most of the
+// states it passes through last a handful of clocks. A poller sampling
+// dbg_state alone would see S_IDLE essentially always, and would report
+// "nothing happened" for a restore that ran to the last gate and was refused
+// there. So the last non-idle state and a state-change counter are latched
+// here, at the rate the events actually happen. The counter is what separates a
+// stalled controller (state stuck, counter stuck) from a busy one (state stuck,
+// counter climbing) from one that was never asked (both at their reset values).
+//
+// It is deliberately independent of info_req. That path is one of the things
+// being diagnosed, and a diagnostic carried on the channel it is meant to
+// diagnose cannot tell its own silence from the fault.
+//
+// Cheap enough to leave in: two counters, two latches, one 64-bit
+// synchroniser, no logic in any path ss_ctrl depends on, and a read that
+// hps_ext answers from a byte_cnt mux with no side effects at all.
+
+// --- clk_114 side ---
+reg  [5:0]  ss_dbg_last;      // last state that was not S_IDLE
+reg  [5:0]  ss_dbg_state_d;
+reg  [15:0] ss_dbg_seq;       // one increment per ss_ctrl state change
+reg  [7:0]  ss_dbg_ffall;     // falling edges of freeze
+reg         ss_dbg_freeze_d;
+
+always @(posedge clk_114) begin
+	if (reset_d) begin
+		ss_dbg_last     <= 6'd0;
+		ss_dbg_state_d  <= 6'd0;
+		ss_dbg_seq      <= 16'd0;
+		ss_dbg_ffall    <= 8'd0;
+		ss_dbg_freeze_d <= 1'b0;
+	end
+	else begin
+		ss_dbg_state_d  <= ss_dbg_state;
+		ss_dbg_freeze_d <= ss_freeze;
+
+		if (ss_dbg_state != ss_dbg_state_d) ss_dbg_seq <= ss_dbg_seq + 16'd1;
+
+		// S_IDLE is 0, and ss_ctrl returns to it whether it finished, refused
+		// or failed -- so the live state says nothing at all once an attempt is
+		// over. This is the register that makes a refusal legible after the
+		// fact.
+		if (ss_dbg_state != 6'd0) ss_dbg_last <= ss_dbg_state;
+
+		// The restore's own invariant, counted rather than assumed: the freeze
+		// must fall exactly once per restore (see ss_ctrl.v's S_L_RELEASE). More
+		// than once means the Amiga ran for a few instructions against a machine
+		// that was half old and half new, which is a live candidate explanation
+		// for a restore that completes and then crashes.
+		if (!ss_freeze && ss_dbg_freeze_d) ss_dbg_ffall <= ss_dbg_ffall + 8'd1;
+	end
+end
+
+// --- clk_sys side ---
+//
+// The toast path, watched from inside hps_io's own clock domain. ss_info_cnt
+// counts every request this file has raised since reset and ss_info_last holds
+// the code the most recent one carried: that is the "did the core ever ask?"
+// half of the toast question. The other half -- did the host see it -- is
+// answered by minimig_ssdiag.cpp logging what UIO_INFO_GET returned, into the
+// same file on the same timeline.
+//
+// ss_info_code is assigned on the same clk_sys edge that raises ss_info_req, so
+// by the time this block sees the request high, the code beside it is the one
+// that request carries.
+reg [7:0] ss_info_cnt   = 8'd0;
+reg [7:0] ss_info_last  = 8'd0;
+
+// ss_state_fanout completions. A restore whose register writeback never
+// finished leaves the CPU running with someone else's PC, which the state
+// vector's own progress cannot show. ack is a LEVEL held until req drops (see
+// ss_state_fanout below), so this counts its rising edge, not its cycles.
+reg [7:0] ss_fanout_cnt = 8'd0;
+reg       ss_fanout_ack_d = 1'b0;
+
+always @(posedge clk_sys) begin
+	ss_fanout_ack_d <= ss_fanout_ack;
+	if (ss_info_req) begin
+		ss_info_cnt  <= ss_info_cnt + 8'd1;
+		ss_info_last <= ss_info_code;
+	end
+	if (ss_fanout_ack && !ss_fanout_ack_d) ss_fanout_cnt <= ss_fanout_cnt + 8'd1;
+end
+
+// --- crossing ---
+//
+// clk_114 to clk_sys, the same 4:1 same-PLL relationship the outcome sampler
+// above documents. Double-registered anyway, and as ONE vector rather than
+// field by field, so a sample taken across a change is at worst one stale
+// snapshot of a consistent set rather than a mixture of two moments. These are
+// diagnostics: a stale sample costs one log line, and the poller only logs on
+// change, so a torn value could not be mistaken for a sequence.
+wire [63:0] ss_dbg114 = { ss_rom_scan, ss_freeze, ss_load_busy, ss_save_busy,
+                          ss_dbg_ffall, ss_dbg_idx, ss_dbg_seq,
+                          ss_dbg_last, ss_dbg_state };
+
+reg [63:0] ss_dbg_meta = 64'd0;
+reg [63:0] ss_dbg_sync = 64'd0;
+always @(posedge clk_sys) begin
+	ss_dbg_meta <= ss_dbg114;
+	ss_dbg_sync <= ss_dbg_meta;
+end
+
+wire [5:0]  ss_dg_state = ss_dbg_sync[5:0];
+wire [5:0]  ss_dg_last  = ss_dbg_sync[11:6];
+wire [15:0] ss_dg_seq   = ss_dbg_sync[27:12];
+wire [23:0] ss_dg_idx   = ss_dbg_sync[51:28];
+wire [7:0]  ss_dg_ffall = ss_dbg_sync[59:52];
+wire [3:0]  ss_dg_flags = ss_dbg_sync[63:60];  // {rom_scan, freeze, load_busy, save_busy}
+
+// The window, low word first. hps_ext presents ss_diag[15:0] as the first word
+// after the signature, so the last term of this concatenation is word 0.
+// minimig_ssdiag.cpp decodes exactly this layout; SS_DIAG_VERSION is bumped if
+// it ever changes, so a poller and a core that disagree say so instead of
+// printing a confident wrong answer.
+localparam [15:0] SS_DIAG_VERSION = 16'h0001;
+
+assign ss_diag = {
+	SS_DIAG_VERSION,                                    // w7: layout version
+	ss_info_cnt, ss_info_last,                          // w6: toast requests / last code
+	ss_dg_ffall, ss_fanout_cnt,                         // w5: freeze falls / fanout completions
+	{8'd0, ss_dg_idx[23:16]},                           // w4: progress index, high
+	ss_dg_idx[15:0],                                    // w3: progress index, low
+	ss_dg_seq,                                          // w2: state-change counter
+	{3'd0, ss_kick_warn_sync, ss_dg_flags,
+	       ss_code_sync, ss_out_sync},                  // w1: flags / fail code / outcomes
+	{2'd0, ss_dg_last, 2'd0, ss_dg_state}               // w0: last state / live state
+};
+
+// --- restore fan-out ---------------------------------------------------------
+//
+// ss_ctrl runs on clk_114; the CPU and minimig.v run on clk_sys, a quarter of
+// it. state_we is a single clk_114 pulse, which a clk_sys edge would miss
+// three times out of four, so it is turned into a level here and handed over
+// with a request/ack pair. The vector itself needs no latch: ss_serdes holds
+// state_out in a register until the next load.
+reg ss_fanout_req;
+always @(posedge clk_114) begin
+	if (reset_d)             ss_fanout_req <= 1'b0;
+	else if (ss_fanout_ack)  ss_fanout_req <= 1'b0;
+	else if (ss_state_we)    ss_fanout_req <= 1'b1;
+end
+
+// ORDERING NOTE. ss_ctrl does not wait for this fan-out; it goes straight from
+// the state vector to the chip RAM writeback. That is safe by a wide margin
+// rather than by construction: the fan-out is 23 clk_sys cycles (~0.8 us) and
+// the chip RAM pass that follows it is a million SDRAM word writes (~ms), so
+// the registers are always in place long before the freeze is released. The
+// property that actually matters -- the CPU must not execute against a
+// half-written register file -- is enforced independently, by ss_fanout_busy
+// holding cpu_wrapper's ss_arm past ss_ctrl's release.
+ss_state_fanout #(.STATE_W(`SS_STATE_W)) ss_fanout
+(
+	.clk          (clk_sys),
+	.rst_n        (~reset_d),
+	.req          (ss_fanout_req),
+	.ack          (ss_fanout_ack),
+	.state        (ss_state_out),
+
+	.cpu_wr_index (ss_fanout_wr_index),
+	.cpu_wr_data  (ss_fanout_wr_data),
+	.cpu_wr_en    (ss_fanout_wr_en),
+	.cpu_pc_wr    (ss_fanout_pc_wr),
+	.cpu_sr_wr    (ss_fanout_sr_wr),
+	.cpu_usp_wr   (ss_fanout_usp_wr),
+	.cpu_vbr_wr   (ss_fanout_vbr_wr),
+	.cpu_cacr_wr  (ss_fanout_cacr_wr),
+	.cpu_resume   (ss_fanout_resume),
+
+	.map_in       (ss_fanout_map_in),
+	.map_we       (ss_fanout_map_we),
+	.intreq_out   (ss_restored_intreq),
+	.cia_a_out    (ss_restored_cia_a),
+	.cia_b_out    (ss_restored_cia_b),
+	.cia_we       (ss_restored_cia_we),
+	.akiko_out    (ss_restored_akiko),
+	.akiko_we     (ss_restored_akiko_we),
+
+	.busy         (ss_fanout_busy)
+);
+/////////////////////////////////////////////////////////////////////////////
+
 
 // power led control
 wire pwr_led;
@@ -1370,7 +2709,10 @@ end
 
 ////////////////////////////  MT32pi  ////////////////////////////////// 
 
-wire        mt32_reset    = status[32] | reset;
+// Reset MT32-pi when the user port changes hands, so it does not keep
+// driving state onto a bus it no longer owns.
+reg         userport_change_reset;
+wire        mt32_reset    = status[32] | reset | userport_change_reset;
 wire        mt32_disable  = status[33];
 wire        mt32_mode_req = status[34];
 wire  [1:0] mt32_rom_req  = status[36:35];
@@ -1391,10 +2733,18 @@ wire mt32_mute = mt32_available &  mt32_disable;
 mt32pi mt32pi
 (
 	.*,
+	.USER_OUT(IndirectUserOutmt32),
 	.CE_PIXEL(ce_pix_mt32),
 	.reset(mt32_reset),
 	.midi_tx(midi_tx | mt32_mute)
 );
+
+always @(posedge clk_sys) begin
+	reg [1:0] last_userport_mode;
+	userport_change_reset <= 0;
+	last_userport_mode <= user_port_mode;
+	if (last_userport_mode != user_port_mode) userport_change_reset <= 1;
+end
 
 wire  [4:0] mt32_cfg = (mt32_mode == 'hA2) ? {mt32_sf[2:0],  2'b10} :
                        (mt32_mode == 'hA1) ? {mt32_rom[1:0], 2'b01} : 5'd0;
@@ -1526,12 +2876,24 @@ cdda #(28375160) cdda
 	.AUDIO_R(cdda_r)
 );
 
+wire [10:0] cdda_gain = (cdtv_mode && cdtv_cdda_volume_valid_w) ? {1'b0, cdtv_cdda_volume_w} : 11'd1023;
+
+reg signed [15:0] cdda_sl, cdda_sr;
+always @(posedge CLK_AUDIO) begin
+	reg signed [26:0] pl, pr;
+
+	pl = $signed(cdda_l) * $signed(cdda_gain);
+	pr = $signed(cdda_r) * $signed(cdda_gain);
+	cdda_sl <= pl[25:10];
+	cdda_sr <= pr[25:10];
+end
+
 reg [15:0] out_l, out_r;
 always @(posedge CLK_AUDIO) begin
 	reg [16:0] tmp_l, tmp_r;
 
-	tmp_l <= {aud_l[15],aud_l} + {toccata_aud_left[15],toccata_aud_left} + (mt32_mute ? 17'd0 : {mt32_i2s_l[15],mt32_i2s_l}) + {cdda_l[15], cdda_l};
-	tmp_r <= {aud_r[15],aud_r} + {toccata_aud_right[15],toccata_aud_right} + (mt32_mute ? 17'd0 : {mt32_i2s_r[15],mt32_i2s_r}) + {cdda_r[15], cdda_r};
+	tmp_l <= {aud_l[15],aud_l} + {toccata_aud_left[15],toccata_aud_left} + (mt32_mute ? 17'd0 : {mt32_i2s_l[15],mt32_i2s_l}) + {cdda_sl[15], cdda_sl};
+	tmp_r <= {aud_r[15],aud_r} + {toccata_aud_right[15],toccata_aud_right} + (mt32_mute ? 17'd0 : {mt32_i2s_r[15],mt32_i2s_r}) + {cdda_sr[15], cdda_sr};
 
 	// clamp the output
 	out_l <= (^tmp_l[16:15]) ? {tmp_l[16], {15{tmp_l[15]}}} : tmp_l[15:0];
@@ -1543,3 +2905,10 @@ assign AUDIO_L = out_l;
 assign AUDIO_R = out_r;
 
 endmodule
+
+
+// The restore fan-out -- ss_state_fanout, which walks the state vector back
+// into the CPU register file and Gary's map -- is instantiated above and
+// defined in rtl/ss_state_fanout.v. It was written here and lived here, which
+// meant nothing could simulate it without the whole top level.
+

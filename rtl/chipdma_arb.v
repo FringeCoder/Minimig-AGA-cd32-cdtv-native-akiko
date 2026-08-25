@@ -38,7 +38,7 @@
 //
 // Priority: combinational gating gives minimig priority on every cycle.
 // We never override chip_in_dma when minimig has it asserted -- our
-// arb_drive is masked by ~minimig_busy. This prevents a stale view of
+// arb_drive is masked by minimig_idle. This prevents a stale view of
 // chip_in_dma from corrupting a slot minimig is about to use (the v8
 // hardware regression that caused screen flicker).
 //
@@ -80,7 +80,7 @@ module chipdma_arb
 	// the port is symmetrical to keep the diff minimal.
 	input             cdtv_dma_req,
 	input             cdtv_dma_we,
-	input      [23:0] cdtv_dma_baddr,
+	input      [31:0] cdtv_dma_baddr,
 	input       [7:0] cdtv_dma_wbyte,
 	output      [7:0] cdtv_dma_rbyte,
 	output            cdtv_dma_ack,
@@ -112,6 +112,35 @@ module chipdma_arb
 	output            ddr_out_cs,
 	output     [15:0] ddr_out_wr,
 	input             ddr_in_ack,
+	// --- Save state hold / busy handshake -------------------------------
+	//
+	// dma_hold: while high the arbiter refuses to CLAIM a new slot for
+	// either bridge master. A slot already armed or in flight is allowed
+	// to finish; nothing new starts. The bridge masters keep their req
+	// asserted (the protocol holds req until ack), so no transfer is lost
+	// -- each is simply deferred until the hold drops.
+	//
+	// This is what keeps a chip RAM snapshot self-consistent. The dump
+	// reads 2 MB through sdram_ctrl's CPU port and takes ~0.2 s, during
+	// which the chipset is frozen but the Akiko / CDTV bridges are NOT --
+	// their sector DMA is driven by the HPS, which knows nothing about the
+	// freeze. Without this gate a CD sector transfer landing mid-dump
+	// rewrites chip RAM behind ss_dma and the snapshot is torn.
+	//
+	// Quiescing only at freeze entry is not enough on its own for exactly
+	// that reason: the window is 0.2 s wide, not one cycle. dma_busy below
+	// closes the entry instant, dma_hold closes the rest of the window.
+	input             dma_hold,
+	//
+	// dma_busy: high whenever a bridge slot is being armed or is in
+	// flight, so the save state quiescer can pick a freeze instant with no
+	// bridge transfer outstanding. arm_now is included, not just
+	// state != S_IDLE: the arming cycle already drives chip_out_* at
+	// sdram_ctrl combinationally, one clk_sys edge before `state` moves to
+	// S_DRIVE, so a busy flag built from `state` alone reads idle while a
+	// write is being committed.
+	output            dma_busy,
+
 	// Read return path. ddr_in_rd is the 16-bit word captured by ddram_ctrl
 	// at the same time it raises ddr_in_ack on a read. Data is stable for
 	// many sysclks before the level-ack arrives, so the 2-FF ack sync is
@@ -165,7 +194,10 @@ reg        ak_baddr0;   // byte selector for read demux
 //     ram1 vs ram2 from the master's 24-bit byte address + AC state.
 //     Latched at arm_now alongside ak_addr; held through the slot.
 reg        ak_is_ddr;
-reg [28:1] ak_ddr_addr;
+// Set when the latched address decodes to no memory at all. Such a slot must
+// not be driven onto the chip bus -- a truncated Z3 address used to land on
+// the vector table instead.
+reg        ak_unmapped;
 
 // --- Registered DDR3 bus driven from clk_sys to ddram_ctrl
 //     (clk_114). All six lines latched at arm_now and held until the
@@ -235,7 +267,6 @@ assign cdtv_dma_ack    = cdtv_ack_r;
 //     scheduler). At sdram_ctrl's sample point this value reflects
 //     the current slot.
 wire minimig_idle = chip_in_dma & chip_in_rw;
-wire minimig_busy = ~minimig_idle;
 
 // --- pending_req: either master wants the bus. Selector picks akiko if
 //     both raise simultaneously (static priority).
@@ -244,15 +275,26 @@ wire arming_is_cdtv = ~akiko_dma_req_q & cdtv_dma_req_q;
 
 // Live master-side inputs at the arming edge (combinational pick).
 wire        live_we     = arming_is_cdtv ? cdtv_dma_we    : akiko_dma_we;
-wire [23:0] live_baddr  = arming_is_cdtv ? cdtv_dma_baddr : akiko_dma_baddr;
+wire [31:0] live_baddr  = arming_is_cdtv ? cdtv_dma_baddr : {8'h00, akiko_dma_baddr};
 wire  [7:0] live_wbyte  = arming_is_cdtv ? cdtv_dma_wbyte : akiko_dma_wbyte;
 
 // --- arm_now: combinational claim at the c_7m_rise edge. Drives
 //     chip_out_dma=0 within the same clk_sys edge, in time for
 //     sdram_ctrl to see it ~8.7 ns later (the existing minimig path
 //     fits the same budget the same way). Gated by minimig_idle so we
-//     never preempt the chipset.
-wire arm_now = (state == S_IDLE) & c_7m_rise & minimig_idle & any_req;
+//     never preempt the chipset. Also gated by ~dma_hold so a save state
+//     freeze stops new bridge claims for the whole chip RAM dump (see the
+//     dma_hold port comment).
+//
+//     dma_hold matters here specifically because minimig_idle goes STATIC
+//     once the chipset timebase is frozen: chip_in_dma / chip_in_rw stop
+//     changing, so whatever they held at the freeze instant is what
+//     minimig_idle reads for the next 0.2 s. If that value happens to be
+//     "idle" the bridge would otherwise have unrestricted access to every
+//     slot for the entire dump.
+wire arm_now = (state == S_IDLE) & c_7m_rise & minimig_idle & any_req & ~dma_hold;
+
+assign dma_busy = (state != S_IDLE) | arm_now;
 
 // --- arb_request: we want to be on the bus this cycle. Either we
 //     just armed combinationally, or we are mid-slot (S_DRIVE).
@@ -262,7 +304,7 @@ wire arb_request = arm_now | (state == S_DRIVE);
 //     freeze the serving engine (arm_now picks akiko when ~arming_is_cdtv).
 assign akiko_arm = arm_now & ~arming_is_cdtv;
 
-// --- arb_drive: the actual override. Masked by minimig_busy on EVERY
+// --- arb_drive: the actual override. Masked by minimig_idle on EVERY
 //     cycle so a slot minimig grabs (e.g. across a c_7m boundary into
 //     the next slot) wins immediately. arb_request is registered for
 //     subsequent cycles, so we keep driving as long as minimig stays
@@ -292,11 +334,12 @@ wire        router_zram_sel;
 
 memory_router u_router
 (
-	.cpu_addr      ({8'h00, live_baddr}),  // 24-bit byte addr → 32 bits, top byte 0
+	.cpu_addr      (live_baddr),
 	.cchip         (1'b0),
 	.ckick         (1'b0),
 	.wr            (1'b0),
 	.bootrom       (1'b0),
+	.cdtv_mode     (1'b0),          // only gates sel_kickram, which ckick=0 already kills
 	.z2ram_ena     (z2ram_ena),
 	.z3ram_base0   (z3ram_base0),
 	.z3ram_ena0    (z3ram_ena0),
@@ -322,10 +365,16 @@ memory_router u_router
 // timing dependency, so combinational is unnecessary).
 wire        is_ddr_now   = arm_now ? router_zram_sel : ak_is_ddr;
 
+// Anything above the 24-bit chip window that the router did not claim for
+// fast RAM decodes to nothing. Driving it onto the chip bus aliases it back
+// into chip RAM, which is how a Z3 write reached the vector table.
+wire        addr_unmapped   = |live_baddr[31:24] & ~router_zram_sel;
+wire        is_unmapped_now = arm_now ? addr_unmapped : ak_unmapped;
+
 // SDRAM (ram1) override only fires when the slot routes to ram1. This
 // path keeps the original combinational shape because sdram_ctrl samples
 // on the same clk_sys edge as arm_now (8.7 ns budget).
-wire arb_drive_chip = arb_drive & ~is_ddr_now;
+wire arb_drive_chip = arb_drive & ~is_ddr_now & ~is_unmapped_now;
 
 assign chip_out_addr = arb_drive_chip ? ak_addr_w    : chip_in_addr;
 assign chip_out_l    = arb_drive_chip ? ak_l_w       : chip_in_l;
@@ -354,6 +403,7 @@ always @(posedge clk) begin
 		ak_rbyte_r     <= 8'h00;
 		active_is_cdtv <= 1'b0;
 		ak_is_ddr      <= 1'b0;
+		ak_unmapped    <= 1'b0;
 		dma_ddr_cs_r   <= 1'b0;
 		dma_ddr_we_r   <= 1'b1;  // safe default — bridge was write-only before this fix
 	end else begin
@@ -371,7 +421,7 @@ always @(posedge clk) begin
 				ak_we          <= live_we;
 				ak_baddr0      <= live_baddr[0];
 				ak_is_ddr      <= router_zram_sel;
-				ak_ddr_addr    <= router_ramaddr;
+				ak_unmapped    <= addr_unmapped;
 				slot_cnt       <= 3'd0;
 				active_is_cdtv <= arming_is_cdtv;
 				// When this slot routes to DDR, latch the

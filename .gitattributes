@@ -1,0 +1,3 @@
+# The only shell scripts in this repo are the sim runners, and core.autocrlf
+# would otherwise hand a Windows checkout CRLF copies that bash chokes on.
+*.sh text eol=lf

@@ -37,3 +37,13 @@ c5_pin_model_dump.txt
 *.xml
 *_netlist
 *.cdf
+rtl/sim/sdram/sdram_ctrl_sim.v
+
+# GHDL work directory and simulation binaries (rtl/sim/tg68k/run.sh).
+build/
+
+# Seed sweep artefacts: one ~3.7 MB bitstream per candidate. The measurements
+# in seed_sweep/results.txt are worth keeping; the bitstreams are rebuildable
+# from a seed and a commit.
+seed_sweep/*.rbf
+seed_sweep/*.log

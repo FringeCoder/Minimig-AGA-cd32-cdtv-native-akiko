@@ -17,7 +17,13 @@ module cia_timerb
   output   [7:0] data_out, // CPU data bus output
   input  eclk,            // External clock input (usually E clock)
   input  tmra_ovf,        // Timer A underflow signal for cascade mode
-  output  irq             // Timer underflow interrupt request
+  output  irq,            // Timer underflow interrupt request
+
+  // Save state, laid out exactly as timer A's: {tmr, tmlh, tmll, tmcr}.
+  // See cia_timera.v for why these are exported rather than read back.
+  output [38:0] ss_state,
+  input         ss_ld,
+  input  [38:0] ss_ld_data
 );
 
 // Internal registers - similar structure to Timer A
@@ -53,7 +59,9 @@ assign count = tmcr[6] ? tmra_ovf : eclk;
 
 // Write to control register
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    tmcr[6:0] <= ss_ld_data[6:0];
+  else if (clk7_en) begin
     if (reset)
       tmcr[6:0] <= 7'd0;
     else if (tcr && wr)
@@ -80,7 +88,9 @@ assign start = tmcr[0];      // Timer start/stop
 // Timer latch registers - hold reload value
 // Low byte latch
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    tmll[7:0] <= ss_ld_data[14:7];
+  else if (clk7_en) begin
     if (reset)
       tmll[7:0] <= 8'b1111_1111;  // Default to $FF
     else if (tlo && wr)
@@ -89,7 +99,9 @@ always @(posedge clk)
 
 // High byte latch
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    tmlh[7:0] <= ss_ld_data[22:15];
+  else if (clk7_en) begin
     if (reset)
       tmlh[7:0] <= 8'b1111_1111;  // Default to $FF
     else if (thi && wr)
@@ -114,7 +126,9 @@ assign reload = thi_load_eclk | forceload | underflow;
 
 // 16-bit down counter
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    tmr[15:0] <= ss_ld_data[38:23];
+  else if (clk7_en) begin
     if (reset)
       tmr[15:0] <= 16'hFF_FF;  // Reset to maximum value
     else if (reload)
@@ -136,5 +150,7 @@ assign data_out[7:0] = ({8{~wr&tlo}} & tmr[7:0])        // Timer low byte
           | ({8{~wr&thi}} & tmr[15:8])                  // Timer high byte
           | ({8{~wr&tcr}} & {1'b0,tmcr[6:0]});         // Control register
 
+
+assign ss_state = {tmr[15:0], tmlh[7:0], tmll[7:0], tmcr[6:0]};
 
 endmodule

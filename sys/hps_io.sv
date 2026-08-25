@@ -121,6 +121,9 @@ module hps_io #(parameter CONF_STR, CONF_STR_BRAM=0, PS2DIV=0, WIDE=0, VDNUM=1, 
 	input              status_set,
 	input       [15:0] status_menumask,
 
+	// PSX SNAC pad state, read by the OSD/menu core over UIO 'hFE.
+	input      [111:0] snac_state,
+
 	input             info_req,
 	input       [7:0] info,
 
@@ -524,6 +527,17 @@ always@(posedge clk_sys) begin : uio_block
 				//sdram size set
 				'h31: if(byte_cnt == 1) sdram_sz <= io_din;
 
+				// PSX SNAC pad state. Seven words: status, then three per port.
+				'hFE: case(byte_cnt)
+							1: io_dout <= snac_state[ 15:  0];
+							2: io_dout <= snac_state[ 31: 16];
+							3: io_dout <= snac_state[ 47: 32];
+							4: io_dout <= snac_state[ 63: 48];
+							5: io_dout <= snac_state[ 79: 64];
+							6: io_dout <= snac_state[ 95: 80];
+							7: io_dout <= snac_state[111: 96];
+						endcase
+
 				// Gamma
 				'h32: gamma_en <= io_din[0];
 				'h33: begin
@@ -636,7 +650,7 @@ always@(posedge clk_sys) begin : fio_block
 	if(~fp_enable) begin
 		if(has_cmd && (cmd == FIO_FILE_TX)) begin
 			{ioctl_upload, ioctl_download} <= req_io;
-			skip_add <= req_io[0];
+			{ioctl_rd, skip_add} <= req_io;
 		end
 		has_cmd <= 0;
 	end
@@ -890,6 +904,8 @@ always @(posedge clk_sys) begin
 	  16: dout <= vid_pixrep;
 	  17: dout <= vid_de_h;
 	  18: dout <= vid_de_v;
+	  19: dout <= vid_fclks[15:0];
+	  20: dout <= {8'd0, vid_fclks[23:16]};
 	  default dout <= 0;
 	endcase
 end
@@ -903,6 +919,10 @@ reg  [7:0] vid_pixrep;
 reg [15:0] vid_de_h;
 reg  [7:0] vid_de_v;
 
+// Exact clk_vid edges in one complete frame.
+// Count once after startup or a timing change, then hold the result.
+reg [23:0] vid_fclks = 0;
+
 always @(posedge clk_vid) begin
 	integer hcnt;
 	integer vcnt;
@@ -914,6 +934,7 @@ always @(posedge clk_vid) begin
 	reg [3:0] resto = 0;
 	reg calch = 0;
 
+	if(resto == 1) vid_fclks <= vid_fclks + 1'd1;
 	if(calch & de) ccnt <= ccnt + 1;
 	pcnt <= pcnt + 1'd1;
 
@@ -941,12 +962,16 @@ always @(posedge clk_vid) begin
 		if(old_vs & ~vs) begin
 			vid_int <= {vid_int[0],f1};
 			if(~f1) begin
+				// !f1 selects the same boundary once per complete frame.
 				if(hcnt && vcnt) begin
 					old_vmode <= new_vmode;
 
 					//report new resolution after timeout
 					if(resto) resto <= resto + 1'd1;
-					if(vid_hcnt != hcnt || vid_vcnt != vcnt || old_vmode != new_vmode) resto <= 1;
+					if(vid_hcnt != hcnt || vid_vcnt != vcnt || old_vmode != new_vmode) begin
+						resto <= 1;
+						vid_fclks <= 0;
+					end
 					if(&resto) vid_nres <= vid_nres + 1'd1;
 					vid_hcnt <= hcnt;
 					vid_vcnt <= vcnt;

@@ -37,6 +37,8 @@ module agnus_beamcounter
 	input	     [15:0] data_in,        // bus data in
 	output reg [15:0] data_out,       // bus data out
 	input       [8:1] reg_address_in, // register address inputs
+	input      [10:0] lpen_vpos,      // light-pen vertical position, latched by userspace (userio.v)
+	input       [8:0] lpen_hpos,      // light-pen horizontal position, latched by userspace (userio.v)
 	output reg  [8:0] hpos,           // horizontal beam counter (140ns)
 	output reg [10:0] vpos,           // vertical beam counter
 	output reg        _hsync,         // horizontal sync
@@ -102,11 +104,33 @@ parameter VBSTOP_NTSC_VAL = 9'd20;           // vertical blanking end (PAL 26 li
 //--------------------------------------------------------------------------------------
 
 //beamcounter read registers VPOSR and VHPOSR
+//
+// The light pen FREEZES these two registers, it does not replace them. That
+// distinction is the whole design. A plain mux -- which is what this was --
+// holds VPOSR at whatever userspace last latched for as long as BPLCON0 bit 3
+// stays set, so the counters never advance again and every beam-wait loop on
+// the machine spins forever. With no gun connected they froze at zero. The
+// freeze here is a latch with a defined start and a defined end, so the
+// counters always come back; see the LIGHT PEN LATCH block below.
+//
+// lpen_frozen is 0 on any machine that never touches the light pen -- lpen_trig
+// can only be set while lpen_en is -- so both terms below collapse to exactly
+// the original expression, vpos[10:8] and {vpos[7:0],hpos[8:1]}. That is the
+// read every game polling the beam position depends on; do not disturb the
+// false-condition path.
+reg        lpen_trig;   // latch armed: VPOSR/VHPOSR are frozen
+reg [10:0] vpos_lpen;   // the frozen vertical position
+reg  [8:0] hpos_lpen;   // the frozen horizontal position
+
+wire lpen_frozen = lpen_trig & ~lpendis;
+
 always @(*) begin
 	if (reg_address_in[8:1]==VPOSR[8:1] || reg_address_in[8:1]==VPOSW[8:1])
-		data_out[15:0] = {long_frame,1'b0,ecs,ntsc,2'b00,{2{aga}},long_line,4'b0000,vpos[10:8]};
+		data_out[15:0] = {long_frame,1'b0,ecs,ntsc,2'b00,{2{aga}},long_line,4'b0000,
+		                  lpen_frozen ? vpos_lpen[10:8] : vpos[10:8]};
 	else if (reg_address_in[8:1]==VHPOSR[8:1] || reg_address_in[8:1]==VHPOSW[8:1])
-		data_out[15:0] = {vpos[7:0],hpos[8:1]};
+		data_out[15:0] = lpen_frozen ? {vpos_lpen[7:0], hpos_lpen[8:1]}
+		                             : {vpos[7:0], hpos[8:1]};
 	else
 		data_out[15:0] = 0;
 end
@@ -123,7 +147,7 @@ always @ (posedge clk) begin
 end
 
 wire harddis      = beamcon0_reg[14];
-//wire lpendis      = beamcon0_reg[13];
+wire lpendis      = beamcon0_reg[13];
 wire varvben      = beamcon0_reg[12];
 wire loldis       = beamcon0_reg[11];
 //wire cscben       = beamcon0_reg[10];
@@ -151,12 +175,20 @@ always @(posedge clk) begin
 end
 
 //BPLCON0 register
+// lpen_en (bit 3, LPEN) rides in the same always block as lace (bit 2): both
+// are loaded only on a BPLCON0 write, so this reuses the one comparator
+// instead of adding a second decode for the same address.
+reg lpen_en;
 always @(posedge clk) begin
 	if (clk7_en) begin
-		if (reset)
-			lace <= 1'b0;
-		else if (reg_address_in[8:1]==BPLCON0[8:1])
-			lace <= data_in[2];
+		if (reset) begin
+			lace    <= 1'b0;
+			lpen_en <= 1'b0;
+		end
+		else if (reg_address_in[8:1]==BPLCON0[8:1]) begin
+			lace    <= data_in[2];
+			lpen_en <= data_in[3];
+		end
 	end
 end
 
@@ -422,6 +454,67 @@ assign vbl = (vpos <= vbstop);
 
 //vertical blanking end (last line)
 assign vblend = vpos==vbstop;
+
+//--------------------------------------------------------------------------------------//
+//                                                                                      //
+//   LIGHT PEN LATCH                                                                    //
+//                                                                                      //
+//--------------------------------------------------------------------------------------//
+//
+// Modelled on WinUAE (custom.cpp: hsync_handler_pre, BPLCON0, islightpentriggered),
+// because what software depends on is the timing of the freeze, not the position
+// reported. Four events, in priority order:
+//
+//   - reset, or BPLCON0 bit 3 clear: never frozen. Clearing the bit unfreezes
+//     immediately, which is how a program releases the registers.
+//   - end of the last vblank line: unfreeze. This is the one that matters. It
+//     is what stops a set bit 3 from wedging VPOSR forever, and it runs every
+//     frame whether or not a pen is connected or ever triggers.
+//   - end of the first vblank line, with nothing else having fired: freeze
+//     anyway, at that line and hpos 1. WinUAE's fallback. It gives a program
+//     probing with no pen a defined answer that refreshes every frame, instead
+//     of a dead one.
+//   - the raster reaching the position userspace latched: freeze there. The
+//     real trigger, gated on the pen being on screen and the beam being outside
+//     vblank, since a pen cannot see a beam that is not being drawn.
+//
+// vpos_lpen/hpos_lpen snapshot rather than track: once frozen the reported
+// position must not move even if the gun does, until the next unfreeze.
+//
+// hpos_lpen is compared and stored at full 140ns resolution but read back as
+// [8:1], the same 280ns CCK units VHPOSR reports for hpos. Userspace scales for
+// that; see LPEN_HPOS_MIN in support/lightpen/amiga_lightpen.cpp.
+//
+// lpen_vpos == 11'h7FF is userspace saying there is no position to report -- no
+// gun, or the pointer is off screen.
+//
+// The power-up value needs no such marker and userio.v gives it none, which is
+// deliberate: the latch comes up 0, and line 0 is inside vblank, so the ~vbl
+// gate below refuses it on its own. Initialising the port would have meant a
+// declaration assignment in a file Quartus reads as plain Verilog -- exactly
+// the kind of thing that simulates and then fails the fit.
+wire lpen_valid = (lpen_vpos != 11'h7FF);
+
+always @(posedge clk) begin
+	if (clk7_en) begin
+		if (reset || ~lpen_en)
+			lpen_trig <= 1'b0;
+		else if (vblend && eol)
+			lpen_trig <= 1'b0;
+		else if (~lpen_trig) begin
+			if (vpos == 11'd0 && eol) begin
+				vpos_lpen <= vpos;
+				hpos_lpen <= 9'd2;
+				lpen_trig <= 1'b1;
+			end
+			else if (lpen_valid && ~vbl && vpos == lpen_vpos && hpos[8:1] == lpen_hpos[8:1]) begin
+				vpos_lpen <= vpos;
+				hpos_lpen <= lpen_hpos;
+				lpen_trig <= 1'b1;
+			end
+		end
+	end
+end
 
 //composite display blanking
 always @(posedge clk) begin

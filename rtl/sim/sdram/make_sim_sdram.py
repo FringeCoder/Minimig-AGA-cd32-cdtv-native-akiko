@@ -8,9 +8,13 @@ import os
 
 SRC = os.path.join(os.path.dirname(__file__), "..", "..", "sdram_ctrl.v")
 DST = os.path.join(os.path.dirname(__file__), "sdram_ctrl_sim.v")
-NL = "\r\n"
 
 c = open(SRC, "r", newline="").read()
+
+# Take the line ending from the file rather than assuming CRLF. Git checks this
+# file out with LF on Linux, so a hard-coded "\r\n" makes every hoist anchor
+# miss and the script dies on its own assertion -- which is exactly what CI hit.
+NL = "\r\n" if "\r\n" in c else "\n"
 
 # the exact declaration lines that are used before their point of declaration
 hoist = [
@@ -34,9 +38,9 @@ def sub1(old, new):
     assert c.count(old) == 1, f"sd_data anchor {old!r} count {c.count(old)} != 1"
     c = c.replace(old, new, 1)
 
-sub1("\tinout  reg [15:0] sd_data,\r\n", "\tinout      [15:0] sd_data,\r\n")
-sub1("\t\tsd_data               <= 16'hZZZZ;\r\n", "\t\tsd_data_o             <= 16'hZZZZ;\r\n")
-sub1("\t\t\t\t\tsd_data      <= datawr;\r\n", "\t\t\t\t\tsd_data_o    <= datawr;\r\n")
+sub1("\tinout  reg [15:0] sd_data," + NL, "\tinout      [15:0] sd_data," + NL)
+sub1("\t\tsd_data               <= 16'hZZZZ;" + NL, "\t\tsd_data_o             <= 16'hZZZZ;" + NL)
+sub1("\t\t\t\t\tsd_data      <= datawr;" + NL, "\t\t\t\t\tsd_data_o    <= datawr;" + NL)
 
 block = (
     "// --- sim-only forward declarations (hoisted for ModelSim -sv) ---" + NL

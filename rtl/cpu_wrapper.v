@@ -38,6 +38,69 @@ module cpu_wrapper
 	input       [3:0] cachecfg,
 	input             bootrom,
 
+	// Park request. While high the CPU is allowed to finish whatever bus
+	// cycle it is in and is then held at the next busstate == 1 boundary --
+	// the same "no memaccess" point ss_quiesce calls cpu_boundary. It has to
+	// be a request that lands *before* the freeze rather than a consequence
+	// of it: ss_serdes samples the whole state vector on the single cycle
+	// ss_ctrl asserts save_start, one clock after quiesced, and the register
+	// file has only one read port, so the sixteen-cycle sweep that fills
+	// ss_cpu_d0..a7 must already have finished by then. Driven from
+	// ss_ctrl's save_busy, which rises the moment a save is requested and
+	// stays high until it completes, so this also holds the CPU for the
+	// whole dump. Minimig.sv ORs load_busy and the restore fan-out's busy
+	// into it as well, so the same park covers a restore -- including the
+	// window in which the fan-out is writing the register file, which must
+	// not overlap the CPU executing again.
+	input             ss_arm,
+
+	// Save state export. Read-only view of the TG68K architectural
+	// registers, valid while the CPU is parked by ss_arm.
+	input       [3:0] ss_reg_index,
+	output     [31:0] ss_reg_data,
+	// ss_pc is TG68_PC, the FETCH pointer: mid-instruction it points at an
+	// operand word, so it is not what a savestate should record. ss_exe_pc is
+	// the architectural PC -- the address of the instruction being executed --
+	// and ss_at_boundary says when the CPU is sitting on one having executed
+	// none of it. ss_pc is still exported because the diagnostics sample it.
+	output     [31:0] ss_pc,
+	output     [31:0] ss_exe_pc,
+	output            ss_at_boundary,
+	output      [9:0] ss_trap_vector,
+	output            ss_trap_active,
+	// High when no CPU bus cycle is outstanding -- either the CPU is not
+	// asking for one or the memory has answered. Parking at ~cpu_req used to
+	// give this for free; parking at an instruction boundary does not, and the
+	// freeze must not be taken with a cache fill half done, because it hands
+	// the SDRAM CPU port to ss_dma. Minimig.sv latches this into cpu_boundary.
+	output            ss_bus_settled,
+	output     [15:0] ss_sr,
+	output     [31:0] ss_usp,
+	output     [31:0] ss_vbr,
+	output      [3:0] ss_cacr,
+
+	// Save state restore. Write side of the same TG68K architectural
+	// registers, taken on the CPU clock while the core is parked by ss_arm.
+	// Inside the kernel these writes deliberately bypass the CPU clock
+	// enable, which is held low for the whole restore window (see
+	// ss_cpu_hold below). ss_wr_index follows the export mapping:
+	// 0-7 = D0-D7, 8-15 = A0-A7. ss_wr_data carries SR in [15:0].
+	input       [3:0] ss_wr_index,
+	input      [31:0] ss_wr_data,
+	input             ss_wr_en,
+	input             ss_pc_wr,
+	input             ss_sr_wr,
+	input             ss_usp_wr,
+	// VBR and CACR are exported above (from vbr_p / cacr_p) and are part of
+	// the state vector, so they need a write side as well. Both take their
+	// data from ss_wr_data; CACR uses [3:0], which is all the vector carries.
+	input             ss_vbr_wr,
+	input             ss_cacr_wr,
+	// Sequencer re-seed, pulsed once after the writes above and before the
+	// hold is released. The architectural registers on their own are not a
+	// restore -- see the ss_resume comment in TG68KdotC_Kernel.vhd.
+	input             ss_resume,
+
 	output reg [23:1] chip_addr,
 	input      [15:0] chip_dout,
 	output reg [15:0] chip_din,
@@ -86,12 +149,10 @@ module cpu_wrapper
 	input      [15:0] cdtv_din,
 	input             cdtv_selack,
 
-	// AC ROM mirror feed. The BIOS reads back the autoconfig identity
-	// bytes at $E900-$E93F after relocating the board. cdtv_bridge.v
-	// provides the byte offset; cpu_wrapper looks up the 8-bit ROM value
-	// from its existing ac_rom table.
-	input       [5:0] cdtv_ac_rom_addr,
-	output      [7:0] cdtv_ac_rom_byte,
+	// Autoconfig-assigned base for the CDTV bridge window. gary.v decodes
+	// $xx0000 from this instead of the hard-wired $E9.
+	output reg  [7:0] cdtv_base,
+
 
 	output reg  [1:0] cpustate,
 	output reg  [3:0] cacr,
@@ -147,6 +208,7 @@ memory_router u_memory_router
 	.ckick         (ckick         ),
 	.wr            (wr            ),
 	.bootrom       (bootrom       ),
+	.cdtv_mode     (cdtv_mode     ),
 	.z2ram_ena     (z2ram_ena     ),
 	.z3ram_base0   (z3ram_base0   ),
 	.z3ram_ena0    (z3ram_ena0    ),
@@ -284,8 +346,35 @@ cpu_inst_p
   // d_cache_out is '1' by default and tracks the latched MOVEC CACR write
   // thereafter — see TG68KdotC_Kernel.vhd CACR_DC / CACR_DC_owned regs.
   .d_cache_out(dcache_sw_en_p),
-  .vbr_out(vbr_p)
+  .vbr_out(vbr_p),
+
+  .ss_reg_index(ss_reg_index),
+  .ss_reg_data(ss_reg_data),
+  .ss_pc(ss_pc),
+  .ss_exe_pc(ss_exe_pc),
+  .ss_at_boundary(ss_at_boundary),
+  .ss_trap_vector(ss_trap_vector),
+  .ss_trap_active(ss_trap_active),
+  .ss_sr(ss_sr),
+  .ss_usp(ss_usp),
+
+  // Restore path -- TG68K only. fx68k has no equivalent write port and is
+  // locked out of the savestate path in Minimig.sv.
+  .ss_wr_index(ss_wr_index),
+  .ss_wr_data(ss_wr_data),
+  .ss_wr_en(ss_wr_en),
+  .ss_pc_wr(ss_pc_wr),
+  .ss_sr_wr(ss_sr_wr),
+  .ss_usp_wr(ss_usp_wr),
+  .ss_vbr_wr(ss_vbr_wr),
+  .ss_cacr_wr(ss_cacr_wr),
+  .ss_resume(ss_resume)
 );
+
+// VBR and CACR are already brought out of the kernel for the memory map, so
+// the savestate view reuses them rather than adding ports.
+assign ss_vbr  = vbr_p;
+assign ss_cacr = cacr_p;
 
 wire [15:0] cpu_dout_o;
 wire [23:1] cpu_addr_o;
@@ -360,7 +449,39 @@ wire stock_speed   = cachecfg[3];
 // combinationally with sel, so the data is available on the same cycle —
 // equivalent to fastchip_ready being asserted "immediately" alongside
 // fastchip_selack. We treat cdtv_selack as the bridge's "ready" signal.
-wire clkena_p_base = ~cpu_req | chipready | ramready | fastchip_ready | cdtv_selack;
+// ss_arm parks the CPU on an instruction boundary: ss_at_boundary, the cycle
+// the kernel has decoded an opcode and executed none of it.
+//
+// The park has to be LATCHED, not read live. ss_at_boundary is decodeOPC, and
+// the ss_resume re-seed clears decodeOPC (TG68KdotC_Kernel.vhd:1423) -- so the
+// instant the restore re-seeds the sequencer the boundary goes false and a
+// live-gated hold releases the CPU. It would start executing at the restored
+// PC while ss_ctrl is still writing chip RAM, because the state vector is
+// restored BEFORE memory (S_L_ST_FETCH, then S_L_SH_FETCH, then S_L_CH_FETCH).
+// A CPU running against half-rewritten memory is indistinguishable from the
+// mid-instruction restore this park exists to prevent. Latched, the hold
+// survives the re-seed and lasts until ss_arm drops at S_L_RELEASE, by which
+// point memory and the chipset replay are both in place.
+//
+// This deliberately does NOT also wait for cpu_req to drop, which is what it
+// used to do. Measured in tg68k_ss_tb: over 1060 instruction boundaries, not
+// one had an idle bus, so a park waiting for both would never fire and every
+// save would time out. Parking with a fetch outstanding is safe here because
+// the cycle is allowed to settle -- clkena is already low until the memory
+// answers -- and the CPU simply never consumes the word; ss_resume re-fetches
+// from the restored PC. Parking at ~cpu_req instead is not safe: it is
+// mid-instruction, and restoring from there scores 66/80 in that bench
+// against 80/80 here.
+
+reg ss_parked;
+always @(posedge clk) begin
+	if (~reset | ~ss_arm) ss_parked <= 1'b0;
+	else if (ss_at_boundary) ss_parked <= 1'b1;
+end
+wire ss_cpu_hold   = ss_arm & (ss_at_boundary | ss_parked);
+
+assign ss_bus_settled = ~cpu_req | chipready | ramready | fastchip_ready | cdtv_selack;
+wire clkena_p_base = ss_bus_settled & ~ss_cpu_hold;
 
 reg [3:0] cooldown;
 always @(posedge clk) begin
@@ -446,7 +567,6 @@ reg       ac_a2065;
 reg       ac_cdtv;
 reg [2:0] ac_memcard;
 reg [3:0] autocfg_data;
-reg [7:0] cdtv_base;
 
 
 always @(*) begin
@@ -573,67 +693,12 @@ end
 
 wire sel_autoconfig = (chip_addr[23:16] == 8'b11101000) && (ac_memcard || ac_toccata || ac_a2065 || ac_cdtv); //$E80000 - $E8FFFF
 
-// CDTV AC ROM byte mirror — spec section 2.2 + section 2.3 row 1.
-// The BIOS reads $E900-$E93F (AC ROM at the post-relocation base) to
-// re-identify the board. Returned bytes are the Z2-encoded NIBBLE form
-// stored in WinUAE's dmacmemory[] array — the BIOS does NOT see the
-// raw logical value, it sees the encoded nibbles split across two
-// adjacent offsets.
-//
-// ew() helper at cdtv.cpp:1610-1619 splits each logical byte:
-//   * Offsets $00/$02/$40/$42 use the NOT-inverted form:
-//       dmacmemory[addr  ] = value & 0xF0
-//       dmacmemory[addr+2] = (value & 0x0F) << 4
-//   * Other offsets use the INVERTED form (Z2 complement):
-//       dmacmemory[addr  ] = ~(value & 0xF0) & 0xF0
-//       dmacmemory[addr+2] = ~((value & 0x0F) << 4) & 0xF0
-// Untouched slots stay at 0xFF (per memset(dmacmemory, 0xff) at line 1753).
-//
-// cdtv_ac_rom_addr [5:0] is the byte offset / 2 — so addr=0 hits the
-// AC ROM at byte $00, addr=1 hits byte $02, etc.
-//
-// ew() calls in cdtv_init (cdtv.cpp:1755-1769):
-//   ew(0x00, 0xC1)  type=Z2+linked+ROM (NOT inv)
-//   ew(0x04, 0x03)  product number = 3
-//   ew(0x08, 0x40)  size flag = 64 KB
-//   ew(0x10, 0x02)  manuf hi = 2
-//   ew(0x14, 0x02)  manuf lo = 2
-//   ew(0x18..0x24, 0)  serial = 0
-//
-// Resulting bytes at the AC ROM offsets used by the BIOS:
-reg [7:0] cdtv_ac_rom_byte_r;
-always @* begin
-	cdtv_ac_rom_byte_r = 8'hFF;
-	case (cdtv_ac_rom_addr)
-		6'h00: cdtv_ac_rom_byte_r = 8'hC0;   // byte $00 = 0xC1 hi nibble (NOT inv)
-		6'h01: cdtv_ac_rom_byte_r = 8'h10;   // byte $02 = 0xC1 lo nibble << 4 (NOT inv)
-		6'h02: cdtv_ac_rom_byte_r = 8'hF0;   // byte $04 = ~(0x03 hi nibble) = 0xF0 (inv)
-		6'h03: cdtv_ac_rom_byte_r = 8'hC0;   // byte $06 = ~(0x03 lo nibble << 4) = 0xC0 (inv)
-		6'h04: cdtv_ac_rom_byte_r = 8'hB0;   // byte $08 = ~(0x40 hi nibble) = 0xB0 (inv)
-		6'h05: cdtv_ac_rom_byte_r = 8'hF0;   // byte $0A = ~(0x40 lo nibble << 4) = 0xF0
-		6'h08: cdtv_ac_rom_byte_r = 8'hF0;   // byte $10 = ~(0x02 hi) = 0xF0
-		6'h09: cdtv_ac_rom_byte_r = 8'hD0;   // byte $12 = ~(0x02 lo << 4) = 0xD0
-		6'h0A: cdtv_ac_rom_byte_r = 8'hF0;   // byte $14 = ~(0x02 hi) = 0xF0
-		6'h0B: cdtv_ac_rom_byte_r = 8'hD0;   // byte $16 = ~(0x02 lo << 4) = 0xD0
-		// Serial bytes $18 / $1C / $20 / $24 = ew(_, 0): both nibbles 0 inv -> 0xF0
-		6'h0C: cdtv_ac_rom_byte_r = 8'hF0;   // byte $18
-		6'h0D: cdtv_ac_rom_byte_r = 8'hF0;   // byte $1A
-		6'h0E: cdtv_ac_rom_byte_r = 8'hF0;   // byte $1C
-		6'h0F: cdtv_ac_rom_byte_r = 8'hF0;   // byte $1E
-		6'h10: cdtv_ac_rom_byte_r = 8'hF0;   // byte $20
-		6'h11: cdtv_ac_rom_byte_r = 8'hF0;   // byte $22
-		6'h12: cdtv_ac_rom_byte_r = 8'hF0;   // byte $24
-		6'h13: cdtv_ac_rom_byte_r = 8'hF0;   // byte $26
-		default: cdtv_ac_rom_byte_r = 8'hFF; // memset(0xff) default
-	endcase
-end
-assign cdtv_ac_rom_byte = cdtv_ac_rom_byte_r;
-
 reg       z2ram_ena;
 reg [4:0] z3ram_base0;
 reg [3:0] z3ram_base1;
 reg       z3ram_ena0;
 reg       z3ram_ena1;
+
 always @(posedge clk) begin
 	reg old_uds;
 	old_uds <= chip_uds;

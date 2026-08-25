@@ -259,27 +259,27 @@ module minimig
 
 	// CDTV bridge ↔ cpu_wrapper port. cpu_wrapper drives cpu_din through
 	// the bridge when cdtv_selack fires (same short-circuit as fastchip).
-	// Direction: bridge data + selack come OUT of minimig.v (the bridge
-	// lives inside this module); the AC ROM byte lookup is the reverse —
-	// cpu_wrapper owns the table, the bridge queries by ac_rom_addr.
+	// The AC ROM table lives inside cdtv_bridge now, so cpu_wrapper only
+	// supplies the autoconfig-assigned base.
 	output [15:0] cdtv_din,
 	output        cdtv_selack,
-	output  [5:0] cdtv_ac_rom_addr,
-	input   [7:0] cdtv_ac_rom_byte,
+	input   [7:0] cdtv_base,
 
-	// CDTV bridge ↔ Main_MiSTer (UIO) ports, driven by cdtv_hps_bridge.
-	input         cdtv_cmd_in_pop,
-	output        cdtv_cmd_in_pending,
-	output  [7:0] cdtv_cmd_in_byte,
-	input         cdtv_cmd_out_push,
-	input   [7:0] cdtv_cmd_out_data,
-	input         cdtv_sec_byte_push,
-	input   [7:0] cdtv_sec_byte_data,
+	// CDTV bridge ↔ Main_MiSTer, straight off the ext bus in hps_ext.v.
+	input         cdtv_cs,
+	input         cdtv_cs_sec,
+	input         cdtv_cs_stch,
+	input         cdtv_cs_nvr,
+	input         cdtv_cs_card,
+	input         cdtv_wr,
+	input         cdtv_rd,
+	input  [15:0] cdtv_uio_din,
+	output [15:0] cdtv_uio_dout,
+	output        cdtv_req,
+	// The exact empty flag the save state sequencer waits on.
+	output        cdtv_sec_fifo_empty,
 	input         cdtv_subq_push,
 	input   [7:0] cdtv_subq_byte,
-	input         cdtv_stch_pulse,
-	output        cdtv_stch_ack,
-	input         cdtv_stch_ack_clr,
 	input         cdtv_sten_pulse,
 	input         cdtv_scor_pulse,
 	input         cdtv_sbcp_pulse,
@@ -289,22 +289,18 @@ module minimig
 	// pulses ack once the byte has been written to chip RAM.
 	output        cdtv_dma_req,
 	output        cdtv_dma_we,
-	output [23:0] cdtv_dma_baddr,
+	output [31:0] cdtv_dma_baddr,
 	output  [7:0] cdtv_dma_wbyte,
 	input         cdtv_dma_ack,
 
-	// CDTV NVRAM HPS ports — load via hps_io.ioctl_download, save via the
-	// UIO drain.
-	input  [13:0] cdtv_nvr_load_addr,
-	input   [7:0] cdtv_nvr_load_din,
-	input         cdtv_nvr_load_we,
-	input  [13:0] cdtv_nvr_save_addr,
-	output  [7:0] cdtv_nvr_save_dout,
+	// Battery RAM and memory card both live behind the bridge; only their
+	// dirty flags leave this module, for the status word.
 	output        cdtv_nvr_dirty,
-	input         cdtv_nvr_clear_dirty,
+	output        cdtv_card_dirty,
 
 	// CDDA volume word from the TPI Port B DAC strobes.
 	output  [9:0] cdtv_cdda_volume,
+	output        cdtv_cdda_volume_valid,
 
 	//user i/o
 	output  [1:0] cpucfg,
@@ -334,7 +330,107 @@ module minimig
 	output [63:0] a2065_mem_writedata,
 	output [7:0]  a2065_mem_byteenable,
 	output        a2065_mem_write,
-	input         a2065_mem_waitrequest
+	input         a2065_mem_waitrequest,
+
+	// MiSTer Floppy / PSX SNAC (SNAC user port). USER_OUT is muxed against
+	// MT32-pi at the top level on user_port_mode; the tenants cannot be
+	// active together.
+	input   [6:0] USER_IN,
+	output  [6:0] USER_OUT,
+	output  [1:0] user_port_mode,
+	output  [5:0] snac_mode,
+	output  [2:0] mister_floppy_status,
+
+	// Save state observation ports. Read-only: nothing here changes how the
+	// machine runs, and there is no ss_freeze input -- the freeze is applied
+	// upstream by stopping the amiga_clk instance that feeds clk7_en/clk7n_en/
+	// c1/c3/cck/eclk, which holds every chipset module at once (see
+	// amiga_clk.v's ce port for why gating the levels here would not work).
+	//
+	// The three busy bits are the chip-RAM writers the quiesce waits on:
+	// the blitter, and Paula's disk and audio DMA requests to Agnus. Bitplane,
+	// sprite, copper and refresh DMA are reads and do not need to be quiet.
+	output        ss_blit_busy,
+	output        ss_disk_busy,
+	output        ss_audio_busy,
+
+	// INTREQ by value. The register shadow rebuilds DMACON, INTENA and ADKCON
+	// from bus writes, but not this one: Paula raises its bits in hardware, so
+	// an accumulator built from writes drifts within a frame.
+	output [14:0] ss_intreq,
+	output [14:0] ss_intena,
+	// Save state: Denise's 256-entry colour table.
+	input         ss_clut_active,
+	input   [7:0] ss_clut_addr,
+	output [31:0] ss_clut_rd_data,
+	input         ss_clut_wr_en,
+	input  [31:0] ss_clut_wr_data,
+	output  [2:0] ss_reset_src,     // {CPU RESET instr, sys_reset, host cpurst}
+	input         ss_reset_src_clr,
+
+	// Save state: the custom chipset register bus, tapped and overridable.
+	// Every chipset register write in the machine is ss_rga_data on ss_rga_addr
+	// at a clk7_en tick; ss_regshadow (instantiated up in Minimig.sv, next to
+	// ss_ctrl) records them and drives the replay inputs to write them back.
+	output  [8:1] ss_rga_addr,
+	output [15:0] ss_rga_data,
+	input         ss_replay_we,
+	input   [8:1] ss_replay_addr,
+	input  [15:0] ss_replay_data,
+	// The tick the replay writes are decoded on. A restore runs frozen, and
+	// the freeze works by stopping the Amiga's clock generator -- so clk7_en
+	// above is dead for the whole replay, and every chipset register decode,
+	// which is `always @(posedge clk) if (clk7_en)`, never fires. Driving the
+	// buses without this pulse writes nothing at all: proved in
+	// rtl/sim/ssmux/tb_ss_regbus_mux.sv, which failed on all three sampled
+	// registers before it existed.
+	//
+	// Minimig.sv drives it from the MASTER generator's clk7_en, gated by
+	// ss_replay_we, so exactly the cycles carrying a replay write get a tick
+	// and nothing else does.
+	input         ss_replay_tick,
+	// Gary's memory map state, in the order ss_state.vh expects:
+	// {ovl, rom_readonly, sel_kick1mb, sel_kick256kmirror}.
+	output  [3:0] ss_map,
+	// Restore side of the same four bits, in the SAME bit order -- the two
+	// are written next to each other here and nowhere else so they cannot be
+	// numbered differently. ss_map_we is a one-clk_sys-cycle pulse; both the
+	// ovl register below and gary's rom_readonly run on this clock, so no
+	// widening is needed (Minimig.sv's fan-out sequencer runs on clk_sys for
+	// exactly that reason).
+	//
+	// Only bits [3] (ovl) and [2] (rom_readonly) have a target. Bits [1:0]
+	// are gary's combinational sel_kick1mb / sel_kick256kmirror address
+	// decodes, which are not state and cannot be written -- see
+	// rtl/ss_state.vh. They are accepted here so that the two directions
+	// stay the same four-bit field.
+	input   [3:0] ss_map_in,
+	input         ss_map_we,
+
+	// The CIAs, by value in both directions. They sit on the CPU bus rather
+	// than the RGA bus, so the chipset register shadow never sees them, and
+	// they cannot be read back over their own bus either: reading ICR clears
+	// the pending interrupts and reading TOD moves its latch, so a capture
+	// through the register interface would damage the machine every save.
+	// ciaa.v and ciab.v carry the bit layouts.
+	output [190:0] ss_cia_a,
+	output [202:0] ss_cia_b,
+	input  [190:0] ss_cia_a_in,
+	input  [202:0] ss_cia_b_in,
+	// One clk_sys pulse, like ss_map_we, and for the same reason: everything
+	// it writes is a clk_sys register and the Amiga's timebase is stopped.
+	input          ss_cia_we,
+
+	// Beam and frame geometry, out to the save state diagnostics. Read-only
+	// observation: a restore that comes back with no vertical blanks looks
+	// exactly like one that comes back with the display running, from the
+	// outside, and these are what tell the two apart.
+	output  [10:0] ss_vpos,
+	output   [8:0] ss_hpos,
+	output         ss_vbl_int,
+	output   [8:0] ss_htotal,
+	output         ss_varbeamen,
+	output         ss_harddis
 );
 
 
@@ -343,7 +439,18 @@ wire [15:0] cpu_data_in;		//cpu data bus in
 wire [15:0] cpu_data_out;	   //cpu data bus out
 wire [15:0] ram_data_in;		//ram data bus in
 wire [15:0] ram_data_out;	   //ram data bus out
-wire [15:0] custom_data_in;	//custom chips data bus in
+wire [15:0] custom_data_in_gary;	//custom chips data bus in, as gary drives it
+
+// The two buses every chipset module sees. Normally straight through from
+// agnus and gary; during a save state replay ss_regshadow drives them instead,
+// which is indistinguishable to the chipset because an address and a value on
+// a clk7_en tick is exactly what a CPU or copper write is.
+//
+// Muxed on ss_replay_we, NOT on a replay-active level: the replay sequencer
+// skips every excluded address, and while it skips, its registered outputs
+// still hold the last value driven. Muxing on a level would put those stale
+// addresses on the bus for the skipped cycles.
+wire [15:0] custom_data_in = ss_replay_we ? ss_replay_data : custom_data_in_gary;
 wire [15:0] custom_data_out;	//custom chips data bus out
 wire [15:0] agnus_data_out;	//agnus data out
 wire [15:0] paula_data_out;	//paula data bus out
@@ -369,7 +476,21 @@ wire        cpu_hwr;				//cpu high byte write enable
 wire        cpu_lwr;				//cpu low byte write enable
 
 //register address bus
-wire  [8:1] reg_address; 		//main register address bus
+wire  [8:1] reg_address_agnus;	//main register address bus, as agnus drives it
+wire  [8:1] reg_address = ss_replay_we ? ss_replay_addr : reg_address_agnus;
+
+assign ss_rga_addr = reg_address;
+assign ss_rga_data = custom_data_in;
+
+// The register-decode tick for everything on that bus. Identical to clk7_en
+// except during a replay, when the Amiga's generator is stopped and this is
+// the only tick there is. See ss_replay_tick's declaration above.
+//
+// It goes to the modules that decode reg_address and to no others: agnus,
+// paula, denise, userio and the Action Replay cart. The CIAs are on the CPU
+// address bus, not this one, and the memory bridges have no register decode,
+// so an extra tick there would only step logic for nothing.
+wire chipset_clk7_en = clk7_en | ss_replay_tick;
 
 //rest of local signals
 wire        cpu_custom;
@@ -391,10 +512,22 @@ wire        sel_cia_b;			//cia B select
 	wire        sel_toccata;
 	wire        sel_a2065;
 wire        sel_cdtv;            // $E90000-$E9FFFF DMAC/TPI/CR-511 window
-wire        sel_cdtv_nvram;      // $DC8000-$DCFFFF battery RAM
+wire        sel_cdtv_nvram;
+wire        sel_cdtv_card;      // $DC8000-$DCFFFF battery RAM
 wire [15:0] cdtv_bridge_dout;    // 16-bit data from cdtv_bridge.v
 wire        cdtv_bridge_selack;
-wire [15:0] cdtv_nvr_dout;       // 16-bit (even+odd byte) data from cdtv_nvram.v (CPU port)
+wire [15:0] cdtv_nvr_dout;
+wire [13:0] cdtv_nvr_addr;
+wire  [7:0] cdtv_nvr_load_din;
+wire        cdtv_nvr_load_we;
+wire  [7:0] cdtv_nvr_save_dout;
+wire        cdtv_nvr_clear_dirty;
+wire [15:0] cdtv_card_dout;
+wire [12:0] cdtv_card_addr;
+wire  [7:0] cdtv_card_load_din;
+wire        cdtv_card_load_we;
+wire  [7:0] cdtv_card_save_dout;
+wire        cdtv_card_clear_dirty;       // 16-bit (even+odd byte) data from cdtv_nvram.v (CPU port)
 wire        cdtv_irq_w;          // CDTV INT2 source (DMAC E_INT | TPI ilatch[5])
 wire        int2;					//intterrupt 2
 wire        int3;					//intterrupt 3 
@@ -461,7 +594,10 @@ wire [15:0] cart_data_out;
 wire        usrrst;				//user reset from osd interface
 wire        hires;				//hires signal from Denise for interpolation filter enable in Amber
 wire  [7:0] memory_config;		//memory configuration
-wire  [3:0] floppy_config;		//floppy drives configuration (drive number and speed)
+wire  [3:0] floppy_config;		//floppy drives configuration (external settings, drive number and speed)
+wire [11:0] floppy_ext_drive;	//external floppy drive config (3 bits per drive)
+wire [10:0] lpen_vpos;			//light-pen vertical position, latched by userspace (userio.v -> agnus)
+wire  [8:0] lpen_hpos;			//light-pen horizontal position, latched by userspace (userio.v -> agnus)
 wire  [5:0] chipset_config;	//chipset features selection (bit 5 = CDTV mode)
 assign cdtv_mode = chipset_config[5];
 wire  [5:0] ide_config;			//HDD & HDC config: bit #0 enables Gayle, bit #1 enables Master drive, bit #2 enables Slave drive
@@ -511,13 +647,18 @@ always @(posedge clk) if (clk7_en && reset) ntsc <= chipset_config[1];
 assign ide_ena  = ide_config[0];
 assign ide_fast = ~ide_config[5] & cpucfg[1];
 
+// Turbo floppy is now decided by paula rather than taken straight from the
+// config bit: a real drive over SNAC runs at its own speed, so paula gates
+// floppy_config[0] (the request) into floppy_speed (what agnus acts on).
+wire        floppy_speed;
+
 //--------------------------------------------------------------------------------------
 
 //instantiate agnus
 agnus AGNUS1
 (
 	.clk(clk),
-	.clk7_en(clk7_en),
+	.clk7_en(chipset_clk7_en),
 	.cck(cck),
 	.reset(reset),
 	.aen(sel_reg),
@@ -527,8 +668,12 @@ agnus AGNUS1
 	.data_in(custom_data_in),
 	.data_out(agnus_data_out),
 	.address_in(cpu_address_out[8:1]),
+	// Agnus decodes its own registers off the address it generates, not off
+	// the muxed bus, so the replay address has to reach it separately.
+	.ss_replay_we(ss_replay_we),
+	.ss_replay_addr(ss_replay_addr),
 	.address_out(dma_address_out),
-	.reg_address_out(reg_address),
+	.reg_address_out(reg_address_agnus),
 	.cpu_custom(cpu_custom),
 	.dbr(dbr),
 	.dbwe(dbwe),
@@ -558,14 +703,25 @@ agnus AGNUS1
 	.a1k(chipset_config[2]),
 	.ecs(|chipset_config[4:3]),
 	.aga(chipset_config[4]),
-	.floppy_speed(floppy_config[0])
+	.floppy_speed(floppy_speed),
+	.lpen_vpos(lpen_vpos),
+	.lpen_hpos(lpen_hpos),
+	.blit_busy(ss_blit_busy),
+	.ss_vpos_out(ss_vpos),
+	.ss_hpos_out(ss_hpos)
 );
+
+// Frame geometry, straight out of the wires agnus already exports.
+assign ss_vbl_int   = vbl_int;
+assign ss_htotal    = htotal;
+assign ss_varbeamen = varbeamen;
+assign ss_harddis   = harddis;
 
 //instantiate paula
 paula PAULA1
 (
 	.clk(clk),
-	.clk7_en (clk7_en),
+	.clk7_en (chipset_clk7_en),
 	.clk7n_en (clk7n_en),
 	.cck(cck),
 	.reset(reset),
@@ -607,7 +763,18 @@ paula PAULA1
 	.ldata_okk(ldata_okk),
 	.rdata_okk(rdata_okk),
 
-	.floppy_drives(floppy_config[3:2])
+	.floppy_drives(floppy_config[3:2]),
+	.floppy_ext_drive(floppy_ext_drive),
+	.floppy_speed_allowed(floppy_config[0]),
+	.floppy_speed(floppy_speed),
+
+	.enable_mister_floppy(user_port_mode == 2'd1),
+	.mister_floppy_status(mister_floppy_status),
+	.ss_intreq(ss_intreq),
+	.ss_intena(ss_intena),
+
+	.USER_IN(USER_IN),
+	.USER_OUT(USER_OUT)
 );
 
 wire [3:0] cachecfg_pre;
@@ -615,7 +782,7 @@ wire [3:0] cachecfg_pre;
 userio USERIO1 
 (	
 	.clk(clk),
-	.clk7_en(clk7_en),
+	.clk7_en(chipset_clk7_en),
 	.reset(reset),
 	.reg_address_in(reg_address),
 	.data_in(custom_data_in),
@@ -641,6 +808,11 @@ userio USERIO1
 	.memory_config(memory_config),
 	.chipset_config(chipset_config),
 	.floppy_config(floppy_config),
+	.floppy_ext_drive(floppy_ext_drive),
+	.lpen_vpos(lpen_vpos),
+	.lpen_hpos(lpen_hpos),
+	.user_port_mode(user_port_mode),
+	.snac_mode(snac_mode),
 	.scanline(scanline),
 	.ar(ar),
 	.blver(blver),
@@ -668,7 +840,7 @@ assign res = {shres & |chipset_config[4:3], hires};
 denise DENISE1
 (		
 	.clk(clk),
-	.clk7_en(clk7_en),
+	.clk7_en(chipset_clk7_en),
 	.c1(c1),
 	.c3(c3),
 	.cck(cck),
@@ -686,7 +858,12 @@ denise DENISE1
 	.ecs(|chipset_config[4:3]),
 	.aga(chipset_config[4]),
 	.hires(hires),
-	.shres(shres)
+	.shres(shres),
+	.ss_clut_active(ss_clut_active),
+	.ss_clut_addr(ss_clut_addr),
+	.ss_clut_rd_data(ss_clut_rd_data),
+	.ss_clut_wr_en(ss_clut_wr_en),
+	.ss_clut_wr_data(ss_clut_wr_data)
 );
 
 //instantiate cia A
@@ -715,7 +892,10 @@ ciaa CIAA1
 	.kms_level(kms_level),
 	.kbd_mouse_data(kbd_mouse_data), 
 	.freeze(freeze),
-	.hrtmon_en (memory_config[6])
+	.hrtmon_en (memory_config[6]),
+	.ss_state(ss_cia_a),
+	.ss_ld(ss_cia_we),
+	.ss_ld_data(ss_cia_a_in)
 );
 
 //instantiate cia B
@@ -736,6 +916,9 @@ ciab CIAB1
 	.flag(index),
 	.porta_in({cd,cts,dsr,ri&_joy3[4],1'b1,_joy4[4]}),
 	.porta_out({dtr,rts}),
+	.ss_state(ss_cia_b),
+	.ss_ld(ss_cia_we),
+	.ss_ld_data(ss_cia_b_in),
 	.portb_out({_motor,_sel3,_sel2,_sel1,_sel0,side,direc,_step})
 );
 
@@ -825,7 +1008,7 @@ minimig_sram_bridge RAM1
 cart CART1
 (
   .clk(clk),
-  .clk7_en(clk7_en),
+  .clk7_en(chipset_clk7_en),
   .clk7n_en(clk7n_en),
   .cpu_rst(!_cpu_reset),
   .cpu_address_in(cpu_address_out),
@@ -858,7 +1041,7 @@ gary GARY1
 	.cpu_data_out(cpu_data_out),
 	.cpu_data_in(gary_data_out),
 	.custom_data_out(custom_data_out),
-	.custom_data_in(custom_data_in),
+	.custom_data_in(custom_data_in_gary),
 	.ram_data_out(ram_data_out),
 	.ram_data_in(ram_data_in),
 	.cpu_rd(cpu_rd),
@@ -874,6 +1057,7 @@ gary GARY1
 	.hdc_ena(ide_ena & ~ide_fast), // Gayle decoding enable	
 	.toccata_ena(toccata_ena),
 	.toccata_base(toccata_base),
+	.cdtv_base(cdtv_base),
 	.a2065_ena(a2065_ena),
 	.a2065_base(a2065_base),
 	.cdtv_mode(chipset_config[5]),
@@ -898,9 +1082,13 @@ gary GARY1
 	.sel_a2065(sel_a2065),
 	.sel_cdtv(sel_cdtv),
 	.sel_cdtv_nvram(sel_cdtv_nvram),
+	.sel_cdtv_card(sel_cdtv_card),
 	.reset(reset),
 	.clk(clk),
 	.rom_readonly(rom_readonly),
+	// Restore side of ss_map[2]. Same pulse as ovl's above.
+	.ss_rom_readonly_in(ss_map_in[2]),
+	.ss_rom_readonly_we(ss_map_we),
 	.bootrom(bootrom)
 );
 
@@ -938,11 +1126,27 @@ minimig_syscontrol CONTROL1
 	.reset(sys_reset)
 );
 
+// ovl is the one map bit that lives here rather than in gary. Reset keeps
+// priority over the restore write for the same reason it does in gary: a
+// machine being reset must land in its reset state. Below reset, the restore
+// write outranks the normal CIA-A-write clear, which cannot fire anyway while
+// the CPU is parked for the restore.
 reg ovl; //kickstart overlay enable
 always @(posedge clk) begin
 	if(~_cpu_reset | ~_cpu_reset_in)       ovl <= 1;
+	else if(ss_map_we)                     ovl <= ss_map_in[3];
 	else if(sel_cia_a & (cpu_lwr|cpu_hwr)) ovl <= 0;
 end
+
+// Save state observation taps. Purely combinational reads of signals that
+// already exist -- nothing here loads or perturbs the machine.
+//
+// The bit order here is the one ss_map_in is decoded with (ovl is [3] in both
+// directions). Swapping two bits between the two would put the wrong thing at
+// address zero after a restore and would not show up until the machine ran.
+assign ss_map        = {ovl, rom_readonly, sel_kick1mb, sel_kick256kmirror};
+assign ss_disk_busy  = disk_dmal;
+assign ss_audio_busy = |audio_dmal;
 
 //-------------------------------------------------------------------------------------
 
@@ -1047,27 +1251,38 @@ cdtv_bridge cdtv_bridge_inst
 	.hwr             (cpu_hwr              ),    // upper / even-byte write strobe
 	.lwr             (cpu_lwr              ),    // lower / odd-byte write strobe
 
-	.ac_rom_byte     (cdtv_ac_rom_byte     ),
-	.ac_rom_addr     (cdtv_ac_rom_addr     ),
-
 	.cdtv_irq        (cdtv_irq_w           ),
 	.cdda_volume     (cdtv_cdda_volume     ),
+	.cdda_volume_valid(cdtv_cdda_volume_valid),
 
-	.cmd_in_pending  (cdtv_cmd_in_pending  ),
-	.cmd_in_byte     (cdtv_cmd_in_byte     ),
-	.cmd_in_pop      (cdtv_cmd_in_pop      ),
-	.cmd_out_push    (cdtv_cmd_out_push    ),
-	.cmd_out_data    (cdtv_cmd_out_data    ),
+	.uio_cs          (cdtv_cs              ),
+	.uio_cs_sec      (cdtv_cs_sec          ),
+	.uio_cs_stch     (cdtv_cs_stch         ),
+	.uio_cs_nvr      (cdtv_cs_nvr          ),
+	.uio_cs_card     (cdtv_cs_card         ),
+	.uio_wr          (cdtv_wr              ),
+	.uio_rd          (cdtv_rd              ),
+	.uio_din         (cdtv_uio_din         ),
+	.uio_dout        (cdtv_uio_dout        ),
+	.uio_req         (cdtv_req             ),
 
-	.sec_byte_push   (cdtv_sec_byte_push   ),
-	.sec_byte_data   (cdtv_sec_byte_data   ),
+	.nvr_addr        (cdtv_nvr_addr        ),
+	.nvr_dout        (cdtv_nvr_save_dout   ),
+	.nvr_load_din    (cdtv_nvr_load_din    ),
+	.nvr_load_we     (cdtv_nvr_load_we     ),
+	.nvr_clear_dirty (cdtv_nvr_clear_dirty ),
+
+	.card_addr       (cdtv_card_addr       ),
+	.card_dout       (cdtv_card_save_dout  ),
+	.card_load_din   (cdtv_card_load_din   ),
+	.card_load_we    (cdtv_card_load_we    ),
+	.card_clear_dirty(cdtv_card_clear_dirty),
+
+	.sec_fifo_empty  (cdtv_sec_fifo_empty  ),
 
 	.subq_push       (cdtv_subq_push       ),
 	.subq_byte       (cdtv_subq_byte       ),
 
-	.stch_pulse      (cdtv_stch_pulse      ),
-	.stch_ack        (cdtv_stch_ack        ),
-	.stch_ack_clr    (cdtv_stch_ack_clr    ),
 	.sten_pulse_ext  (cdtv_sten_pulse      ),
 	.scor_pulse      (cdtv_scor_pulse      ),
 	.sbcp_pulse      (cdtv_sbcp_pulse      ),
@@ -1092,15 +1307,40 @@ cdtv_nvram cdtv_nvram_inst
 	.hwr             (cpu_hwr              ),
 	.lwr             (cpu_lwr              ),
 
-	.hps_load_addr   (cdtv_nvr_load_addr   ),
+	.hps_load_addr   (cdtv_nvr_addr        ),
 	.hps_load_din    (cdtv_nvr_load_din    ),
 	.hps_load_we     (cdtv_nvr_load_we     ),
 
-	.hps_save_addr   (cdtv_nvr_save_addr   ),
+	.hps_save_addr   (cdtv_nvr_addr        ),
 	.hps_save_dout   (cdtv_nvr_save_dout   ),
 
 	.dirty           (cdtv_nvr_dirty       ),
 	.clear_dirty     (cdtv_nvr_clear_dirty )
+);
+
+// The memory card is the same module at 8 KB, in the $E00000 window.
+cdtv_nvram #(.ADDR_W(13)) cdtv_card_inst
+(
+	.clk             (clk                  ),
+	.reset           (reset                ),
+
+	.sel             (sel_cdtv_card        ),
+	.addr            (cpu_address_out      ),
+	.din             (cpu_data_out         ),
+	.dout            (cdtv_card_dout       ),
+	.rd              (cpu_rd               ),
+	.hwr             (cpu_hwr              ),
+	.lwr             (cpu_lwr              ),
+
+	.hps_load_addr   (cdtv_card_addr       ),
+	.hps_load_din    (cdtv_card_load_din   ),
+	.hps_load_we     (cdtv_card_load_we    ),
+
+	.hps_save_addr   (cdtv_card_addr       ),
+	.hps_save_dout   (cdtv_card_save_dout  ),
+
+	.dirty           (cdtv_card_dirty      ),
+	.clear_dirty     (cdtv_card_clear_dirty)
 );
 
 // Bridge → cpu_wrapper short-circuit. Either the bridge ($E9 window) or
@@ -1108,8 +1348,9 @@ cdtv_nvram cdtv_nvram_inst
 // cpu_wrapper bypasses the chip-bus DTACK wait. 8-bit NVRAM byte mirrors
 // into both halves of the 16-bit word (the chip-bus is byte-decomposed
 // upstream by CIA per spec section 5.2).
-assign cdtv_din    = sel_cdtv_nvram ? cdtv_nvr_dout : cdtv_bridge_dout;
-assign cdtv_selack = cdtv_bridge_selack | sel_cdtv_nvram;
+assign cdtv_din    = sel_cdtv_nvram ? cdtv_nvr_dout :
+                     sel_cdtv_card  ? cdtv_card_dout : cdtv_bridge_dout;
+assign cdtv_selack = cdtv_bridge_selack | sel_cdtv_nvram | sel_cdtv_card;
 //-------------------------------------------------------------------------------------
 
 //data multiplexer
@@ -1127,6 +1368,27 @@ assign custom_data_out[15:0] = agnus_data_out[15:0]
 							 | user_data_out[15:0];
 
 //--------------------------------------------------------------------------------------
+
+// Which source last reset the machine. A restore that ends in the Amiga
+// rebooting cannot be diagnosed without this: cpurst (the HOST asking, over
+// userio's reset-control register), sys_reset, and the CPU's own RESET
+// instruction all land on the same wire and produce the identical symptom --
+// ovl back to 1, ROM over address 0, the game restarting from the beginning.
+// Sticky, because the event is over long before anyone can read it.
+assign ss_reset_src = {ss_rst_cpuinstr, ss_rst_sys, ss_rst_host};
+reg ss_rst_host, ss_rst_sys, ss_rst_cpuinstr;
+always @(posedge clk) begin
+	if (ss_reset_src_clr) begin
+		ss_rst_host    <= 1'b0;
+		ss_rst_sys     <= 1'b0;
+		ss_rst_cpuinstr<= 1'b0;
+	end
+	else begin
+		if (cpurst)          ss_rst_host     <= 1'b1;
+		if (sys_reset)       ss_rst_sys      <= 1'b1;
+		if (~_cpu_reset_in)  ss_rst_cpuinstr <= 1'b1;
+	end
+end
 
 assign _cpu_reset = _rst;
 

@@ -126,7 +126,30 @@ module ciaa
 	input  [1:0] kbd_mouse_type, // 2 = keyboard data
 	input  [7:0] kbd_mouse_data, // Keyboard scan code
 	output       freeze,        // Action Replay freeze button
-	input        hrtmon_en      // HRTMon debugger enable
+	input        hrtmon_en,     // HRTMon debugger enable
+
+	// Save state. The CIAs are on the CPU bus, not the RGA bus, so the
+	// chipset register shadow never sees them -- and they could not be read
+	// back over the bus even if it did: reading ICR clears the pending
+	// interrupts and reading TOD moves its latch, so a capture through the
+	// register interface would damage the machine on every save. Everything
+	// here is therefore exported straight out of the flip-flops.
+	//
+	// Layout, low bits first:
+	//   [3:0]     regporta      port A output register (4 driven bits)
+	//   [11:4]    ddrporta      port A direction
+	//   [19:12]   ddrportb      port B direction
+	//   [27:20]   sdr_latch     serial data register
+	//   [37:28]   cia_int       {icrmask, icr}
+	//   [76:38]   cia_timera    {tmr, tmlh, tmll, tmcr}
+	//   [115:77]  cia_timerb    same shape as timer A
+	//   [190:116] cia_timerd    {tod, alarm, tod_latch, crb7, count_ena, latch_ena}
+	//
+	// ss_ld is one clk cycle wide and is NOT gated by clk7_en anywhere below:
+	// a restore runs with the Amiga's timebase stopped.
+	output [190:0] ss_state,
+	input          ss_ld,
+	input  [190:0] ss_ld_data
 );
 
 // Internal signal declarations
@@ -217,7 +240,9 @@ end
 // Keyboard sends data serially, one bit at a time
 // Data arrives ROTATED RIGHT by one bit and INVERTED
 always @(posedge clk) begin
-	if (reset) begin
+	if (ss_ld)
+		sdr_latch[7:0] <= ss_ld_data[27:20];
+	else if (reset) begin
 		sdr_latch[7:0] <= 0;
 		freeze_reg <= 0;
 	end
@@ -276,7 +301,9 @@ always @(posedge clk)
 
 // Port A output register (only bits 7,6,1,0 are outputs)
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    regporta[3:0] <= ss_ld_data[3:0];
+  else if (clk7_en) begin
     if (reset)
       regporta[3:0] <= 4'd0;
     else if (wr && pra)
@@ -285,7 +312,9 @@ always @(posedge clk)
 
 // Port A direction register
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    ddrporta[7:0] <= ss_ld_data[11:4];
+  else if (clk7_en) begin
     if (reset)
       ddrporta[7:0] <= 8'd0;  // All inputs by default
     else if (wr && ddra)
@@ -314,7 +343,9 @@ reg [7:0] ddrportb;         // Port B direction register
 
 // Port B direction register
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    ddrportb[7:0] <= ss_ld_data[19:12];
+  else if (clk7_en) begin
     if (reset)
       ddrportb[7:0] <= 8'd0;
     else if (wr && ddrb)
@@ -357,7 +388,10 @@ cia_int cnt
   .ser(keystrobe | ser_tx_irq),    // Keyboard or serial transmit interrupt
   .data_in(data_in),
   .data_out(icr_out),
-  .irq(irq)
+  .irq(irq),
+  .ss_state(ss_cnt),
+  .ss_ld(ss_ld),
+  .ss_ld_data(ss_ld_data[37:28])
 );
 
 // Timer A - General purpose timer, serial port baud rate
@@ -375,7 +409,10 @@ cia_timera tmra
   .eclk(eclk),
   .spmode(spmode),
   .tmra_ovf(tmra_ovf),
-  .irq(ta)
+  .irq(ta),
+  .ss_state(ss_tmra),
+  .ss_ld(ss_ld),
+  .ss_ld_data(ss_ld_data[76:38])
 );
 
 // Timer B - General purpose timer, can cascade with Timer A
@@ -392,7 +429,10 @@ cia_timerb tmrb
   .data_out(tmrb_out),
   .eclk(eclk),
   .tmra_ovf(tmra_ovf),
-  .irq(tb)
+  .irq(tb),
+  .ss_state(ss_tmrb),
+  .ss_ld(ss_ld),
+  .ss_ld_data(ss_ld_data[115:77])
 );
 
 // Timer D - Time of Day clock with alarm
@@ -409,8 +449,21 @@ cia_timerd tmrd
   .data_in(data_in),
   .data_out(tmrd_out),
   .count(tick & ~tick_del),  // Count on rising edge of tick
-  .irq(alrm)
+  .irq(alrm),
+  .ss_state(ss_tmrd),
+  .ss_ld(ss_ld),
+  .ss_ld_data(ss_ld_data[190:116])
 );
 
+
+
+// Save state: the four sub-modules' own state, gathered below.
+wire  [9:0] ss_cnt;
+wire [38:0] ss_tmra;
+wire [38:0] ss_tmrb;
+wire [74:0] ss_tmrd;
+
+assign ss_state = {ss_tmrd, ss_tmrb, ss_tmra, ss_cnt,
+                   sdr_latch[7:0], ddrportb[7:0], ddrporta[7:0], regporta[3:0]};
 
 endmodule

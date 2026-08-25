@@ -48,7 +48,14 @@ module denise (
   input  wire           ecs,            // enables ECS chipset features
   input  wire           aga,            // enables AGA features
   output wire           hires,          // hires
-  output wire           shres           // shres
+  output wire           shres,          // shres
+
+  // Save state: the 256-entry colour table. See denise_colortable.v.
+  input  wire           ss_clut_active,
+  input  wire [  8-1:0] ss_clut_addr,
+  output wire [ 32-1:0] ss_clut_rd_data,
+  input  wire           ss_clut_wr_en,
+  input  wire [ 32-1:0] ss_clut_wr_data
 );
 
 
@@ -408,7 +415,12 @@ denise_colortable clut0
   .bank(bank),
   .loct(loct),
   .ehb_en(ehb_en),
-  .rgb(clut_rgb) // rgb data is delayed by one clk28m clock cycle
+  .rgb(clut_rgb), // rgb data is delayed by one clk28m clock cycle
+  .ss_active(ss_clut_active),
+  .ss_addr(ss_clut_addr),
+  .ss_rd_data(ss_clut_rd_data),
+  .ss_wr_en(ss_clut_wr_en),
+  .ss_wr_data(ss_clut_wr_data)
 );
 
 // instantiate HAM (hold and modify) module

@@ -141,7 +141,74 @@ entity TG68KdotC_Kernel is
 		-- D-cache enable bit (CACR bit 8 on real 030+). Defaults on until a
 		-- MOVEC CACR write claims it; gates cpu_cache_new's cc_den.
 		D_CACHE_out				: out std_logic;
-		VBR_out					: out std_logic_vector(31 downto 0)
+		VBR_out					: out std_logic_vector(31 downto 0);
+
+		-- Save state export. Read-only view of the architectural registers,
+		-- valid whenever the CPU is stopped at an instruction boundary.
+		ss_reg_index			: in  std_logic_vector( 3 downto 0) := (OTHERS => '0');
+		ss_reg_data				: out std_logic_vector(31 downto 0);
+		-- TG68_PC is the FETCH pointer, not the architectural PC: by the time
+		-- an instruction executes it has already run on into that
+		-- instruction's extension words. Restoring it resumes the CPU on an
+		-- operand -- see ss_exe_pc, which is what a savestate wants.
+		ss_pc						: out std_logic_vector(31 downto 0);
+		-- The architectural PC: the address of the instruction being executed.
+		-- This is exe_pc, the value the kernel itself pushes as the return
+		-- address in an exception frame, so it is the core's own answer to
+		-- "where is this CPU". Valid when ss_at_boundary is high.
+		ss_exe_pc				: out std_logic_vector(31 downto 0);
+		-- High on the cycle the CPU has just decoded an opcode and has not yet
+		-- executed any of it -- the only place a savestate may freeze. endOPC
+		-- is NOT this point: it is set alongside setopcode, one instruction
+		-- earlier, with TG68_PC already advanced into the operand words.
+		ss_at_boundary			: out std_logic;
+		-- Diagnostics: the exception being dispatched. trap_vector is the 68k
+		-- vector OFFSET, so $08 bus error, $0C address error, $10 illegal, $20
+		-- privilege violation, $60 and up the interrupt autovectors. High for
+		-- the trap0 microcode state, which every exception passes through.
+		ss_trap_vector			: out std_logic_vector(9 downto 0);
+		ss_trap_active			: out std_logic;
+		ss_sr						: out std_logic_vector(15 downto 0);
+		ss_usp					: out std_logic_vector(31 downto 0);
+
+		-- Save state restore. Write side of the same architectural registers,
+		-- driven only while the savestate controller has the CPU frozen. Index
+		-- mapping matches the read port above: 0-7 = D0-D7, 8-15 = A0-A7.
+		-- See the register file process for why these writes have to sit
+		-- OUTSIDE the clkena_lw guard.
+		ss_wr_index				: in  std_logic_vector( 3 downto 0) := (OTHERS => '0');
+		ss_wr_data				: in  std_logic_vector(31 downto 0) := (OTHERS => '0');
+		ss_wr_en					: in  std_logic := '0';
+		ss_pc_wr					: in  std_logic := '0';
+		ss_sr_wr					: in  std_logic := '0';
+		ss_usp_wr				: in  std_logic := '0';
+		-- VBR and CACR are exported through cpu_wrapper's VBR_out / CACR_out
+		-- and are part of the save state vector, so they need a write side
+		-- too. Without these two a restored machine would keep the running
+		-- machine's exception vector base -- every trap and interrupt would
+		-- dispatch through the wrong table, which does not fail where the
+		-- bug is. ss_cacr_wr takes CACR(3 downto 0) only, which is all the
+		-- vector carries; CACR_DC / CACR_DC_owned are a local D-cache
+		-- heuristic and are deliberately left alone.
+		ss_vbr_wr				: in  std_logic := '0';
+		ss_cacr_wr				: in  std_logic := '0';
+
+		-- Save state restore: sequencer re-seed. Pulse for one clock after
+		-- the architectural registers above have been written and before the
+		-- CPU clock enable is released.
+		--
+		-- Those registers are the programmer's model. They are not the CPU.
+		-- state / opcode / last_opc_read / decodeOPC / endOPC / execOPC /
+		-- nextpass / micro_state and friends say which part of which
+		-- instruction is in flight; a restore that leaves them alone resumes
+		-- in the middle of an instruction belonging to a different moment,
+		-- with a register file and a PC from yet another one.
+		--
+		-- Reset has the same problem and solves it by seeding a known
+		-- sequencer state rather than restoring one. ss_resume does the same
+		-- thing with a different seed; see the Reset branch of the "PC Calc +
+		-- fetch opcode" process for how, and why the seed differs.
+		ss_resume				: in  std_logic := '0'
 		);
 end TG68KdotC_Kernel;
 
@@ -422,6 +489,11 @@ ALU: TG68K_ALU
 		bf_ffo_offset => alu_bf_ffo_offset,
 		bf_loffset => alu_bf_loffset(4 downto 0),
 
+		-- Save state restore: the CCR half of SR. Flags is owned by the ALU
+		-- block, so the write has to be forwarded there.
+		ss_ccr_wr => ss_sr_wr,
+		ss_ccr => ss_wr_data(7 downto 0),
+
 		set_V_Flag => set_V_Flag,			--: buffer bit;
 		Flags => Flags,					 	--: buffer std_logic_vector(8 downto 0);
 		c_out => c_out,					 	--: buffer std_logic_vector(2 downto 0);
@@ -572,16 +644,50 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 				WR_AReg <= rf_dest_addr(3);
 				RDindex_A <= conv_integer(rf_dest_addr(3 downto 0));
 				RDindex_B <= conv_integer(rf_source_addr(3 downto 0));
-				IF Wwrena='1' THEN
-					regfile(RDindex_A) <= regin;
-				END IF;
-				
-				IF exec(to_USP)='1' THEN
-					USP <= reg_QA;
-				END IF;	
+			END IF;
+
+			-- Register file and USP writes: microcode and savestate together.
+			--
+			-- These deliberately sit OUTSIDE the clkena_lw guard above, and
+			-- inside rising_edge(clk). cpu_wrapper holds the CPU clock enable
+			-- low for the whole time the savestate controller has the core
+			-- parked (ss_cpu_hold gates clkena_p), and clkena_lw is
+			-- clkena_in AND memmaskmux(3), so clkena_lw is low across exactly
+			-- the window in which a restore drives ss_wr_en. A savestate write
+			-- placed inside the guard would silently never happen.
+			--
+			-- The microcode writes are unchanged: they keep clkena_lw='1' in
+			-- their own conditions. The savestate write is given explicit
+			-- priority rather than relying on the two never colliding.
+			IF ss_wr_en='1' THEN
+				regfile(conv_integer(ss_wr_index)) <= ss_wr_data;
+			ELSIF clkena_lw='1' AND Wwrena='1' THEN
+				regfile(RDindex_A) <= regin;
+			END IF;
+
+			IF ss_usp_wr='1' THEN
+				USP <= ss_wr_data;
+			ELSIF clkena_lw='1' AND exec(to_USP)='1' THEN
+				USP <= reg_QA;
 			END IF;
 		END IF;
 	END PROCESS;
+
+-----------------------------------------------------------------------------
+-- Save state export
+-----------------------------------------------------------------------------
+-- A second, asynchronous read port on the register file. The savestate
+-- controller sweeps ss_reg_index while the CPU is frozen, so there is no
+-- contention with RDindex_A/RDindex_B and no timing path into the execute
+-- pipeline.
+ss_reg_data <= regfile(conv_integer(ss_reg_index));
+ss_pc       <= TG68_PC;
+ss_exe_pc   <= exe_pc;
+ss_at_boundary <= '1' WHEN decodeOPC='1' ELSE '0';
+ss_trap_vector <= trap_vector(9 downto 0);
+ss_trap_active <= '1' WHEN micro_state=trap0 ELSE '0';
+ss_sr       <= FlagsSR & Flags;
+ss_usp      <= USP;
 
 -----------------------------------------------------------------------------
 -- Write Reg
@@ -756,6 +862,17 @@ PROCESS (clk)
 				use_direct_data <= '0';
 				Z_error <= '0';
 				writePCnext <= '0';
+			-- Save state restore: see the sequencer re-seed in the "PC Calc +
+			-- fetch opcode" process. These stage an operand across the clocks
+			-- of one instruction, so they mean nothing once the instruction
+			-- they belonged to is abandoned.
+			ELSIF ss_resume='1' THEN
+				store_in_tmp    <= '0';
+				direct_data     <= '0';
+				use_direct_data <= '0';
+				useStackframe2  <= '0';
+				Z_error         <= '0';
+				writePCnext     <= '0';
 			ELSIF clkena_lw='1' THEN
 				useStackframe2<='0';
 				direct_data <= '0';
@@ -1101,6 +1218,14 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						TG68_PC <= TG68_PC_add;
 					END IF;	
 				END IF;	
+				-- Save state restore: PC. Outside the clkena_in guard above for
+				-- the same reason the register file write is outside clkena_lw:
+				-- the CPU clock enable is held low for the whole restore window.
+				-- This is the last assignment to TG68_PC in the process, so it
+				-- also takes explicit priority over the microcode PC updates.
+				IF ss_pc_wr='1' THEN
+					TG68_PC <= ss_wr_data;
+				END IF;
 				IF clkena_lw='1' THEN
 					interrupt <= setinterrupt;
 					decodeOPC <= setopcode;
@@ -1258,10 +1383,74 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					END IF;
 				END IF;	
 			END IF;	
+			-- Save state restore: sequencer re-seed.
+			--
+			-- Everything the savestate vector carries -- D0-D7, A0-A7, PC, SR,
+			-- USP, VBR, CACR -- is architectural state. None of it says where the
+			-- CPU is inside an instruction. state, opcode, last_opc_read,
+			-- decodeOPC, endOPC, execOPC, nextpass, micro_state and exec do, and
+			-- after a restore they are still describing whichever instruction was
+			-- in flight when the machine was frozen -- an instruction belonging to
+			-- a different moment than the register file and the PC now do.
+			--
+			-- Reset has the same problem and does not solve it by restoring those
+			-- signals: it seeds a synthesised "movea.l (0).l,a7 / jmp nn.l" with
+			-- PC=4, so the CPU starts from a sequencer state the designer picked
+			-- rather than one it happened to be in. This is the same trick with
+			-- the one seed a restore needs: reset's seed goes where the long at
+			-- address 4 points, and a restore has to go to the restored PC.
+			--
+			-- The seed is a nop that has just been fetched:
+			--
+			--   state="01"   no bus cycle this clock. The fetch address is not
+			--                TG68_PC but memaddr_delta_rega, which is loaded from
+			--                TG68_PC_add one clock earlier (and only while
+			--                clkena_in is high, so the restore window cannot have
+			--                loaded it). Spending a clock in "01" is what gives it
+			--                time to be recomputed from the restored PC. Reset
+			--                spends its first clock in "01" for exactly this.
+			--
+			--   opcode and last_opc_read = nop
+			--                decoding a nop asks for nothing, so the next step is
+			--                setstate="00": fetch code at the restored PC. Because
+			--                state/="00" on that clock the kernel takes its next
+			--                opcode from last_opc_read rather than from the bus,
+			--                which is why that has to be a nop as well -- the same
+			--                reason reset puts its jmp in last_opc_read.
+			--
+			--   the rest    cleared to exactly what reset clears it to.
+			--
+			-- TG68_PC is deliberately not written here. ss_pc_wr above already
+			-- holds the restored PC and the controller strobes it first; driving
+			-- it from two places would just be a second thing to keep in step.
+			IF Reset='0' AND ss_resume='1' THEN
+				state           <= "01";
+				addrvalue       <= '0';
+				opcode          <= X"4E71";			--nop
+				last_opc_read   <= X"4E71";			--nop
+				decodeOPC       <= '0';
+				endOPC          <= '0';
+				execOPC         <= '0';
+				nextpass        <= '0';
+				interrupt       <= '0';
+				trap_interrupt  <= '0';
+				trap_trace      <= '0';
+				trap_berr       <= '0';
+				make_berr       <= '0';
+				stop            <= '0';
+				rot_cnt         <= "000001";
+				TG68_PC_word    <= '0';
+				writePCbig      <= '0';
+				Suppress_Base   <= '0';
+				memmask         <= "111111";
+				exec_write_back <= '0';
+			END IF;
 		END IF;	
 	
 		IF rising_edge(clk) THEN
 			IF Reset = '1' THEN
+				PCbase <= '1';
+			ELSIF ss_resume='1' THEN
 				PCbase <= '1';
 			ELSIF clkena_lw='1' THEN
 				PCbase <= set_PCbase OR PCbase;
@@ -1283,6 +1472,16 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				END IF;	
 				exec(get_2ndOPC) <= set(get_2ndOPC) OR setopcode;
 			END IF;	
+			-- Save state restore: see the sequencer re-seed above. exec holds
+			-- the decoded microcode of the instruction that was in flight.
+			-- Reset gets away with leaving it alone because at power-on it is
+			-- don't-care; after a restore it is not. exec(directPC) or
+			-- exec(ea_to_pc) still set would overwrite the restored PC on the
+			-- first enabled clock, before a single instruction had run.
+			IF Reset='0' AND ss_resume='1' THEN
+				exec     <= (OTHERS => '0');
+				exec_tas <= '0';
+			END IF;
 		END IF;	
 	END PROCESS;
 	
@@ -1421,6 +1620,18 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 					FlagsSR(6) <= '0';
 				END IF;
 				FlagsSR(3) <= '0';
+			END IF;
+			-- Save state restore: SR high byte (T.S.0III). Outside the
+			-- clkena_lw branch above -- see the register file process for why.
+			-- SVmode / preSVmode / FC(2) are this core's shadow copies of the
+			-- S bit; restoring FlagsSR(5) without them would leave the CPU
+			-- running in the wrong privilege mode with the wrong function
+			-- codes. SR bit 13 is FlagsSR(5).
+			IF ss_sr_wr='1' THEN
+				FlagsSR <= ss_wr_data(15 downto 8);
+				SVmode <= ss_wr_data(13);
+				preSVmode <= ss_wr_data(13);
+				FC(2) <= ss_wr_data(13);
 			END IF;
 		END IF;	
 	END PROCESS;
@@ -3248,6 +3459,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		IF rising_edge(clk) THEN
 	        IF Reset='1' THEN
 				micro_state <= ld_nn;
+			-- Save state restore: see the sequencer re-seed in the "PC Calc +
+			-- fetch opcode" process. Reset seeds ld_nn because its seed opcode
+			-- is part-way through an absolute-long operand fetch. The nop seed
+			-- used for a restore is not part-way through anything.
+			ELSIF ss_resume='1' THEN
+				micro_state <= idle;
 			ELSIF clkena_lw='1' THEN
 				trapd <= trapmake;
 				micro_state <= next_micro_state;
@@ -4022,6 +4239,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		CACR <= (others => '0');
 		CACR_DC <= '1';
 		CACR_DC_owned <= '0';
+	  -- Savestate restore. Outside the clkena_lw guard for the same reason
+	  -- the register file write is (see that process): the CPU's clock
+	  -- enable is held low for the whole restore window, so a write placed
+	  -- inside the guard would silently never happen. Reset keeps priority.
+	  elsif ss_vbr_wr = '1' then
+		VBR <= ss_wr_data;
+	  elsif ss_cacr_wr = '1' then
+		CACR <= ss_wr_data(3 downto 0);
 	  elsif clkena_lw = '1' and exec(movec_wr) = '1' then
 		case brief(11 downto 0) is
 		  when X"000" => SFC <= reg_QA(2 downto 0); -- SFC -- 68010+
