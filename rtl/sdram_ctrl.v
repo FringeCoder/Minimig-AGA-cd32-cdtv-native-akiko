@@ -37,8 +37,14 @@ module sdram_ctrl
 	input             cache_rst,
 	input             cache_inhibit,
 	input       [3:0] cpu_cache_ctrl,
+	// D-cache software toggle: gates dtag matches independently
+	// of cpu_cache_ctrl[0]. See cpu_cache_new.cc_den.
+	input             dcache_sw_en,
 	// sdram
-	output reg [12:0] sd_addr,
+	// Not a register any more: a 2:1 select between sd_addr_chip and
+	// sd_addr_cpu, resolved at the output. See the "split address register"
+	// comment further down for why.
+	output     [12:0] sd_addr,
 	output reg  [1:0] sd_ba,
 	output            sd_cs,
 	output reg        sd_we,
@@ -111,6 +117,7 @@ cpu_cache_new cpu_cache
 	.clk              (sysclk),                // clock
 	.rst              (!reset || !cache_rst),  // cache reset
 	.cpu_cache_ctrl   (cpu_cache_ctrl),        // CPU cache control
+	.dcache_sw_en     (dcache_sw_en),          // D-cache software toggle
 	.cache_inhibit    (cache_inhibit),         // cache inhibit
 	.cpu_cs           (ramsel),                // cpu activity
 	.cpu_adr          (cpuAddr),               // cpu address
@@ -149,6 +156,15 @@ reg        write_ack;
 reg  [1:0] write_dqm;
 reg [24:1] writeAddr;
 reg [15:0] writeDat;
+// Store-to-load forwarding: when the chipset reads a 4-word block
+// the 1-entry CPU write buffer still holds (posted but not yet committed to
+// SDRAM), merge writeDat into the matching burst word so the chipset never
+// sees stale pre-write data. Closes the posted-write vs chip-read coherency
+// hole that appears when the turbo chip-RAM D-cache is on.
+reg        fwd_en = 1'b0;
+reg  [1:0] fwd_pos;
+reg [15:0] fwd_dat;
+reg  [1:0] fwd_dqm;
 
 always @ (posedge sysclk) begin
 	reg  [1:0] write_state;
@@ -192,14 +208,21 @@ reg [15:0] chip48_1, chip48_2, chip48_3;
 
 always @ (posedge sysclk) begin
 	reg [15:0] sdata_chip;
+	reg [15:0] m;
 
 	sdata_chip <= sdata_reg;
+	// byte-merge the pending forwarded CPU write into this burst word
+	m = sdata_chip;
+	if(fwd_en) begin
+		if(!fwd_dqm[1]) m[15:8] = fwd_dat[15:8];
+		if(!fwd_dqm[0]) m[7:0]  = fwd_dat[7:0];
+	end
 	if(slot_type == CHIP) begin
 		case(sdram_state)
-			 9: chipRD   <= sdata_chip;
-			11: chip48_1 <= sdata_chip;
-			13: chip48_2 <= sdata_chip;
-			15: chip48_3 <= sdata_chip;
+			 9: chipRD   <= (fwd_en && fwd_pos==2'd0) ? m : sdata_chip;
+			11: chip48_1 <= (fwd_en && fwd_pos==2'd1) ? m : sdata_chip;
+			13: chip48_2 <= (fwd_en && fwd_pos==2'd2) ? m : sdata_chip;
+			15: chip48_3 <= (fwd_en && fwd_pos==2'd3) ? m : sdata_chip;
 		endcase
 	end
 end
@@ -230,16 +253,67 @@ end
 
 //// sdram state ////
 reg [3:0] sdram_state;
+
+// Registered decodes of the two states that drive sd_addr. The path
+// sdram_state -> sd_addr is this core's critical path: sd_addr is a wide,
+// heavily loaded register, and decoding four state bits in front of it left
+// nothing for routing. These carry the same value one cycle earlier, computed
+// from the very expression that assigns sdram_state below, so state_is_N is
+// true on exactly the cycles sdram_state == N -- a decode moved across a
+// register boundary, not a timing assumption.
+//
+// Power-up: both start 0 while sdram_state is also 0, so the first cycle is
+// skipped. Harmless -- init_done is still low then, and the init sequence
+// decodes sdram_state directly rather than going through these.
+reg state_is_0, state_is_2;
+
 always @ (posedge sysclk) begin
 	reg old_7m;
+	reg [3:0] next_state;
 
-	sdram_state <= sdram_state + 1'd1;
+	// Blocking, and evaluated before old_7m is updated, so the edge detect sees
+	// the same old_7m the original single assignment did.
+	next_state  = (~old_7m & c_7m) ? 4'd0 : (sdram_state + 1'd1);
+
+	sdram_state <= next_state;
+	state_is_0  <= (next_state == 4'd0);
+	state_is_2  <= (next_state == 4'd2);
 
 	old_7m <= c_7m;
-	if(~old_7m & c_7m) sdram_state <= 0;
 end
 
 //// sdram control ////
+
+// Split address register.
+//
+// sd_addr used to be one 13-bit register loaded from chipAddr (chip DMA
+// arbiter / Agnus side of the die), from writeAddr and cpuAddr (CPU wrapper
+// side) and from casaddr. Being an output it is also packed into the I/O cell
+// by FAST_OUTPUT_REGISTER (sys/sys.tcl), so it is nailed to the SDRAM_A pin
+// locations -- which are scattered across three I/O banks -- and the fitter
+// cannot move it towards any of its sources. The result was 4.7 ns of pure
+// interconnect on the final hop and sd_addr as the destination of the binding
+// setup path in three separate builds.
+//
+// So: one register per source region, and a select at the output. Each half
+// now has a single far-away source (sd_addr_chip <- chipAddr; sd_addr_cpu <-
+// writeAddr/cpuAddr, which are the same region and writeAddr is local anyway),
+// so the fitter can place each near its own driver. The mux moves the delay
+// onto the register->pin path, which has a whole 8.808 ns before SDRAM_CLK
+// rises and is not the constrained path.
+//
+// Equivalence with the single register rests on one invariant: the two halves
+// hold the SAME value except during sdram_state 1 and 2, and in exactly those
+// two cycles sd_addr_sel_cpu names the half that was just loaded. State 0
+// loads one half and sets the select; state 2 writes BOTH halves with the CAS
+// address, which re-converges them for the rest of the frame. The select is
+// never cleared -- on an IDLE slot, or while init_done is low, it must keep
+// pointing at whichever half last held the live address.
+reg [12:0] sd_addr_chip;
+reg [12:0] sd_addr_cpu;
+reg        sd_addr_sel_cpu = 1'b0;
+
+assign sd_addr = sd_addr_sel_cpu ? sd_addr_cpu : sd_addr_chip;
 
 reg  [2:0] slot_type = IDLE;
 reg [15:0] sdata_reg;
@@ -274,7 +348,10 @@ always @ (posedge sysclk) begin
 		if(sdram_state == 0) begin
 			case(initstate)
 				4 : begin // PRECHARGE
-					sd_addr[10]  <= 1; // all banks
+					// partial write, as before: only A10 is forced, every
+					// other bit keeps whatever the last slot left there.
+					sd_addr_chip[10] <= 1; // all banks
+					sd_addr_cpu[10]  <= 1;
 					sd_ras       <= 0;
 					sd_cas       <= 1;
 					sd_we        <= 0;
@@ -288,21 +365,25 @@ always @ (posedge sysclk) begin
 					sd_ras       <= 0;
 					sd_cas       <= 0;
 					sd_we        <= 0;
-					sd_addr      <= 13'b0001000100010; // CL=2, BURST=4
+					// full write to both halves -> they re-converge here
+					// regardless of what the select points at.
+					sd_addr_chip <= 13'b0001000100010; // CL=2, BURST=4
+					sd_addr_cpu  <= 13'b0001000100010;
 				end
 			endcase
 		end
 	end else begin
 
-		case(sdram_state)
-
-			// RAS
-			0 : begin
+		// Was case(sdram_state) on 0 and 2 -- now the registered decodes, so the
+		// four state bits are no longer in front of sd_addr. Same cycles, same
+		// order, same mutual exclusion.
+		if(state_is_0) begin
 				cas_sd_cas      <= 1;
 				cas_sd_we       <= 1;
 				cas_dqm         <= 0;
 				sd_dqm          <= 3;
 				slot_type       <= IDLE;
+				fwd_en          <= 0;
 
 				if(~&rcnt) rcnt <= rcnt + 1'd1;
 
@@ -310,17 +391,27 @@ always @ (posedge sysclk) begin
 				// (this includes anything on the "motherboard" - chip RAM, slow RAM and Kickstart, turbo modes notwithstanding)
 				if(~chipDMA | ~chipRW) begin
 					slot_type    <= CHIP;
-					{sd_ba,sd_addr,casaddr[8:0]} <= chipAddr;
+					{sd_ba,sd_addr_chip,casaddr[8:0]} <= chipAddr;
+					sd_addr_sel_cpu <= 1'b0;
 					sd_ras       <= 0;
 					cas_dqm      <= {chipU,chipL};
 					cas_sd_cas   <= 0;
 					cas_sd_we    <= chipRW;
 					datawr       <= chipWR;
 					chipWE       <= !chipRW;
+					// posted CPU write pending to the same 4-word block this chip
+					// READ is fetching -> forward it into the burst (chipRW=1 read).
+					if(chipRW & write_req & (writeAddr[24:3] == chipAddr[24:3])) begin
+						fwd_en  <= 1'b1;
+						fwd_pos <= writeAddr[2:1] - chipAddr[2:1];
+						fwd_dat <= writeDat;
+						fwd_dqm <= write_dqm;
+					end
 				end
 				else if(write_req) begin
 					slot_type    <= CPU_WRITECACHE;
-					{sd_ba,sd_addr,casaddr[8:0]} <= writeAddr;
+					{sd_ba,sd_addr_cpu,casaddr[8:0]} <= writeAddr;
+					sd_addr_sel_cpu <= 1'b1;
 					sd_ras       <= 0;
 					cas_dqm      <= write_dqm;
 					cas_sd_we    <= 0;
@@ -331,7 +422,8 @@ always @ (posedge sysclk) begin
 				// request from read cache
 				else if(cache_req) begin
 					slot_type    <= CPU_READCACHE;
-					{sd_ba,sd_addr,casaddr[8:0]} <= cpuAddr;
+					{sd_ba,sd_addr_cpu,casaddr[8:0]} <= cpuAddr;
+					sd_addr_sel_cpu <= 1'b1;
 					sd_ras       <= 0;
 					cas_sd_cas   <= 0;
 				end
@@ -343,20 +435,26 @@ always @ (posedge sysclk) begin
 				end
 			end
 
-			// CAS
-			2 : begin
-				sd_addr         <= {1'b1, casaddr}; // AUTO PRECHARGE
+		// CAS
+		else if(state_is_2) begin
+				// Both halves, so they re-converge for the rest of the frame
+				// and the select stops mattering until the next state 0. The
+				// partial [12:11] write below keeps its "last assignment
+				// wins" ordering within each half, exactly as it did on the
+				// single register.
+				sd_addr_chip    <= {1'b1, casaddr}; // AUTO PRECHARGE
+				sd_addr_cpu     <= {1'b1, casaddr};
 				sd_cas          <= cas_sd_cas;
 				sd_dqm          <= 0;
 				if(!cas_sd_we) begin
 					sd_data      <= datawr;
-					sd_addr[12:11]<= cas_dqm;
+					sd_addr_chip[12:11] <= cas_dqm;
+					sd_addr_cpu[12:11]  <= cas_dqm;
 					sd_dqm       <= cas_dqm;
 					sd_we        <= 0;
 				end
 				write_ack       <= 0; // indicate to write that it's safe to accept the next write
-			end
-		endcase
+		end
 	end
 end
 

@@ -52,7 +52,7 @@ set_global_assignment -name ALM_REGISTER_PACKING_EFFORT LOW
 set_global_assignment -name OPTIMIZE_POWER_DURING_SYNTHESIS OFF
 set_global_assignment -name ROUTER_REGISTER_DUPLICATION ON
 set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
-set_global_assignment -name SEED 2
+set_global_assignment -name SEED 14
 set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_FB_PALETTE=1"
 
@@ -222,17 +222,24 @@ set_global_assignment -name QIP_FILE rtl/gayle.qip
 set_global_assignment -name QIP_FILE rtl/paula.qip
 set_global_assignment -name QIP_FILE rtl/denise.qip
 set_global_assignment -name QIP_FILE "rtl/fpga-toccata/toccata.qip"
+set_global_assignment -name QIP_FILE rtl/misterfloppy.qip
+set_global_assignment -name VERILOG_FILE rtl/A2065/a2065.v
+set_global_assignment -name VERILOG_FILE rtl/A2065/a2065_regfile.v
+set_global_assignment -name VERILOG_FILE rtl/A2065/a2065_ddram.v
+set_global_assignment -name VERILOG_FILE rtl/A2065/a2065_ddram_arbiter.v
+set_global_assignment -name VERILOG_FILE rtl/A2065/a2065_ddr3_mailbox.v
 set_global_assignment -name VERILOG_FILE rtl/gary.v
 set_global_assignment -name VERILOG_FILE rtl/rtg.v
 set_global_assignment -name VERILOG_FILE rtl/akiko.v
 set_global_assignment -name VERILOG_FILE rtl/akiko_hps_bridge.v
-set_global_assignment -name VERILOG_FILE rtl/akiko_bus_trace.v
-set_global_assignment -name VERILOG_FILE rtl/chipset_bus_trace.v
 set_global_assignment -name VERILOG_FILE rtl/akiko_nvram.v
 set_global_assignment -name VERILOG_FILE rtl/cdtv_bridge.v
+set_global_assignment -name VERILOG_FILE rtl/cdtv_hps_bridge.v
 set_global_assignment -name VERILOG_FILE rtl/cdtv_nvram.v
-set_global_assignment -name VERILOG_FILE rtl/cdtv_trace.v
+set_global_assignment -name VERILOG_FILE rtl/chipdma_arb.v
 set_global_assignment -name VERILOG_FILE rtl/fastchip.v
+set_global_assignment -name VERILOG_FILE rtl/snac_psx.v
+set_global_assignment -name VERILOG_FILE rtl/snac_cd32.v
 set_global_assignment -name VERILOG_FILE rtl/userio.v
 set_global_assignment -name VERILOG_FILE rtl/cart.v
 set_global_assignment -name VERILOG_FILE rtl/amiga_clk.v
@@ -242,6 +249,15 @@ set_global_assignment -name VERILOG_FILE rtl/minimig_m68k_bridge.v
 set_global_assignment -name VERILOG_FILE rtl/minimig_bankmapper.v
 set_global_assignment -name VERILOG_FILE rtl/minimig.v
 set_global_assignment -name VERILOG_FILE rtl/cpu_wrapper.v
+set_global_assignment -name VERILOG_FILE rtl/memory_router.v
+set_global_assignment -name VERILOG_FILE rtl/ss_crc32.v
+set_global_assignment -name VERILOG_FILE rtl/ss_quiesce.v
+set_global_assignment -name VERILOG_FILE rtl/ss_serdes.v
+set_global_assignment -name VERILOG_FILE rtl/ss_dma.v
+set_global_assignment -name VERILOG_FILE rtl/ss_ctrl.v
+set_global_assignment -name VERILOG_FILE rtl/ss_regshadow.v
+set_global_assignment -name VERILOG_FILE rtl/ss_freeze_phase.v
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ss_state_fanout.sv
 set_global_assignment -name VERILOG_FILE hps_ext.v
 set_global_assignment -name VERILOG_FILE rtl/cdda.v
 set_global_assignment -name SDC_FILE Minimig.sdc
@@ -311,4 +327,3 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to SDIO_DAT[*]
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to SD_SPI*
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to USER_IO[*]
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to VGA_EN
-set_global_assignment -name VERILOG_FILE rtl/chipdma_arb.v

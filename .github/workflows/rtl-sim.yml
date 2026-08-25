@@ -1,0 +1,143 @@
+# Run the RTL testbenches that already exist in rtl/sim/ on every push.
+#
+# These benches ship with ModelSim .do runners, and ModelSim is not installed on
+# the dev machine -- so in practice they were never run, including through an
+# entire session of changes to sdram_ctrl.v. Icarus runs both of these fine, so
+# there is no reason for them to be manual.
+#
+# Only the two benches that cover the memory path are here. The akiko/cdtv/
+# chipset benches in rtl/sim/ have not been tried under Icarus yet; add them as
+# they are confirmed to run rather than committing a red pipeline.
+name: rtl-sim
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  sim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Icarus Verilog and GHDL
+        run: sudo apt-get update && sudo apt-get install -y iverilog ghdl
+
+      # sdram_ctrl's chip-read burst path, store-to-load forwarding and byte-enable
+      # merging. Waits on dut.sdram_state == 0, so it also covers the registered
+      # state decode that the sd_addr retiming introduced -- a wrong decode means
+      # the CHIP slot never loads chipAddr and the baseline reads come back garbage.
+      - name: SDRAM store-to-load forwarding
+        run: |
+          set -euo pipefail
+          cd rtl/sim/sdram
+          # ModelSim needs declaration-before-use; this regenerates the reordered
+          # copy from the real sdram_ctrl.v. Behaviour-identical, sim only.
+          python3 make_sim_sdram.py
+          iverilog -g2012 -o tb_fwd \
+            dpram_sim.v ../../cpu_cache_new.v sdram_ctrl_sim.v tb_sdram_fwd.sv
+          vvp tb_fwd | tee out.log
+          grep -q "RUN: PASS" out.log
+
+      # cpu_cache_new's fill-vs-snoop interlock. sdram_ctrl drives snoop_act from
+      # chipWE, so a change to the chip write path shows up here.
+      - name: Cache fill/snoop interlock
+        run: |
+          set -euo pipefail
+          cd rtl/sim/cache
+          iverilog -g2012 -o tb_snoop \
+            dpram_sim.v ../../cpu_cache_new.v tb_cache_snoop.sv
+          vvp tb_snoop | tee out.log
+          grep -q "RUN: PASS" out.log
+
+      # hps_ext's save state diagnostic sub-channel (UIO class 0xF600). Drives
+      # EXT_BUS the way sys/hps_io.sv does and checks the word order and class
+      # decode against the real module, because the byte_cnt alignment the host
+      # poller depends on is a convention that appears nowhere in the source.
+      - name: hps_ext save state diagnostics
+        run: |
+          set -euo pipefail
+          cd rtl/sim/hps_ext
+          iverilog -g2012 -o tb_ssdiag ../../../hps_ext.v tb_hps_ext_ssdiag.sv
+          vvp tb_ssdiag | tee out.log
+          grep -q "RUN: PASS" out.log
+
+      # agnus_beamcounter's light pen latch. VPOSR/VHPOSR used to be a plain mux
+      # on the userspace-supplied position, so BPLCON0 bit 3 froze the beam
+      # counters for as long as it stayed set and every beam-wait loop hung --
+      # with no gun connected they froze at zero, so it hung with no light pen
+      # in the room. The bench counts distinct VHPOSR values across a frame;
+      # against the old code that count is 1.
+      - name: Light pen latch
+        run: |
+          set -euo pipefail
+          cd rtl/sim/lightpen
+          iverilog -g2012 -o tb ../../agnus_beamcounter.v tb_lightpen_latch.sv
+          vvp tb | tee out.log
+          grep -q "RUN: PASS" out.log
+
+      # TG68KdotC_Kernel's savestate restore. VHDL, so GHDL rather than Icarus.
+      # The bench boots the kernel from reset vectors, freezes it at 80
+      # successive clocks across one pass of a test program, restores the whole
+      # architectural state through the ss_* write ports and checks that the
+      # CPU comes back at the restored PC. Without ss_resume only a fifth of
+      # those freeze points survive, which is the bug this covers; the run
+      # prints the per-freeze-point map either way.
+      #
+      # Runs from the repo root: the testbench opens its program image by a
+      # path relative to the working directory.
+      - name: TG68K savestate restore
+        run: |
+          set -euo pipefail
+          bash rtl/sim/tg68k/run.sh
+
+      # The save state register bus through the real minimig: the snoop tap,
+      # the replay mux, the replay's register-decode tick and the memory map
+      # bits. This is the only bench that elaborates minimig.v itself, so it is
+      # also the only one that can see whether a replay actually lands in
+      # agnus, paula and denise rather than merely appearing on their pins.
+      # Both bugs it was written to look for were real: nothing landed at all
+      # while the machine was frozen, and agnus ignored the mux entirely
+      # because it decodes the register address it generates itself.
+      - name: Save state register bus through minimig
+        run: |
+          set -euo pipefail
+          bash rtl/sim/ssmux/run.sh
+
+      # Akiko's savestate ports: the idle rule that lets the state vector leave
+      # the staging buffers out, the capture-side bit offsets, and a full
+      # capture/reset/restore round trip. Needs the dpram model under
+      # rtl/sim/cache/, because akiko_nvram.v instantiates bram.vhd's dpram and
+      # Icarus has no VHDL -- which is why the rest of the akiko benches are
+      # still ModelSim-only.
+      - name: Akiko save state
+        run: |
+          set -euo pipefail
+          iverilog -g2012 -I. -o tb_akiko_ss             rtl/akiko.v rtl/akiko_nvram.v             rtl/sim/cache/dpram_sim.v rtl/sim/akiko/tb_akiko_savestate.sv
+          vvp tb_akiko_ss | tee out_akiko_ss.log
+          grep -q "RUN: PASS" out_akiko_ss.log
+
+      # The Akiko sector channel itself: 1176 words in, 2352 bytes out, at
+      # three different strobe spacings. This is upstream's bench for the
+      # word-wide ingest, run here against our akiko.v with the savestate
+      # ports on it.
+      - name: Akiko sector ingest
+        run: |
+          set -euo pipefail
+          iverilog -g2012 -I. -o tb_sec_ingest             rtl/akiko.v rtl/akiko_nvram.v rtl/akiko_hps_bridge.v             rtl/sim/cache/dpram_sim.v rtl/sim/akiko/tb_akiko_sec_ingest.sv
+          vvp tb_sec_ingest | tee out_sec_ingest.log
+          grep -q "tb_akiko_sec_ingest PASS" out_sec_ingest.log
+
+      # Where each memory region lands in SDRAM. The savestate names chip RAM,
+      # slow RAM and the Kickstart by the address sdram_ctrl's CPU port expects,
+      # which is not the CPU address -- gary, the bank mapper and the sram
+      # bridge between them drop CPU bit 23 and remap two of the three regions.
+      # A wrong base reads the wrong memory into the file and writes it back
+      # over the right memory, and nothing else in the suite would notice.
+      - name: SDRAM region map
+        run: |
+          set -euo pipefail
+          iverilog -g2012 -o tb_membank             rtl/minimig_bankmapper.v rtl/minimig_sram_bridge.v             rtl/sim/membank/tb_membank_map.sv
+          vvp tb_membank | tee out_membank.log
+          grep -q "RUN: PASS" out_membank.log

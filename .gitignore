@@ -37,27 +37,13 @@ c5_pin_model_dump.txt
 *.xml
 *_netlist
 *.cdf
+rtl/sim/sdram/sdram_ctrl_sim.v
 
-# CD32 native-Akiko fork: local build artifacts
-quartus_fit_log.txt
-rbf_archive/
+# GHDL work directory and simulation binaries (rtl/sim/tg68k/run.sh).
+build/
 
-# CD32/CDTV fork: manual RTL backup files from local edits
-*.backup_pre_*
-
-# CD32/CDTV fork: Quartus/ModelSim runtime by-products
-/transcript
-/cr_ie_info.json
-/report_worst_paths.tcl
-
-# CD32/CDTV fork: ModelSim sim work libs + per-sim build artifacts
-rtl/sim/*/work/
-rtl/sim/*/transcript
-rtl/sim/*/modelsim.ini
-rtl/sim/*/*.wlf
-rtl/sim/*/*.vstf
-rtl/sim/*/vsim.dbg
-rtl/sim/*/.modelsim
-
-# CD32/CDTV fork: project-level test logs (live in workspace, not core)
-/research/
+# Seed sweep artefacts: one ~3.7 MB bitstream per candidate. The measurements
+# in seed_sweep/results.txt are worth keeping; the bitstreams are rebuildable
+# from a seed and a commit.
+seed_sweep/*.rbf
+seed_sweep/*.log

@@ -64,6 +64,21 @@ module agnus
 	input  [15:0] data_in,         // data bus in
 	output [15:0] data_out,        // data bus out
 	input   [8:1] address_in,      // 256 words (512 bytes) adress input,
+
+	// Save state replay. Agnus is the only chipset module that does not read
+	// the register address off minimig.v's bus -- it GENERATES that bus, and
+	// decodes its own registers from the internal copy below. So the replay
+	// mux in minimig.v, which switches the bus every other module sees, is
+	// invisible here: DMACON, the DMA pointers, DIWSTRT/STOP, DDFSTRT/STOP,
+	// BEAMCON0 and the copper and blitter registers all ignored a replay
+	// entirely. rtl/sim/ssmux/tb_ss_regbus_mux.sv caught it -- Denise and
+	// Paula took their replayed values and Agnus's DMACON stayed at 0.
+	//
+	// Taking the replay address at the head of the priority mux below fixes
+	// that. Only the address is needed: data_in is already minimig.v's muxed
+	// custom_data_in.
+	input         ss_replay_we,
+	input   [8:1] ss_replay_addr,
 	output reg [20:1] address_out, // chip address output,
 	output  [8:1] reg_address_out, // 256 words (512 bytes) register address out,
 	output reg    cpu_custom,      // CPU has access to custom chipset (registers and chipRAM / slowRAM)
@@ -86,6 +101,7 @@ module agnus
 	output        harddis,
 	output        varbeamen,
 	output        int3,            // blitter finished interrupt (to Paula)
+	output        blit_busy,       // blitter busy status, for the save state quiesce
 	input   [3:0] audio_dmal,      // audio dma data transfer request (from Paula)
 	input   [3:0] audio_dmas,      // audio dma location pointer restart (from Paula)
 	input         disk_dmal,       // disk dma data transfer request (from Paula)
@@ -96,18 +112,16 @@ module agnus
 	input         ecs,             // enable ECS features
 	input         aga,             // enables AGA features
 	input         floppy_speed,    // allocates refresh slots for disk DMA
+	input  [10:0] lpen_vpos,       // light-pen vertical position, latched by userspace (userio.v)
+	input   [8:0] lpen_hpos,       // light-pen horizontal position, latched by userspace (userio.v)
 
-	// Chipset bus trace UIO drain port (active only when CHIPSET_TRACE=1).
-	// With CHIPSET_TRACE=0 the trace instance is generate-elided and uio_dout
-	// is tied to 0, so these wires DCE out of the final bitstream.
-	input             chipset_trace_uio_cs,
-	input             chipset_trace_uio_rd,
-	output      [7:0] chipset_trace_uio_dout
+	// Beam position, out to the save state diagnostics only. Nothing in the
+	// machine reads these; they exist so a restore that comes back with the
+	// display stopped can be told apart from one that comes back with the
+	// display running on the wrong frame geometry.
+	output [10:0] ss_vpos_out,
+	output  [8:0] ss_hpos_out
 );
-
-// Compile-time gate. 0 = production (bit-identical RBF, ring DCE'd).
-//                   1 = trace build (instantiate ring + UIO drain).
-localparam CHIPSET_TRACE = 0;
 
 //register names and adresses
 localparam DMACON  = 9'h096;
@@ -145,7 +159,22 @@ reg [8:1] reg_address;    //local register address bus
 //first item in this if else if list has highest priority
 always @(*)
 begin
-	if (dma_dsk) begin
+	if (ss_replay_we) begin
+		// A save state replay owns the register bus outright. It only runs
+		// while the machine is frozen, so no DMA engine below can be asking
+		// for the bus at the same time; the priority is stated anyway so the
+		// two can never race if that ever changes. Nothing else is disturbed:
+		// no bus request, no address out, no acknowledge to anyone.
+		cpu_custom = 1;
+		dbr = 0;
+		ack_cop = 0;
+		ack_blt = 0;
+		ack_spr = 0;
+		address_out = 0;
+		reg_address = ss_replay_addr;
+		dbwe = 0;
+	end
+	else if (dma_dsk) begin
 		// bus allocated to disk dma engine
 		cpu_custom = 0;
 		dbr = 1;
@@ -416,7 +445,7 @@ always @(posedge clk) if (clk7_en) begin
 		else if (bls_cnt[1:0] != BLS_CNT_MAX) bls_cnt <= bls_cnt + 2'b01;
 end
 
-wire        blit_busy;       //blitter busy status
+// blit_busy is a module output now (save state quiesce); no local wire.
 wire        blit_zero;       //blitter zero status
 wire        req_blt;         //blitter dma request
 wire [20:1] address_blt;     //blitter dma engine chip address out
@@ -450,6 +479,9 @@ agnus_blitter bl1
 
 wire  [8:0] hpos;      //alternative horizontal beam counter
 wire [10:0] vpos;      //vertical beam counter
+
+assign ss_vpos_out = vpos;
+assign ss_hpos_out = hpos;
 wire        vbl;       //JB: vertical blanking
 wire        vblend;    //JB: last line of vertical blanking
 wire [15:0] data_bmc;  //beam counter data out
@@ -468,6 +500,8 @@ agnus_beamcounter  bc1
 	.reg_address_in(reg_address),
 	.data_in(data_in),
 	.data_out(data_bmc),
+	.lpen_vpos(lpen_vpos),
+	.lpen_hpos(lpen_hpos),
 	.hpos(hpos),
 	.vpos(vpos),
 	._hsync(_hsync),
@@ -494,48 +528,7 @@ assign strhor_denise = hpos==(6*2-1) && (vpos > 8 || ecs) ? 1'b1 : 1'b0;
 assign strhor_paula = hpos==(6*2+1) ? 1'b1 : 1'b0; //hack
 
 //--------------------------------------------------------------------------------------
-// Chipset bus trace — see chipset-trace-plan.md.
-// Filter selects the bitplane display / copper register window. Same comb
-// expression in sim and hardware so the captured stream is identical.
 
-wire trace_is_target_reg =
-    (reg_address[8:1] >= 8'h70 && reg_address[8:1] <= 8'h7F) ||   // BPL*PT
-    (reg_address[8:1] >= 8'h80 && reg_address[8:1] <= 8'h86) ||   // BPLCON*, BPLxMOD
-    (reg_address[8:1] >= 8'h40 && reg_address[8:1] <= 8'h45) ||   // COP*LC, COPJMP*
-    (reg_address[8:1] == 8'h49) || (reg_address[8:1] == 8'h4A) || // DDFSTRT/STOP
-    (reg_address[8:1] >= 8'hA0 && reg_address[8:1] <= 8'hBF) ||   // SPR*POS/CTL/DATA/DATB
-    (reg_address[8:1] == 8'hFE);                                  // FMODE
-
-wire trace_cpu_write = cpu_custom & (hwr | lwr);
-wire trace_cop_write = dma_cop;
-wire trace_blt_write = dma_blt & dbwe;
-
-wire       trace_write_strobe = trace_is_target_reg & (trace_cpu_write | trace_cop_write | trace_blt_write);
-wire [2:0] trace_src          = trace_cop_write ? 3'b001
-                              : trace_blt_write ? 3'b010
-                                                : 3'b000;        // CPU
-
-generate
-if (CHIPSET_TRACE) begin : g_trace
-    chipset_bus_trace u_trace
-    (
-        .clk          (clk),
-        .reset        (reset),
-        .write_strobe (trace_write_strobe),
-        .reg_addr     (reg_address[8:1]),
-        .data         (data_in),
-        .src          (trace_src),
-        .vpos         (vpos),
-        .hpos         (hpos),
-        .dbwe         (dbwe),
-        .uio_cs_trace (chipset_trace_uio_cs),
-        .uio_rd       (chipset_trace_uio_rd),
-        .uio_dout     (chipset_trace_uio_dout)
-    );
-end else begin : g_no_trace
-    assign chipset_trace_uio_dout = 8'h00;
-end
-endgenerate
 
 endmodule
 

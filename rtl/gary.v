@@ -76,8 +76,11 @@ module gary
 	input         ecs, // ECS chipset enable
 	input         hdc_ena, //enables hdd interface
 
+	input         a2065_ena,
+	input   [7:0] a2065_base,
 	input         toccata_ena,
 	input   [7:0] toccata_base,
+	input   [7:0] cdtv_base,
 
 	// CDTV mode (chipset_config[5]). When 1, $F00000-$F7FFFF is treated as
 	// the CDTV extended-ROM window. Real CDTV maps its BIOS ROM there; on
@@ -103,17 +106,28 @@ module gary
 	output       sel_rtc, //select $DCxxxx
 	output       sel_ide, //select $DAxxxx
 	output       sel_gayle, //select $DExxxx
-	output       sel_toccata, //select $E9xxxx (or whatever's specified by toccata_base)
+	output       sel_toccata,
+	output       sel_a2065,
 
-	// CDTV bridge selects (gated on cdtv_mode). Spec sections 1 + 5.1:
-	//   sel_cdtv      = $E90000-$E9FFFF post-autoconfig DMAC / TPI / CR-511 window.
-	//   sel_cdtv_nvram= $DC8000-$DCFFFF battery RAM inside the clock_bank window.
+	// CDTV bridge selects (gated on cdtv_mode):
+	//   sel_cdtv       = $E90000-$E9FFFF post-autoconfig DMAC / TPI / CR-511 window.
+	//   sel_cdtv_nvram = $DC8000-$DCFFFF battery RAM inside the clock_bank window.
 	// Both share the existing chip-bus path; the bridge data is ORed into
 	// cpu_data_in in rtl/minimig.v alongside toccata_out / rtc_out / etc.
 	output       sel_cdtv,
 	output       sel_cdtv_nvram,
+	// $E00000-$E7FFFF memory card window, CDTV only. It overlaps the
+	// 1MB-kickstart read window, so sel_kick1mb has to stand down for it.
+	output       sel_cdtv_card,
 
-	output reg   rom_readonly = 0 //when zero allows to write to $fc-$ff, blocks effect of kick256kmirror.
+	output reg   rom_readonly = 0, //when zero allows to write to $fc-$ff, blocks effect of kick256kmirror.
+
+	// Save state restore. rom_readonly is one of the two genuinely stateful
+	// bits behind minimig.v's ss_map export (the other is ovl); the two
+	// sel_kick* bits next to it in the vector are combinational decodes and
+	// have no restore target at all -- see rtl/ss_state.vh.
+	input        ss_rom_readonly_in,
+	input        ss_rom_readonly_we
 );
 
 wire	[2:0] t_sel_slow;
@@ -145,6 +159,9 @@ assign ram_lwr = dbr ?  dbwe : cpu_lwr;
 wire kick_mirror_a8 = cpu_address_in[23:19] == 5'b1010_1;
 wire kick_mirror_b0 = cpu_address_in[23:19] == 5'b1011_0;
 wire kick_mirror_f0 = cdtv_mode && cpu_address_in[23:19] == 5'b1111_0;
+// Memory card at $E00000. cpu_hlt (bootrom overlay) still wins, so a CDTV
+// boots its ROM out of the same window before the card is reachable.
+wire cdtv_card_win  = cdtv_mode && cpu_address_in[23:19] == 5'b1110_0 && !cpu_hlt;
 wire [4:0] cpu_addr_hi_remap = kick_mirror_a8 ? 5'b1111_1 :
                                kick_mirror_b0 ? 5'b1110_0 :
                                kick_mirror_f0 ? 5'b1110_0 :
@@ -154,8 +171,13 @@ assign ram_address_out  = dbr ? {3'b000, dma_address_in[20:1]} : {cpu_addr_hi_re
    
 //--------------------------------------------------------------------------------------
 
+// Reset keeps priority over the restore write: a machine being reset must end
+// up in its reset state, not in the state of a file that happened to be
+// half-loaded. The restore write can only fire while the CPU is parked and the
+// chipset frozen, so it never races the cpu_hwr/cpu_lwr branch below.
 always @ (posedge clk) begin
 	if (reset) rom_readonly <= ~bootrom;
+	else if (ss_rom_readonly_we) rom_readonly <= ss_rom_readonly_in;
 	else if ((cpu_hwr || cpu_lwr) && (cpu_address_in[23:18]==6'b1111_10)) rom_readonly <= 1;
 end
 
@@ -186,7 +208,7 @@ begin
 		sel_slow[1] = t_sel_slow[1];
 		sel_slow[2] = t_sel_slow[2];
 		sel_kick    = (cpu_address_in[23:19]==5'b1111_1 && (cpu_rd || cpu_hlt || (!rom_readonly && cpu_address_in[18])))  || (cpu_rd && ovl && cpu_address_in[23:19]==5'b0000_0) || (cpu_rd && kick_mirror_a8); //$F80000-$FFFFFF + $A80000-$AFFFFF mirror (CD32)
-		sel_kick1mb = (cpu_address_in[23:19]==5'b1110_0 && (cpu_rd || cpu_hlt)) || (cpu_rd && kick_mirror_b0) || (cpu_rd && kick_mirror_f0); // $E00000-$E7FFFF + $B00000-$B7FFFF mirror (CD32) + $F00000-$F7FFFF CDTV BIOS mirror
+		sel_kick1mb = (cpu_address_in[23:19]==5'b1110_0 && ((cpu_rd && !cdtv_card_win) || cpu_hlt)) || (cpu_rd && kick_mirror_b0) || (cpu_rd && kick_mirror_f0); // $E00000-$E7FFFF + $B00000-$B7FFFF mirror (CD32) + $F00000-$F7FFFF CDTV BIOS mirror
 		sel_kick256kmirror = cpu_address_in[23:19]==5'b1111_1 &&  cpu_rd && rom_readonly && !cpu_hlt && bootrom;
 	end
 end
@@ -206,6 +228,7 @@ assign sel_rtg   = cpu_address_in[23:16]==8'hB8; // $B8xxxxx
 assign sel_bank_1 = cpu_address_in[23:21]==3'b001;
 
 assign sel_toccata = toccata_ena && cpu_address_in[23:16]==toccata_base; // Nominally $e9xxxx
+assign sel_a2065   = a2065_ena && cpu_address_in[23:16]==a2065_base;
 
 // CDTV bridge selects — gated on cdtv_mode so non-CDTV builds see exactly
 // the same address map as before. Spec section 1 (memory map):
@@ -213,8 +236,9 @@ assign sel_toccata = toccata_ena && cpu_address_in[23:16]==toccata_base; // Nomi
 //   $DC8000-$DCFFFF = battery RAM (inside the $DC0000 clock_bank window).
 // The CDTV mode also suppresses sel_toccata (cpu_wrapper forces
 // toccata_ena=0 when cdtv_mode), so there's no overlap at $E9xxxx.
-assign sel_cdtv       = cdtv_mode && cpu_address_in[23:16]==8'hE9;
+assign sel_cdtv       = cdtv_mode && cpu_address_in[23:16]==cdtv_base;
 assign sel_cdtv_nvram = cdtv_mode && cpu_address_in[23:15]==9'b1101_1100_1;
+assign sel_cdtv_card  = cdtv_card_win;
 
 //data bus slow down
 assign dbs = cpu_address_in[23:21]==3'b000 || cpu_address_in[23:20]==4'b1100 || cpu_address_in[23:19]==5'b1101_0 || cpu_address_in[23:16]==8'b1101_1111;

@@ -18,7 +18,16 @@ module cia_timera
   input  eclk,            // External clock input (usually E clock = system clock/10)
   output  tmra_ovf,       // Timer A overflow signal (used by Timer B cascade mode)
   output  spmode,         // Serial port mode: 0=input, 1=output
-  output  irq             // Timer underflow interrupt request
+  output  irq,            // Timer underflow interrupt request
+
+  // Save state. {tmr, tmlh, tmll, tmcr} -- the counter, both latch
+  // bytes and the control register. Exported rather than read over the
+  // bus: a timer's value cannot be recovered from the writes that set
+  // it, because it counts. ss_ld is taken outside the clk7_en gate --
+  // the restore runs with the Amiga's timebase stopped.
+  output [38:0] ss_state,
+  input         ss_ld,
+  input  [38:0] ss_ld_data
 );
 
 // Internal registers
@@ -50,7 +59,9 @@ assign count = eclk;
 
 // Write to control register
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    tmcr[6:0] <= ss_ld_data[6:0];
+  else if (clk7_en) begin
     if (reset)
       tmcr[6:0] <= 7'd0;
     else if (tcr && wr)
@@ -78,7 +89,9 @@ assign spmode = tmcr[6];     // Serial port mode output
 // Timer latch registers - hold reload value
 // Low byte latch
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    tmll[7:0] <= ss_ld_data[14:7];
+  else if (clk7_en) begin
     if (reset)
       tmll[7:0] <= 8'b1111_1111;  // Default to $FF
     else if (tlo && wr)
@@ -87,7 +100,9 @@ always @(posedge clk)
 
 // High byte latch
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    tmlh[7:0] <= ss_ld_data[22:15];
+  else if (clk7_en) begin
     if (reset)
       tmlh[7:0] <= 8'b1111_1111;  // Default to $FF
     else if (thi && wr)
@@ -116,7 +131,9 @@ assign reload = thi_load_eclk | forceload | underflow;
 
 // 16-bit down counter
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    tmr[15:0] <= ss_ld_data[38:23];
+  else if (clk7_en) begin
     if (reset)
       tmr[15:0] <= 16'hFF_FF;  // Reset to maximum value
     else if (reload)
@@ -140,5 +157,7 @@ assign data_out[7:0] = ({8{~wr&tlo}} & tmr[7:0])        // Timer low byte
           | ({8{~wr&thi}} & tmr[15:8])                  // Timer high byte
           | ({8{~wr&tcr}} & {1'b0,tmcr[6:0]});         // Control register
 
+
+assign ss_state = {tmr[15:0], tmlh[7:0], tmll[7:0], tmcr[6:0]};
 
 endmodule

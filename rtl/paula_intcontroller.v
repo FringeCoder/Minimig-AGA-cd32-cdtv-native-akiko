@@ -20,7 +20,17 @@ module paula_intcontroller
 	input	[3:0] audint,		//audio channels 0,1,2,3 interrupts
 	output	[3:0] audpen,		//mirror of audio interrupts for audio controller
 	output	rbfmirror,			//mirror of serial receive interrupt for uart SERDATR register
-	output	reg [2:0] _ipl		//m68k interrupt request
+	output	reg [2:0] _ipl,		//m68k interrupt request
+
+	// Save state. INTREQ is the one set/clear register the register shadow
+	// cannot rebuild from bus writes: hardware raises these bits, not only the
+	// CPU, so an accumulator drifts from the real register within a frame.
+	output	[14:0] ss_intreq,
+	// Diagnostics: the live enable mask. The register shadow's accumulated
+	// INTENA says what the restore MEANT to install; this says what Paula
+	// actually holds, which is the only way to tell a replay that did not
+	// happen from one that did and still left interrupts dead.
+	output	[14:0] ss_intena
 );
 
 //register names and addresses		
@@ -36,6 +46,7 @@ reg		[14:0] intreq;			//int request register
 reg		[15:0] intreqr;			//int request readback
 
 //rbf mirror out
+assign ss_intena = intena;
 assign rbfmirror = intreq[11];
 
 //audio mirror out
@@ -137,6 +148,8 @@ always @(posedge clk) begin
 end						  
 
 //create m68k interrupt request signals
+assign ss_intreq = intreq;
+
 reg	[14:0]intreqena;
 always @(*) begin
 	//and int enable and request signals together

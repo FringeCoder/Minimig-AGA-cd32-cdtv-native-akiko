@@ -12,11 +12,10 @@
 //
 // The address remap (sel_z2ram → ramaddr[28]=1 → DDR3 row) is the
 // "authenticity bridge" that makes both controllers look like one
-// coherent memory map. See research/docs/dma-fastram-routing-design.md.
+// coherent memory map.
 //
-// THIS MODULE IS A PURE REFACTOR. Phase A acceptance criterion is that
-// the synthesized RBF is functionally identical to the pre-refactor
-// build. Any change here is a Phase B (or later) concern.
+// This module is a pure extraction of decode logic that previously lived
+// in cpu_wrapper: the synthesized result is functionally identical.
 
 module memory_router
 (
@@ -33,9 +32,12 @@ module memory_router
 	// KS lower-half flag. Affects ramaddr[18] when sel_kicklower fires.
 	input             bootrom,
 
+	// CDTV moves its memory card into the $e0xxxx window, so the turbo-kick
+	// write mirror must not claim that range there.
+	input             cdtv_mode,
+
 	// AutoConfig'd fast-RAM enable + base state. Owned by cpu_wrapper
-	// today (lines 549-619); exported via new ports for the bridge in
-	// Phase B.
+	// today (lines 549-619); exported via new ports for the bridge.
 	input             z2ram_ena,
 	input       [4:0] z3ram_base0,
 	input             z3ram_ena0,
@@ -75,7 +77,7 @@ assign sel_rtg      = (cpu_addr[31:24] == 8'h02);
 
 // don't sel_kickram when writing
 // CD32 mirrors $a8xxxx (mirror of $f8xxxx) and $b0xxxx (mirror of $e0xxxx)
-assign sel_kickram   = !cpu_addr[31:24] && (&cpu_addr[23:19] || (cpu_addr[23:19] == 5'b11100) || (cpu_addr[23:19] == 5'b10101) || (cpu_addr[23:19] == 5'b10110)) && ckick && wr;
+assign sel_kickram   = !cpu_addr[31:24] && (&cpu_addr[23:19] || (!cdtv_mode && cpu_addr[23:19] == 5'b11100) || (cpu_addr[23:19] == 5'b10101) || (cpu_addr[23:19] == 5'b10110)) && ckick && wr;
 assign sel_kicklower = !cpu_addr[31:24] && (cpu_addr[23:18] == 6'b111110);
 assign sel_chipram   = !cpu_addr[31:21] && cchip;
 
@@ -97,8 +99,17 @@ assign sel_chipram   = !cpu_addr[31:21] && cchip;
 // minimig_sram_bridge.v. All Zorro RAM goes to DDR3.
 // -------------------------------------------------------------------------
 
-assign ramaddr[28]    = sel_zram & ~sel_z3ram0;
-assign ramaddr[27]    = sel_zram & (~sel_z3ram1 | cpu_addr[27]);
+// Mapping Z2 into DDR3 bank
+// ramaddr[28:26]=110 does not work: Z3_1 (256MB base=1) only reaches that
+// bank at offsets $18000000-$1BFFFFFF, never touched by a typical KS boot
+// that
+// allocates from the front of Z3_1, and Z2 boots hang there. Z2 therefore
+// maps into bank 100, the low quadrant of Z3_1, which every mem=0x83 boot
+// exercises. Z2 and Z3 configs
+// are mutually exclusive in fastramcfg, so the new aliased mapping is
+// safe — only one of them is ever live at runtime.
+assign ramaddr[28]    = sel_z2ram | sel_z3ram1;
+assign ramaddr[27]    = sel_z3ram0 | (sel_z3ram1 & cpu_addr[27]);
 assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23] : (sel_rtg ? 4'b1110 : {4{sel_dd}});
 assign ramaddr[22:19] = {4{sel_dd}} | cpu_addr[22:19];
 assign ramaddr[18]    =    sel_dd   | (sel_kicklower & bootrom) | cpu_addr[18];

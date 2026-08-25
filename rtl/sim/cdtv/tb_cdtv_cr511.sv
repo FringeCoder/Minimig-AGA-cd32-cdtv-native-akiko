@@ -88,7 +88,7 @@ module tb_cdtv_cr511;
 	// (covered by future tb_cdtv_sec_dma), so ack is tied off.
 	wire         cdtv_dma_req;
 	wire         cdtv_dma_we;
-	wire  [23:0] cdtv_dma_baddr;
+	wire  [31:0] cdtv_dma_baddr;
 	wire   [7:0] cdtv_dma_wbyte;
 
 	cdtv_bridge u_dut (

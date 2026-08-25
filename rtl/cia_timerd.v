@@ -19,7 +19,19 @@ module cia_timerd
   input   [7:0] data_in,  // CPU data bus input
   output   reg [7:0] data_out, // CPU data bus output
   input  count,           // Count enable (typically 50/60 Hz tick)
-  output  irq             // Alarm interrupt request
+  output  irq,            // Alarm interrupt request
+
+  // Save state: {tod, alarm, tod_latch, crb7, count_ena, latch_ena}.
+  //
+  // The read latch is state, not a cache: reading the TOD high byte freezes
+  // it and reading the low byte releases it, so a machine saved between
+  // those two reads is mid-sequence, and restoring the counter without the
+  // latch would hand the program a time that jumps. Reading TOD over the bus
+  // to capture it would itself move the latch, which is why none of this is
+  // read back through the register interface.
+  output [74:0] ss_state,
+  input         ss_ld,
+  input  [74:0] ss_ld_data
 );
 
   // Internal registers
@@ -38,7 +50,9 @@ module cia_timerd
 // - Subsequent reads of middle/low bytes return latched values
 // - Reading low byte releases the latch for next update
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    latch_ena <= ss_ld_data[0];
+  else if (clk7_en) begin
     if (reset)
       latch_ena <= 1'd1;  // Latch enabled after reset
     else if (!wr)
@@ -53,7 +67,9 @@ always @(posedge clk)
 // TOD latch update
 // Captures current TOD value when latch is enabled
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    tod_latch[23:0] <= ss_ld_data[26:3];
+  else if (clk7_en) begin
     if (latch_ena)
       tod_latch[23:0] <= tod[23:0];
   end
@@ -83,7 +99,9 @@ always @(*)
 // Writing to low byte starts TOD counting again
 // This ensures consistent time setting
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    count_ena <= ss_ld_data[1];
+  else if (clk7_en) begin
     if (reset)
       count_ena <= 1'd1;  // Counting enabled after reset
     else if (wr && !crb7) // crb7==0 enables writing to TOD counter
@@ -101,7 +119,9 @@ always @(posedge clk)
 // is delayed by one cycle when updating upper 12 bits
 reg todcarry; // Carry flag for delayed upper counter update
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    tod[23:0] <= ss_ld_data[74:51];
+  else if (clk7_en) begin
     if (reset)
     begin
       tod[23:0] <= 24'd0;  // Clear counter on reset
@@ -127,7 +147,9 @@ always @(posedge clk)
 // ALARM Register Write
 // Written when CRB bit 7 = 1
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    alarm[23:0] <= ss_ld_data[50:27];
+  else if (clk7_en) begin
     if (reset) // synchronous reset
     begin
       // Set alarm to maximum value (never match by default)
@@ -149,7 +171,9 @@ always @(posedge clk)
 // Control Register B bit 7
 // Selects between TOD and ALARM for read/write operations
 always @(posedge clk)
-  if (clk7_en) begin
+  if (ss_ld)
+    crb7 <= ss_ld_data[2];
+  else if (clk7_en) begin
     if (reset)
       crb7 <= 1'd0;  // Default to TOD access
     else if (wr && tcr)
@@ -166,5 +190,7 @@ always @(posedge clk)
 // alarm interrupt request
 assign irq = (tod[23:0]==alarm[23:0] && (count_del || count_del2)) ? 1'b1 : 1'b0;
 
+
+assign ss_state = {tod[23:0], alarm[23:0], tod_latch[23:0], crb7, count_ena, latch_ena};
 
 endmodule

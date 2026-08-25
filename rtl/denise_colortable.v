@@ -16,7 +16,24 @@ module denise_colortable
   input  wire [  3-1:0] bank,             // color bank select
   input  wire           loct,             // 12-bit palette select
   input  wire           ehb_en,           // EHB enable
-  output reg  [ 24-1:0] rgb               // RGB output
+  output reg  [ 24-1:0] rgb,              // RGB output
+
+  // Save state. The colour table is 256 entries deep -- eight AGA banks of
+  // thirty-two -- and the chipset register shadow cannot carry it: the shadow
+  // keeps one value per register ADDRESS, so of the eight banks written
+  // through $180-$1BE only the last one written survives. Reading the table
+  // itself is the only way to capture what the machine is actually showing.
+  //
+  // ss_active borrows both RAM ports, which is safe because it is only ever
+  // asserted while the machine is frozen: the display is not fetching and the
+  // chipset bus is not writing. Same arrangement as the borrowed SDRAM CPU
+  // port. Reads have the RAM's one cycle of latency, so the sweep must present
+  // an address a cycle before sampling ss_rd_data.
+  input  wire           ss_active,
+  input  wire [  8-1:0] ss_addr,
+  output wire [ 32-1:0] ss_rd_data,
+  input  wire           ss_wr_en,
+  input  wire [ 32-1:0] ss_wr_data
 );
 
 
@@ -35,17 +52,26 @@ wire [ 8-1:0] rd_adr = rdram ? wr_adr : ehb_en ? {3'b000, select_xored[4:0]} : s
 wire [32-1:0] rd_dat;
 reg           ehb_sel;
 
+// Savestate port mux. Only takes effect while frozen -- see ss_active above.
+wire [ 8-1:0] wr_adr_mux = ss_active ? ss_addr    : wr_adr;
+wire          wr_en_mux  = ss_active ? ss_wr_en   : wr_en;
+wire [ 4-1:0] wr_bs_mux  = ss_active ? 4'b1111    : wr_bs;
+wire [32-1:0] wr_dat_mux = ss_active ? ss_wr_data : wr_dat;
+wire [ 8-1:0] rd_adr_mux = ss_active ? ss_addr    : rd_adr;
+
+assign ss_rd_data = rd_dat;
+
 // color lut
 denise_colortable_ram_mf clut
 (
-  .clock      (clk    ),
-  .enable     (1'b1   ),
-  .wraddress  (wr_adr ),
-  .wren       (wr_en  ),
-  .byteena_a  (wr_bs  ),
-  .data       (wr_dat ),
-  .rdaddress  (rd_adr ),
-  .q          (rd_dat )
+  .clock      (clk        ),
+  .enable     (1'b1       ),
+  .wraddress  (wr_adr_mux ),
+  .wren       (wr_en_mux  ),
+  .byteena_a  (wr_bs_mux  ),
+  .data       (wr_dat_mux ),
+  .rdaddress  (rd_adr_mux ),
+  .q          (rd_dat     )
 );
 
 // register half-brite bit

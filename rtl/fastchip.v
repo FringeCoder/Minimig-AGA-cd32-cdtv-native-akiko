@@ -17,6 +17,8 @@
 //
 //----------------------------------------------------------------------------------  
 
+`include "rtl/ss_state.vh"
+
 module fastchip
 (
 	input         clk,
@@ -73,6 +75,7 @@ module fastchip
 	output  [7:0] akiko_dma_wbyte,
 	input   [7:0] akiko_dma_rbyte,
 	input         akiko_dma_ack,
+	input         akiko_dma_arm,   // owner-freeze pulse from chipdma_arb
 
 	// Akiko HPS bridge (M3 — UIO_DMA byte stream to/from Main_MiSTer).
 	// Naming: signals carry hps_ext direction (akiko_uio_din comes IN from
@@ -80,37 +83,22 @@ module fastchip
 	input         akiko_uio_cs,
 	input         akiko_uio_cs_sec, // M4 sub-channel (io_din[8] from byte_cnt==1)
 	input         akiko_uio_cs_nvr, // NVRAM save-dump sub-channel (io_din[6])
+	input         akiko_uio_cs_subcode, // subcode push sub-channel (io_din[4])
 	input         akiko_uio_wr,
 	input         akiko_uio_rd,
 	input  [15:0] akiko_uio_din,    // = hps_ext.akiko_dout
 	output [15:0] akiko_uio_dout,   // = hps_ext.akiko_din
 	output        akiko_uio_req,    // = hps_ext.akiko_req       (M3)
 	output        akiko_uio_sec_req,// = hps_ext.akiko_sec_req   (M4)
-	output        akiko_uio_rx_busy,// = hps_ext.akiko_rx_busy   (Phase 18)
+	output        akiko_uio_rx_busy,// = hps_ext.akiko_rx_busy
 	output        akiko_uio_nvr_dirty, // = hps_ext.akiko_nvr_dirty
 
-	// NVRAM load-from-disk port. Driven by hps_io.ioctl_download in
-	// Minimig.sv (gated on NVR_LOAD_INDEX), passed through to akiko →
-	// akiko_nvram. Lives in HPS reset domain; no contention with the
-	// in-emulator I²C slave path.
-	input   [9:0] nvr_load_addr,
-	input   [7:0] nvr_load_din,
-	input         nvr_load_we,
-
-	// M5+ fast sector DMA path: bytes from hps_io's UIO_SECTOR_RD
-	// pipeline (sd_buff_*, gated by sd_ack[AKIKO_SEC_SLOT] in Minimig.sv).
-	// Pure pass-through to akiko module — fastchip just routes signals.
-	input         hps_sec_dma_active,
-	input   [7:0] hps_sec_dma_byte,
-	input  [13:0] hps_sec_dma_addr,
-	input         hps_sec_dma_we,
-
-	// Akiko CPU-bus trace ring (debug). Independent of M3/M4 bridge: hps_ext
-	// pulses akiko_uio_trace_rd to drain one byte at a time; trace_dout returns
-	// the next byte. 4 bytes per entry; byte 3 == 0 means ring empty.
-	input         akiko_uio_cs_trace,
-	input         akiko_uio_trace_rd,
-	output  [7:0] akiko_uio_trace_dout
+	// Akiko save state. Pass-through to the akiko instance below; the
+	// layout and the meaning of ss_idle are documented there.
+	output [`SS_AKIKO_W-1:0] akiko_ss_state,
+	input                    akiko_ss_ld,
+	input  [`SS_AKIKO_W-1:0] akiko_ss_ld_data,
+	output                   akiko_ss_idle
 );
 
 // Native CD32 Akiko gate.
@@ -135,14 +123,19 @@ wire        akiko_hps_result_done;
 wire        akiko_hps_sec_req;
 wire  [7:0] akiko_hps_sec_status;
 wire        akiko_hps_sec_push;
-wire  [7:0] akiko_hps_sec_byte;
+wire [15:0] akiko_hps_sec_word;
 wire        akiko_hps_sec_done;
+wire        akiko_hps_subcode_push;
+wire  [7:0] akiko_hps_subcode_byte;
+wire        akiko_hps_subcode_done;
 wire        akiko_hps_rx_busy;
 wire  [7:0] akiko_uio_dout_byte;
 
 // NVRAM save-dump wires between bridge and akiko (read-only).
 wire  [9:0] akiko_hps_nvr_addr;
 wire  [7:0] akiko_hps_nvr_dout;
+wire  [7:0] akiko_hps_nvr_load_din;
+wire        akiko_hps_nvr_load_we;
 wire        akiko_hps_nvr_clear_dirty;
 wire        akiko_hps_nvr_dirty;
 wire        akiko_hps_nvr_done;       // currently unused; reserved for diag
@@ -168,6 +161,7 @@ akiko #(.NATIVE_CD32(NATIVE_CD32)) akiko
 	.dma_wbyte(akiko_dma_wbyte),
 	.dma_rbyte(akiko_dma_rbyte),
 	.dma_ack(akiko_dma_ack),
+	.dma_arm(akiko_dma_arm),
 	.hps_cmd_pending(akiko_hps_cmd_pending),
 	.hps_cmd_byte(akiko_hps_cmd_byte),
 	.hps_cmd_pop(akiko_hps_cmd_pop),
@@ -178,40 +172,23 @@ akiko #(.NATIVE_CD32(NATIVE_CD32)) akiko
 	.hps_sec_req(akiko_hps_sec_req),
 	.hps_sec_status(akiko_hps_sec_status),
 	.hps_sec_push(akiko_hps_sec_push),
-	.hps_sec_byte(akiko_hps_sec_byte),
+	.hps_sec_word(akiko_hps_sec_word),
 	.hps_sec_done(akiko_hps_sec_done),
 	.hps_rx_busy(akiko_hps_rx_busy),
 	.hps_nvr_addr(akiko_hps_nvr_addr),
 	.hps_nvr_dout(akiko_hps_nvr_dout),
 	.hps_nvr_clear_dirty(akiko_hps_nvr_clear_dirty),
 	.hps_nvr_dirty(akiko_hps_nvr_dirty),
-	.nvr_load_addr(nvr_load_addr),
-	.nvr_load_din(nvr_load_din),
-	.nvr_load_we(nvr_load_we),
-	.hps_sec_dma_active(hps_sec_dma_active),
-	.hps_sec_dma_byte(hps_sec_dma_byte),
-	.hps_sec_dma_addr(hps_sec_dma_addr),
-	.hps_sec_dma_we(hps_sec_dma_we)
-);
-
-// CPU-bus trace ring: snapshots every CPU access in the akiko window
-// ($B80000-$B8003F). Drained over the akiko_uio_cs_trace sub-channel.
-akiko_bus_trace akiko_bus_trace
-(
-	.clk          (clk_sys              ),
-	.reset        (reset                ),
-	// Trace the full sel_akiko window ($B80000-$B800FF), not just the
-	// $B80000-$B8003F sub-range akiko answers. This way we catch any access
-	// the firmware tries that we don't currently respond to.
-	.sel          (sel_akiko            ),
-	.rd           (rnw                  ),
-	.wr           (~rnw & (lds|uds)     ),
-	.addr         (addr[7:1]            ),
-	.din          (din                  ),
-	.dout         (akiko_dout           ),
-	.uio_cs_trace (akiko_uio_cs_trace   ),
-	.uio_rd       (akiko_uio_trace_rd   ),
-	.uio_dout     (akiko_uio_trace_dout )
+	.nvr_load_addr(akiko_hps_nvr_addr),
+	.nvr_load_din(akiko_hps_nvr_load_din),
+	.nvr_load_we(akiko_hps_nvr_load_we),
+	.hps_subcode_push(akiko_hps_subcode_push),
+	.hps_subcode_byte(akiko_hps_subcode_byte),
+	.hps_subcode_done(akiko_hps_subcode_done),
+	.ss_state(akiko_ss_state),
+	.ss_ld(akiko_ss_ld),
+	.ss_ld_data(akiko_ss_ld_data),
+	.ss_idle(akiko_ss_idle)
 );
 
 akiko_hps_bridge akiko_hps_bridge
@@ -221,9 +198,10 @@ akiko_hps_bridge akiko_hps_bridge
 	.uio_cs(akiko_uio_cs),
 	.uio_cs_sec(akiko_uio_cs_sec),
 	.uio_cs_nvr(akiko_uio_cs_nvr),
+	.uio_cs_subcode(akiko_uio_cs_subcode),
 	.uio_wr(akiko_uio_wr),
 	.uio_rd(akiko_uio_rd),
-	.uio_din(akiko_uio_din[7:0]),
+	.uio_din(akiko_uio_din),
 	.uio_dout(akiko_uio_dout_byte),
 	.cmd_pending(akiko_hps_cmd_pending),
 	.cmd_byte(akiko_hps_cmd_byte),
@@ -235,10 +213,15 @@ akiko_hps_bridge akiko_hps_bridge
 	.sec_req(akiko_hps_sec_req),
 	.sec_status(akiko_hps_sec_status),
 	.sec_push(akiko_hps_sec_push),
-	.sec_byte(akiko_hps_sec_byte),
+	.sec_word(akiko_hps_sec_word),
 	.sec_done(akiko_hps_sec_done),
+	.subcode_push(akiko_hps_subcode_push),
+	.subcode_byte(akiko_hps_subcode_byte),
+	.subcode_done(akiko_hps_subcode_done),
 	.nvr_addr(akiko_hps_nvr_addr),
 	.nvr_dout(akiko_hps_nvr_dout),
+	.nvr_load_din(akiko_hps_nvr_load_din),
+	.nvr_load_we(akiko_hps_nvr_load_we),
 	.nvr_clear_dirty(akiko_hps_nvr_clear_dirty),
 	.nvr_done(akiko_hps_nvr_done),
 	.nvr_dirty(akiko_hps_nvr_dirty),
@@ -286,7 +269,11 @@ gayle gayle
 	.led(ide_led)
 );
 
-wire        sel_rtg = sel && (addr[23:12] == 'hB80);
+// RTG decode ($B80xxx) overlaps the Akiko window ($B800xx) and dout ORs
+// rtg_dout in (line 123), corrupting Akiko register reads — e.g. the ID at
+// $B80000 (0xC0CA) reads back as RTG garbage, breaking the CD32 BIOS poll.
+// Gate sel_rtg with !sel_akiko so Akiko owns $B800xx; RTG keeps $B801xx+.
+wire        sel_rtg = sel && !sel_akiko && (addr[23:12] == 'hB80);
 wire [15:0] rtg_dout;
 wire        rtg_ready;
 

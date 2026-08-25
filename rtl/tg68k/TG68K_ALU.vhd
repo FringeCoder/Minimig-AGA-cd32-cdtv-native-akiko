@@ -69,6 +69,12 @@ generic(
 		bf_ffo_offset			: in std_logic_vector(31 downto 0);
 		bf_loffset				: in std_logic_vector(4 downto 0);
 
+		-- Save state restore: CCR write, forwarded from the kernel's
+		-- ss_sr_wr / ss_wr_data. Flags is owned by this block, so the low
+		-- half of SR has to be written here.
+		ss_ccr_wr				: in std_logic := '0';
+		ss_ccr					: in std_logic_vector(7 downto 0) := (OTHERS => '0');
+
 		set_V_Flag				: buffer bit;
 		Flags						: buffer std_logic_vector(7 downto 0);
 		c_out						: buffer std_logic_vector(2 downto 0);
@@ -1100,6 +1106,15 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 					END IF;
 				END IF;	
 			END IF;	
+			-- Save state restore: CCR. Outside the clkena_lw branch above,
+			-- because the CPU clock enable is held low for the whole restore
+			-- window; a write inside that branch would silently never happen.
+			-- Placed after it, so it also has explicit priority over the
+			-- microcode flag updates. The unconditional zeroing of the unused
+			-- bits below still runs afterwards and keeps its invariant.
+			IF ss_ccr_wr='1' THEN
+				Flags <= ss_ccr;
+			END IF;
 			Flags(7 downto 5) <= "000";
 		END IF;	
 	END PROCESS;
