@@ -180,6 +180,7 @@ wire         ss_vbl_int;
 wire [8:0]   ss_htotal;
 wire         ss_varbeamen;
 wire         ss_harddis;
+wire         cpu_chip_slot_req;
 
 // ------------------------------------------------------- input drivers
 // (ports in the generator's EXTERNAL set are left for the bench to drive)
@@ -579,5 +580,6 @@ minimig dut (
 	.ss_vbl_int(ss_vbl_int),
 	.ss_htotal(ss_htotal),
 	.ss_varbeamen(ss_varbeamen),
-	.ss_harddis(ss_harddis)
+	.ss_harddis(ss_harddis),
+	.cpu_chip_slot_req(cpu_chip_slot_req)
 );
