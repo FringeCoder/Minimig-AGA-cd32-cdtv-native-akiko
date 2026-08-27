@@ -1,0 +1,4 @@
+== sweep started 2026-08-26 22:14 ==
+== baseline for this netlist: seed 14  setup -0.372  hold -0.366 ==
+seed 1   setup 0.173    hold 0.242    worst 0.173
+GOOD: seed 1  setup 0.173  hold 0.242  -- both clear 0.10, rbf saved
