@@ -58,31 +58,57 @@ module tb_cdtv_cr511;
 	logic        hwr = 1'b0;
 	logic        lwr = 1'b0;
 
-	logic  [7:0] ac_rom_byte = 8'h00;
-	wire   [5:0] ac_rom_addr;
 	wire         cdtv_irq;
 	wire   [9:0] cdda_volume;
 
-	wire         cmd_in_pending;
-	wire   [7:0] cmd_in_byte;
-	logic        cmd_in_pop = 1'b0;
 
-	logic        cmd_out_push = 1'b0;
-	logic  [7:0] cmd_out_data = 8'h00;
 
-	logic        sec_byte_push = 1'b0;
-	logic  [7:0] sec_byte_data = 8'h00;
+
+	// ---- ext-bus (UIO) side -------------------------------------------------
+	// The command stream used to be its own set of pins. The b265a3b merge moved
+	// it onto the ext bus, so cmd_in_pop / cmd_out_push / sec_byte_push /
+	// stch_pulse are now strobes decoded inside cdtv_bridge:
+	//
+	//     cmd_in_pop    = uio_rd & uio_cs          cmd_in_pending = uio_req
+	//     cmd_out_push  = uio_wr & uio_cs          cmd_in_byte    = uio_dout[7:0]
+	//     sec_byte_push = uio_wr & uio_cs_sec
+	//     stch_pulse    = uio_wr & uio_cs_stch
+	//
+	// The tests below are unchanged in intent; they drive the same events
+	// through the helper tasks instead of wiggling pins that no longer exist.
+	logic        uio_cs      = 1'b0;
+	logic        uio_cs_sec  = 1'b0;
+	logic        uio_cs_stch = 1'b0;
+	logic        uio_cs_nvr  = 1'b0;
+	logic        uio_cs_card = 1'b0;
+	logic        uio_wr      = 1'b0;
+	logic        uio_rd      = 1'b0;
+	logic [15:0] uio_din     = 16'h0000;
+	wire  [15:0] uio_dout;
+	wire         uio_req;
+
+	// NVRAM / memory-card back ends. Not exercised here; tied so the bridge
+	// sees a well-defined bus rather than X.
+	wire [13:0] nvr_addr;
+	wire  [7:0] nvr_load_din;
+	wire        nvr_load_we, nvr_clear_dirty;
+	wire [12:0] card_addr;
+	wire  [7:0] card_load_din;
+	wire        card_load_we, card_clear_dirty;
+	wire        cdda_volume_valid;
+	wire        sec_fifo_empty;
+
+	// Names the tests still use, now derived from the ext bus.
+	wire         cmd_in_pending = uio_req;
+	wire   [7:0] cmd_in_byte    = uio_dout[7:0];
 
 	logic        subq_push    = 1'b0;
 	logic  [7:0] subq_byte    = 8'h00;
 
-	logic        stch_pulse     = 1'b0;
 	logic        sten_pulse_ext = 1'b0;
 	logic        scor_pulse     = 1'b0;
 	logic        sbcp_pulse     = 1'b0;
 
-	wire         trace_we;
-	wire  [63:0] trace_data;
 
 	// Phase-1b chip-RAM master master observed; bench doesn't exercise it
 	// (covered by future tb_cdtv_sec_dma), so ack is tied off.
@@ -96,27 +122,72 @@ module tb_cdtv_cr511;
 		.sel(sel), .selack(selack),
 		.addr(addr), .din(din), .dout(dout),
 		.rd(rd), .hwr(hwr), .lwr(lwr),
-		.ac_rom_byte(ac_rom_byte), .ac_rom_addr(ac_rom_addr),
-		.cdtv_irq(cdtv_irq), .cdda_volume(cdda_volume),
-		.cmd_in_pending(cmd_in_pending),
-		.cmd_in_byte(cmd_in_byte),
-		.cmd_in_pop(cmd_in_pop),
-		.cmd_out_push(cmd_out_push),
-		.cmd_out_data(cmd_out_data),
-		.sec_byte_push(sec_byte_push),
-		.sec_byte_data(sec_byte_data),
+		.cdtv_irq(cdtv_irq),
+		.cdda_volume(cdda_volume), .cdda_volume_valid(cdda_volume_valid),
+		.uio_cs(uio_cs), .uio_cs_sec(uio_cs_sec), .uio_cs_stch(uio_cs_stch),
+		.uio_cs_nvr(uio_cs_nvr), .uio_cs_card(uio_cs_card),
+		.uio_wr(uio_wr), .uio_rd(uio_rd),
+		.uio_din(uio_din), .uio_dout(uio_dout), .uio_req(uio_req),
+		.nvr_addr(nvr_addr), .nvr_dout(8'h00),
+		.nvr_load_din(nvr_load_din), .nvr_load_we(nvr_load_we),
+		.nvr_clear_dirty(nvr_clear_dirty),
+		.card_addr(card_addr), .card_dout(8'h00),
+		.card_load_din(card_load_din), .card_load_we(card_load_we),
+		.card_clear_dirty(card_clear_dirty),
 		.subq_push(subq_push), .subq_byte(subq_byte),
-		.stch_pulse(stch_pulse),
 		.sten_pulse_ext(sten_pulse_ext),
 		.scor_pulse(scor_pulse),
 		.sbcp_pulse(sbcp_pulse),
+		.sec_fifo_empty(sec_fifo_empty),
 		.cdtv_dma_req(cdtv_dma_req),
 		.cdtv_dma_we(cdtv_dma_we),
 		.cdtv_dma_baddr(cdtv_dma_baddr),
 		.cdtv_dma_wbyte(cdtv_dma_wbyte),
-		.cdtv_dma_ack(1'b0),
-		.trace_we(trace_we), .trace_data(trace_data)
+		.cdtv_dma_ack(1'b0)
 	);
+
+	// ---- ext-bus helpers ----------------------------------------------------
+	// One clk per strobe, de-asserted before the next edge, matching how the
+	// removed pins were driven.
+	task automatic uio_push_cmd_out(input [7:0] b);
+		begin
+			@(posedge clk);
+			uio_cs = 1'b1; uio_din = {8'h00, b}; uio_wr = 1'b1;
+			@(posedge clk);
+			uio_cs = 1'b0; uio_wr = 1'b0; uio_din = 16'h0000;
+			@(posedge clk);
+		end
+	endtask
+
+	task automatic uio_pop_cmd_in;
+		begin
+			@(posedge clk);
+			uio_cs = 1'b1; uio_rd = 1'b1;
+			@(posedge clk);
+			uio_cs = 1'b0; uio_rd = 1'b0;
+			@(posedge clk);
+		end
+	endtask
+
+	task automatic uio_push_sec(input [7:0] b);
+		begin
+			@(posedge clk);
+			uio_cs_sec = 1'b1; uio_din = {8'h00, b}; uio_wr = 1'b1;
+			@(posedge clk);
+			uio_cs_sec = 1'b0; uio_wr = 1'b0; uio_din = 16'h0000;
+			@(posedge clk);
+		end
+	endtask
+
+	task automatic uio_pulse_stch;
+		begin
+			@(posedge clk);
+			uio_cs_stch = 1'b1; uio_wr = 1'b1;
+			@(posedge clk);
+			uio_cs_stch = 1'b0; uio_wr = 1'b0;
+			@(posedge clk);
+		end
+	endtask
 
 	//---------------------------------------------------------------------------
 	// BFM helpers
@@ -170,21 +241,13 @@ module tb_cdtv_cr511;
 	// of automatic vars in ModelSim 10.5b).
 	task automatic pulse_cmd_in_pop;
 		begin
-			@(posedge clk);
-			cmd_in_pop <= 1'b1;
-			@(posedge clk);
-			cmd_in_pop <= 1'b0;
-			@(posedge clk);
+			uio_pop_cmd_in();
 		end
 	endtask
 
 	task automatic pulse_stch;
 		begin
-			@(posedge clk);
-			stch_pulse <= 1'b1;
-			@(posedge clk);
-			stch_pulse <= 1'b0;
-			@(posedge clk);
+			uio_pulse_stch();
 		end
 	endtask
 
@@ -249,10 +312,10 @@ module tb_cdtv_cr511;
 		//=====================================================================
 		// Push reply byte 0xAA.
 		@(posedge clk);
-		cmd_out_data <= 8'hAA;
-		cmd_out_push <= 1'b1;
+		uio_din <= 16'h00AA;
+		uio_cs <= 1'b1; uio_wr <= 1'b1;
 		@(posedge clk);
-		cmd_out_push <= 1'b0;
+		uio_cs <= 1'b0; uio_wr <= 1'b0;
 		wait_clocks(2);
 		// Mode 0 Port C read at $E900B5 (LDS).
 		cpu_rd_word(16'h00B4, rdval);
