@@ -94,6 +94,9 @@ module chipdma_arb
 	output            chip_out_dma,
 	output     [15:0] chip_out_wr,
 	input      [15:0] chip_in_rd,
+	output            chip_dma_slot,
+	input      [15:0] chip_in_rd_dma,
+	input             cpu_chip_slot_req,
 
 	// AC-config state + DDR3 (ram2) DMA write port. When the
 	// active master's address falls in a Zorro fast-RAM window the slot
@@ -292,7 +295,10 @@ wire  [7:0] live_wbyte  = arming_is_cdtv ? cdtv_dma_wbyte : akiko_dma_wbyte;
 //     minimig_idle reads for the next 0.2 s. If that value happens to be
 //     "idle" the bridge would otherwise have unrestricted access to every
 //     slot for the entire dump.
-wire arm_now = (state == S_IDLE) & c_7m_rise & minimig_idle & any_req & ~dma_hold;
+//     The cpu_chip_slot_req term is 114ab43's: the arbiter must not arm in a
+//     cycle the CPU is already asking for a chip slot. Both gates are load
+//     bearing and neither replaces the other.
+wire arm_now = (state == S_IDLE) & c_7m_rise & minimig_idle & ~cpu_chip_slot_req & any_req & ~dma_hold;
 
 assign dma_busy = (state != S_IDLE) | arm_now;
 
@@ -374,7 +380,10 @@ wire        is_unmapped_now = arm_now ? addr_unmapped : ak_unmapped;
 // SDRAM (ram1) override only fires when the slot routes to ram1. This
 // path keeps the original combinational shape because sdram_ctrl samples
 // on the same clk_sys edge as arm_now (8.7 ns budget).
-wire arb_drive_chip = arb_drive & ~is_ddr_now & ~is_unmapped_now;
+// chip_slot_window is 114ab43's: release the chip mux for the cycle the DMA's
+// data comes back on, so the slot does not hold the bus through its own capture.
+wire chip_slot_window = ~((state == S_DRIVE) & (slot_cnt == 3'd3));
+wire arb_drive_chip = arb_drive & ~is_ddr_now & ~is_unmapped_now & chip_slot_window;
 
 assign chip_out_addr = arb_drive_chip ? ak_addr_w    : chip_in_addr;
 assign chip_out_l    = arb_drive_chip ? ak_l_w       : chip_in_l;
@@ -382,6 +391,7 @@ assign chip_out_u    = arb_drive_chip ? ak_u_w       : chip_in_u;
 assign chip_out_rw   = arb_drive_chip ? ak_rw_w      : chip_in_rw;
 assign chip_out_dma  = arb_drive_chip ? 1'b0         : chip_in_dma;
 assign chip_out_wr   = arb_drive_chip ? ak_wr_data_w : chip_in_wr;
+assign chip_dma_slot = arb_drive_chip;
 
 // DDR DMA bus is REGISTERED in chipdma_arb. Data lines stay
 // stable from arm_now until the synchronized ack returns and we drop CS,
@@ -470,8 +480,8 @@ always @(posedge clk) begin
 				// sdram_ctrl's state-9 chipRD update).
 				if (slot_cnt == 3'd3) begin
 					if (!ak_we) begin
-						ak_rbyte_r <= ak_baddr0 ? chip_in_rd[7:0]
-						                        : chip_in_rd[15:8];
+						ak_rbyte_r <= ak_baddr0 ? chip_in_rd_dma[7:0]
+						                        : chip_in_rd_dma[15:8];
 					end
 					state <= S_ACK;
 				end
