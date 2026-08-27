@@ -346,6 +346,8 @@ if (NATIVE_CD32) begin : g_cd
 	reg        tx_busy;                     // engine waiting for dma_ack (TX read)
 	reg        rx_busy;                     // engine waiting for dma_ack (RX write)
 	reg        rx_inflight;                 // BFM has accepted our request (post-quiet-cycle)
+	reg        pio_wr_d;
+	reg        pio_rd_d;
 
 	// The DMA-bus owner latched at chipdma_arb's
 	// arm_now (dma_arm). dma_owned is high for the whole arm->ack transaction;
@@ -462,7 +464,13 @@ if (NATIVE_CD32) begin : g_cd
 	endfunction
 
 	wire [3:0] cmd_op       = cdrom_command_buffer[0][3:0];
+	wire [7:0] cmd_arg1     = cdrom_command_buffer[1];
 	wire [5:0] cmd_total    = expected_total_len(cmd_op);
+
+	wire cmd_zero_result = ((cmd_op == 4'h5) && !cmd_arg1[7])
+	                    ||  (cmd_op == 4'h8)
+	                    ||  (cmd_op == 4'h9)
+	                    ||  (cmd_op == 4'ha);
 	wire       cmd_pending  = (cdrom_command_length != 6'd0)
 	                       && ((cdrom_command_length >= cmd_total)
 	                          || (cdrom_command_length == 6'd32));
@@ -488,6 +496,23 @@ if (NATIVE_CD32) begin : g_cd
 	                  && (cdrom_receive_length != 6'd0)
 	                  && (cdcomrxinx != cdcomrxcmp)
 	                  && (rx_dma_delay == 2'd0);
+
+	wire       pio_tx_allowed  = !cdrom_flags[CDFLAG_TXD_BIT] && !tx_busy;
+	wire       pio_tx_can_send = (cdrom_receive_length == 6'd0)
+	                          && (cdrom_command_length != 6'd32)
+	                          && !cmd_pending;
+	wire [3:0] pio_tx_op       = (cdrom_command_length == 6'd0) ? din[11:8] : cmd_op;
+	wire [5:0] pio_tx_next_len = cdrom_command_length + 6'd1;
+	wire       pio_tx_more     = (pio_tx_next_len < expected_total_len(pio_tx_op))
+	                          && (pio_tx_next_len != 6'd32);
+
+	wire       pio_rx_allowed  = !cdrom_flags[CDFLAG_RXD_BIT] && !rx_busy;
+	wire       pio_rx_avail    = pio_rx_allowed
+	                          && (cdrom_receive_offset < cdrom_receive_length);
+	wire [7:0] pio_rx_data     = pio_rx_avail
+	                          ? cdrom_result_buffer[cdrom_receive_offset]
+	                          : pio_byte;
+	wire       pio_rx_last     = (cdrom_receive_offset + 6'd1) == cdrom_receive_length;
 
 	// Subcode mutual-exclusion helpers. chipdma_arb latches the live akiko DMA
 	// address at arm_now and acks ~5 cycles later, so a higher-priority engine
@@ -589,6 +614,12 @@ if (NATIVE_CD32) begin : g_cd
 	               && !pbx_busy;
 
 	wire write = wr & cs;
+	wire read  = rd & cs;
+
+	wire pio_wr_sel  = write && (addr == 5'b10100) && uds;
+	wire pio_rd_sel  = read  && (addr == 5'b10100);
+	wire pio_wr_edge = pio_wr_sel & ~pio_wr_d;
+	wire pio_rd_edge = pio_rd_sel & ~pio_rd_d;
 
 	// CDFLAG_ENABLE 0->1 this cycle = a new READ DATA "generation". CONFIG-high
 	// reg ($24-$27, addr 5'b10010); ENABLE is bit 26, in the upper byte, so it
@@ -626,6 +657,8 @@ if (NATIVE_CD32) begin : g_cd
 			cdcomtxcmp          <= 8'h0;
 			cdcomrxcmp          <= 8'h0;
 			pio_byte            <= 8'h0;
+			pio_wr_d            <= 1'b0;
+			pio_rd_d            <= 1'b0;
 			nvram_io            <= 8'h0;
 			nvram_dir           <= 8'h0;
 			cdrom_command_length <= 6'h0;
@@ -659,6 +692,9 @@ if (NATIVE_CD32) begin : g_cd
 			// 3-tick post-write delay decay (akiko.cpp:1949,1954)
 			if (tx_dma_delay != 2'd0) tx_dma_delay <= tx_dma_delay - 2'd1;
 			if (rx_dma_delay != 2'd0) rx_dma_delay <= rx_dma_delay - 2'd1;
+
+			pio_wr_d <= pio_wr_sel;
+			pio_rd_d <= pio_rd_sel;
 
 			// Latch the serviced engine at arm_now and
 			// hold it until the transaction's ack. Sampled from the SAME
@@ -829,9 +865,13 @@ if (NATIVE_CD32) begin : g_cd
 				end
 				// $28 PIO byte write — uds (M1 stub: just latch + clear IRQ)
 				5'b10100: begin
-					if (uds) begin
-						pio_byte     <= din[15:8];
-						cdrom_intreq <= cdrom_intreq & ~CDINT_DRIVEXMIT;
+					if (pio_wr_edge && pio_tx_allowed) begin
+						cdrom_intreq <= (cdrom_intreq & ~CDINT_DRIVEXMIT)
+						              | ((pio_tx_can_send && pio_tx_more) ? CDINT_DRIVEXMIT : 32'h0);
+						if (pio_tx_can_send) begin
+							cdrom_command_buffer[cdrom_command_length] <= din[15:8];
+							cdrom_command_length <= pio_tx_next_len;
+						end
 					end
 				end
 				// $30 / $32 NVRAM I2C — M1 stub
@@ -845,6 +885,20 @@ if (NATIVE_CD32) begin : g_cd
 				default: ;
 			endcase
 			end // if (write)
+
+			if (pio_rd_edge) begin
+				pio_byte <= pio_rx_data;
+				if (pio_rx_avail) begin
+					cdrom_receive_offset <= cdrom_receive_offset + 6'd1;
+					if (pio_rx_last) begin
+						cdrom_receive_length <= 6'd0;
+						cdrom_receive_offset <= 6'd0;
+						cdrom_intreq <= (cdrom_intreq & ~CDINT_DRIVERECV) | CDINT_DRIVEXMIT;
+					end
+				end else begin
+					cdrom_intreq <= cdrom_intreq & ~CDINT_DRIVERECV;
+				end
+			end
 
 			// -----------------------------------------------------------------
 			// TX command DMA engine (akiko.cpp:1196-1235 / cdrom_run_command)
@@ -1110,6 +1164,9 @@ if (NATIVE_CD32) begin : g_cd
 				hps_cmd_rd_ptr       <= 6'd0;
 			end
 
+			if (hps_cmd_done && cmd_zero_result && !hps_result_done)
+				cdrom_intreq <= cdrom_intreq | CDINT_DRIVEXMIT;
+
 			// -----------------------------------------------------------------
 			// HPS bridge: result-stream in (Main writes response bytes, then
 			// pulses done to commit). `done` only takes effect when the RX
@@ -1127,7 +1184,10 @@ if (NATIVE_CD32) begin : g_cd
 				// "result ready", which is what the BIOS path needs; BIOS
 				// reads SUBCODE as "drive playing, subcode coming" and stalls
 				// waiting for subcode data that is not on its way.
-				cdrom_intreq         <= cdrom_intreq | CDINT_DRIVERECV;
+				// Upstream c26772a additionally gates this on there being result
+				// bytes at all -- a zero-result command raises DRIVEXMIT instead.
+				if (hps_result_wr_ptr != 6'd0)
+					cdrom_intreq <= cdrom_intreq | CDINT_DRIVERECV;
 			end
 
 			// ---------------------------------------------------------
@@ -1237,8 +1297,7 @@ if (NATIVE_CD32) begin : g_cd
 			// $24-$27 CONFIG (akiko.cpp:1789-1794)
 			5'b10010: cd_dout_r = cdrom_flags[31:16];
 			5'b10011: cd_dout_r = cdrom_flags[15:0];
-			// $28 PIO byte read — stub, returns last write in upper byte
-			5'b10100: cd_dout_r = {pio_byte, 8'h0};
+			5'b10100: cd_dout_r = {pio_rx_data, 8'h0};
 			// $30 NVRAM I/O byte — reflects the live I2C bus state
 			// (master's drives ANDed with the slave's open-drain
 			// pull-down via akiko_nvram). bit 7 = SCL, bit 6 = SDA;
