@@ -104,7 +104,6 @@ module ciaa
 	output [7:0] data_out,      // CPU data bus output
 	input        tick,          // TOD tick input (50/60 Hz)
 	input        eclk,          // E clock (system clock / 10)
-	input        cnt_in,        // CNT pin input
 	output       irq,           // Interrupt request to CPU
 
 	// Port A connections (disk and game port control)
@@ -408,7 +407,6 @@ cia_timera tmra
   .data_in(data_in),
   .data_out(tmra_out),
   .eclk(eclk),
-  .cnt(cnt_in),
   .spmode(spmode),
   .tmra_ovf(tmra_ovf),
   .irq(ta),
@@ -430,7 +428,6 @@ cia_timerb tmrb
   .data_in(data_in),
   .data_out(tmrb_out),
   .eclk(eclk),
-  .cnt(cnt_in),
   .tmra_ovf(tmra_ovf),
   .irq(tb),
   .ss_state(ss_tmrb),
