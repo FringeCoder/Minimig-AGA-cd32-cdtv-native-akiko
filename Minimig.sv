@@ -244,7 +244,10 @@ wire        arb_chip_l;
 wire        arb_chip_u;
 wire        arb_chip_rw;
 wire        arb_chip_dma;
+wire        arb_chip_dma_slot;
 wire [15:0] arb_chip_wr;
+wire [15:0] chipRD_dma;
+wire        cpu_chip_slot_req;
 
 wire [35:0] EXT_BUS;
 
@@ -1200,7 +1203,9 @@ sdram_ctrl ram1
 	.chipL        (arb_chip_l      ),
 	.chipRW       (arb_chip_rw     ),
 	.chipDMA      (arb_chip_dma    ),
+	.chip_dma_slot(arb_chip_dma_slot),
 	.chipRD       (ramdata_in      ),
+	.chipRD_dma   (chipRD_dma      ),
 	.chip48       (chip48          )
 );
 
@@ -1248,6 +1253,9 @@ chipdma_arb chipdma_arb
 	.chip_out_dma    (arb_chip_dma         ),
 	.chip_out_wr     (arb_chip_wr          ),
 	.chip_in_rd      (ramdata_in           ),
+	.chip_dma_slot   (arb_chip_dma_slot    ),
+	.chip_in_rd_dma  (chipRD_dma           ),
+	.cpu_chip_slot_req(cpu_chip_slot_req   ),
 
 	// AC-state inputs (memory_router decode) + DDR (ram2) write
 	// bus when the bridge address falls in a Zorro fast-RAM window.
@@ -1721,7 +1729,9 @@ minimig minimig
 	.ss_vbl_int           (ss_beam_vbl_int      ),
 	.ss_htotal            (ss_beam_htotal       ),
 	.ss_varbeamen         (ss_beam_varbeamen    ),
-	.ss_harddis           (ss_beam_harddis      )
+	.ss_harddis           (ss_beam_harddis      ),
+
+	.cpu_chip_slot_req(cpu_chip_slot_req)
 );
 
 //////////////////////////  SAVE STATES (phase 1A)  /////////////////////////

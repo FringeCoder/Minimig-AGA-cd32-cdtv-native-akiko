@@ -430,7 +430,9 @@ module minimig
 	output         ss_vbl_int,
 	output   [8:0] ss_htotal,
 	output         ss_varbeamen,
-	output         ss_harddis
+	output         ss_harddis,
+
+	output        cpu_chip_slot_req
 );
 
 
@@ -609,6 +611,12 @@ wire        gayle_irq;			//interrupt request
 wire        gayle_nrdy;       // HDD fifo is not ready for reading
 
 wire	[7:0] bank;					//memory bank select
+
+wire cpu_chip_slot_req_c = ~dbr & ~_cpu_as & (|bank);
+reg  cpu_chip_slot_req_r;
+always @(posedge clk) cpu_chip_slot_req_r <= cck ? cpu_chip_slot_req_c
+                                                    : (cpu_chip_slot_req_r | cpu_chip_slot_req_c);
+assign cpu_chip_slot_req = cpu_chip_slot_req_r;
 
 // host interface
 wire        host_cs;
@@ -884,6 +892,7 @@ ciaa CIAA1
 	.data_out(cia_data_out[7:0]),
 	.tick(_vsync),
 	.eclk(eclk[8]),
+	.cnt_in(1'b1),
 	.irq(int2),
 	.porta_in({_fire1,_fire0,_ready,_track0,_wprot,_change}),
 	.porta_out(porta_out),
@@ -912,6 +921,7 @@ ciab CIAB1
 	.data_out(cia_data_out[15:8]),
 	.tick(_hsync),
 	.eclk(eclk[8]),
+	.cnt_in(1'b1),
 	.irq(int6),
 	.flag(index),
 	.porta_in({cd,cts,dsr,ri&_joy3[4],1'b1,_joy4[4]}),
