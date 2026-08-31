@@ -74,6 +74,7 @@ parameter VBSTRT   = 9'h1CC;
 parameter VBSTOP   = 9'h1CE;
 parameter HSSTRT   = 9'h1DE;
 parameter BEAMCON0 = 9'h1DC;
+parameter HHPOSR   = 9'h1DA;
 parameter VSSTRT   = 9'h1E0;
 parameter HCENTER  = 9'h1E2;
 
@@ -149,6 +150,21 @@ always @(*) begin
 		data_out[15:0] = lpen_frozen
 		    ? {vpos_lpen[7:0], hpos_lpen[8:1]}
 		    : {vpos[7:0], |hpos[8:1] ? hpos[8:1] - 8'd1 : ersy ? 8'd0 : htotal[8:1]};
+	// HHPOSR ($1DA, ECS, read only) reports the same horizontal counter VHPOSR
+	// does, in the low byte and on its own. WinUAE custom.cpp: HHPOSR() returns
+	// the light pen latch when one is armed and hhpos otherwise, masked to
+	// 0xff; hhpos is assigned agnus_hpos every colour clock except in BEAMCON0
+	// DUAL mode, where it free-runs and HHPOSW ($1D8) can reseed it.
+	//
+	// This core does not implement DUAL mode, so outside it the two readbacks
+	// agree by construction and this mirrors the horizontal half of VHPOSR
+	// exactly -- decrement, ERSY case, light pen freeze and all. HHPOSW is not
+	// decoded for the same reason: with hhpos not free-running there is nothing
+	// for a write to hold.
+	else if (ecs && reg_address_in[8:1]==HHPOSR[8:1])
+		data_out[15:0] = {8'h00, lpen_frozen
+		    ? hpos_lpen[8:1]
+		    : (|hpos[8:1] ? hpos[8:1] - 8'd1 : ersy ? 8'd0 : htotal[8:1])};
 	else
 		data_out[15:0] = 0;
 end

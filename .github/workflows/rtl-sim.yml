@@ -165,6 +165,18 @@ jobs:
           vvp tb | tee out.log
           grep -q "RUN: PASS" out.log
 
+      # HHPOSR ($1DA) was not decoded at all. It is the horizontal half of VHPOSR
+      # on its own, ECS only, and it honours the light pen freeze -- so this also
+      # guards the equality between the two readbacks, which is only true because
+      # BEAMCON0 DUAL mode is not implemented here.
+      - name: HHPOSR readback
+        run: |
+          set -euo pipefail
+          cd rtl/sim/beamcounter
+          iverilog -g2012 -o tb_hh ../../agnus_beamcounter.v tb_beamcounter_hhposr.sv
+          vvp tb_hh | tee out_hh.log
+          grep -q "RUN: PASS" out_hh.log
+
       # TG68KdotC_Kernel's savestate restore. VHDL, so GHDL rather than Icarus.
       # The bench boots the kernel from reset vectors, freezes it at 80
       # successive clocks across one pass of a test program, restores the whole
