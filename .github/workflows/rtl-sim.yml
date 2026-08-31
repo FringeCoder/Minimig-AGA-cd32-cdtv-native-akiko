@@ -153,6 +153,18 @@ jobs:
           vvp tb | tee out.log
           grep -q "RUN: PASS" out.log
 
+      # HBSTRT and HBSTOP carry half-a-colour-clock position in bit 10, which the
+      # core used to drop. Also asserts that bits 9:8 stay dropped -- they are 35 ns
+      # resolution and hpos cannot express them, so a future change that folds them
+      # into the compare would move the blanking edge by a whole colour clock.
+      - name: Programmable horizontal blanking edges
+        run: |
+          set -euo pipefail
+          cd rtl/sim/beamcounter
+          iverilog -g2012 -o tb ../../agnus_beamcounter.v tb_beamcounter_hblank.sv
+          vvp tb | tee out.log
+          grep -q "RUN: PASS" out.log
+
       # TG68KdotC_Kernel's savestate restore. VHDL, so GHDL rather than Icarus.
       # The bench boots the kernel from reset vectors, freezes it at 80
       # successive clocks across one pass of a test program, restores the whole

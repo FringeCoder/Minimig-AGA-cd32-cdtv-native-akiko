@@ -226,7 +226,15 @@ reg [ 8:0] htotal_reg;
 reg [ 8:0] hsstrt_reg;
 reg [ 8:0] hsstop_reg;
 reg [ 8:0] hcenter_reg;
-reg [ 8:0] hbstrt_reg; // not correct size, this should have [10:0]
+// HBSTRT and HBSTOP are the only two of these that carry sub-colour-clock
+// position: WinUAE masks them to 0x7ff and the other four to 0xff. Bits 7:0 are
+// the colour clock, bits 10:8 place the edge inside it at 35 ns. These registers
+// hold the comparison value rather than the raw write, and hpos counts half
+// colour clocks, so what is stored is {CCK, bit 10} -- bit 10 being worth
+// exactly half a colour clock. Bits 9:8 are below this counter's resolution and
+// are dropped; representing them needs the 35 ns comparators the chipset does
+// not have. See rtl/sim/beamcounter/tb_beamcounter_hblank.sv.
+reg [ 8:0] hbstrt_reg;
 reg [ 8:0] hbstop_reg;
 reg [10:0] vtotal_reg;
 reg [10:0] vsstrt_reg;
@@ -254,8 +262,8 @@ always @ (posedge clk) begin
 				HSSTRT [8:1] : hsstrt_reg  <= {data_in[ 7:0], 1'b0};
 				HSSTOP [8:1] : hsstop_reg  <= {data_in[ 7:0], 1'b0};
 				HCENTER[8:1] : hcenter_reg <= {data_in[ 7:0], 1'b0};
-				HBSTRT [8:1] : hbstrt_reg  <= {data_in[ 7:0], 1'b0}; // TODO fix this
-				HBSTOP [8:1] : hbstop_reg  <= {data_in[ 7:0], 1'b0};
+				HBSTRT [8:1] : hbstrt_reg  <= {data_in[ 7:0], data_in[10]};
+				HBSTOP [8:1] : hbstop_reg  <= {data_in[ 7:0], data_in[10]};
 				VTOTAL [8:1] : vtotal_reg  <= {data_in[10:0]};
 				VSSTRT [8:1] : vsstrt_reg  <= {data_in[10:0]};
 				VSSTOP [8:1] : vsstop_reg  <= {data_in[10:0]};
