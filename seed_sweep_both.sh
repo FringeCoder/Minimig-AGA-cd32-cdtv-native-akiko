@@ -28,11 +28,11 @@ TARGET=0.10          # both slacks must clear this to stop early
 while tasklist 2>/dev/null | grep -qiE "quartus_(map|fit|asm|sta)"; do sleep 30; done
 
 echo "== sweep started $(date '+%Y-%m-%d %H:%M') ==" | tee -a "$R"
-echo "== baseline for this netlist: seed 14  setup -0.091  hold +0.244 ==" | tee -a "$R"
+echo "== baseline for this netlist: seed 16  setup -0.347  hold -0.401 ==" | tee -a "$R"
 
 best_seed=""; best_min=-99
 
-for SEED in 1 10 16 4 18 7 2 11 15 5 13 17 6 12 3; do
+for SEED in 16 1 10 4 18 7 2 11 15 5 13 17 6 12 3; do
     "$Q/quartus_fit" --seed=$SEED Minimig > "$OUT/both_fit_$SEED.log" 2>&1 \
         || { echo "seed $SEED  FIT FAILED" | tee -a "$R"; continue; }
     "$Q/quartus_sta" Minimig > "$OUT/both_sta_$SEED.log" 2>&1
