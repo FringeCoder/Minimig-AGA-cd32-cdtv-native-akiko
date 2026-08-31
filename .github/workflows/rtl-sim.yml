@@ -63,6 +63,36 @@ jobs:
           vvp tb_ssdiag | tee out.log
           grep -q "RUN: PASS" out.log
 
+      # cdtv_bridge's CR-511 command/reply surface and TPI Port C shapes. Ten
+      # checks, including the 2026-05-21 byte-lane fix and the mode-0 Port C
+      # value that a pre-fix bug got wrong.
+      #
+      # These two benches shipped with ModelSim .do runners and were never run
+      # here, so they silently stopped compiling at the b265a3b merge: it moved
+      # the command stream onto the ext bus and deleted ac_rom_*, cmd_in_*,
+      # cmd_out_*, sec_byte_* and trace_* from the module. Being in CI is the
+      # point -- the RTL they cover is the CDTV path, which is the part of this
+      # core that is hardest to exercise by hand.
+      - name: CDTV CR-511 command surface
+        run: |
+          set -euo pipefail
+          cd rtl/sim/cdtv
+          iverilog -g2012 -o tb_cr511 -s tb_cdtv_cr511             tb_cdtv_cr511.sv ../../cdtv_bridge.v ../cache/dpram_sim.v
+          vvp tb_cr511 | tee out_cr511.log
+          grep -q "RUN: PASS" out_cr511.log
+
+      # The STCH interrupt path, including the raise-versus-AIR-read collision
+      # across twelve phase offsets. STCH must fire only on cd_media
+      # transitions; an earlier FSM pulsed it on every command and regressed the
+      # M1 splash, which is the class of error this catches.
+      - name: CDTV TPI STCH delivery
+        run: |
+          set -euo pipefail
+          cd rtl/sim/cdtv
+          iverilog -g2012 -o tb_tpi -s tb_cdtv_tpi_stch             tb_cdtv_tpi_stch.sv ../../cdtv_bridge.v ../cache/dpram_sim.v
+          vvp tb_tpi | tee out_tpi.log
+          grep -q "RUN: PASS" out_tpi.log
+
       # agnus_beamcounter's light pen latch. VPOSR/VHPOSR used to be a plain mux
       # on the userspace-supplied position, so BPLCON0 bit 3 froze the beam
       # counters for as long as it stayed set and every beam-wait loop hung --
