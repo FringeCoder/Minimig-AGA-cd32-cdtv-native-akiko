@@ -514,7 +514,7 @@ called the `-1` arm a "placeholder until Phase 33". The teardown is `cmd_stop()`
 clearing `cd_cdda_lba_next/end` and `cd_cdda_drv`; the `-1` to `-2` advance
 those comments wrapped was always correct.
 
-## T17 — Trim the save state diagnostic scaffolding  [SIM + FIT] — HOT
+## T17 — Trim the save state diagnostic scaffolding  [SIM + FIT] — [INVESTIGATED 2026-08-31, NOT TRIMMED]
 
 `ss_ctrl.v` is 2,530 lines, and the save state notes already flag the peek
 window, fault and interrupt latches and free-running counters as large and
@@ -542,6 +542,46 @@ Two shapes to aim at:
 Neither is diagnostic scaffolding as such, so the trim alone may not reach them.
 Measure after trimming before deciding whether the load path also needs a
 pipeline stage. T22's bench is what makes any of this safe to believe.
+
+### What the trim actually found  [2026-08-31]
+
+**There is nothing to trim, and the premise that this is "the cheapest slack
+available" is wrong.** Recorded in full because it is a conclusion nobody should
+have to reach twice.
+
+The reasoning was: `ss_ctrl.v` is 2,530 lines, much of it diagnostics for a bug
+fixed in 2026-08, so removing it costs no capability and cannot break behaviour.
+Both halves are true. What does not follow is that any of it is *costing*
+anything.
+
+- Of the module's seventy ports, exactly two had no consumer in `Minimig.sv`:
+  `peek_acks` and `peek_timeout`. **Quartus was therefore already removing them
+  and the counters behind them**, so deleting them buys nothing that has not
+  already been bought.
+- And they are not dead. `rtl/tb/ss_ctrl_tb.v` asserts on both -- "peek did not
+  time out" and "peek counted its acks", the latter expecting exactly 8. They
+  are the bench's observation points into the peek DMA path. Deleting them
+  removes two real assertions in exchange for nothing.
+- Everything else -- the peek window, `pc_snapshot`, `kick_pair`, `dbg_idx`, the
+  state and change-count latches -- is consumed by
+  `support/minimig/minimig_ssdiag.cpp`, which this item says to keep.
+
+So the only lever left is to stop *consuming* it: delete the ssdiag sub-channel
+and then the scaffolding behind it. That is a product decision about whether the
+save state diagnostics are still wanted, not a tidy-up, and it should be taken
+deliberately rather than as a way to find timing.
+
+None of which would reach the binding path anyway. T0 action 2 put seven of the
+ten worst setup paths inside `ss_ctrl`, and they are the restore-side load states
+and the header/index arithmetic into `rd_idx` -- the load path itself, not
+anything diagnostic. If `ss_ctrl` has to give up time, it is that path that needs
+a pipeline stage, and T22's bench is what would make such a change safe to
+believe.
+
+**One trap found on the way.** `rtl/ss_ctrl.v` exists in both repos as
+byte-identical mirrors; only the userspace copy has the benches, in `rtl/tb/`.
+A change applied to the core copy alone builds and fits perfectly and silently
+loses its test coverage. Change both, and run `rtl/tb/ss_ctrl_tb.v` after.
 
 ## T18 — The save state "not captured" list is stale  [no code] — [DONE 2026-08-31]
 
