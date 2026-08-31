@@ -86,7 +86,7 @@ parameter HCENTER_VAL     = 256+4+4;         // position of vsync pulse during t
 parameter VSSTRT_VAL      = 2;               // vertical sync start
 parameter VSSTOP_VAL      = 5;               // PAL vsync width: 2.5 lines (NTSC: 3 lines - not implemented)
 parameter VBSTRT_VAL      = 0;               // vertical blanking start
-parameter HTOTAL_VAL      = 8'd227 - 8'd1;   // line length of 227 CCKs in PAL mode (NTSC line length of 227.5 CCKs is not supported)
+parameter HTOTAL_VAL      = 8'd227 - 8'd1;   // line length of 227 CCKs; NTSC alternates 227/228 via long_line
 parameter VTOTAL_PAL_VAL  = 11'd312 - 11'd1; // total number of lines (PAL: 312 lines, NTSC: 262)
 parameter VTOTAL_NTSC_VAL = 11'd262 - 11'd1; // total number of lines (PAL: 312 lines, NTSC: 262)
 parameter VBSTOP_PAL_VAL  = 9'd25;           // vertical blanking end (PAL 26 lines, NTSC vblank 21 lines)
@@ -149,7 +149,7 @@ always @(*) begin
 		// LPEN_HPOS_MIN in support/lightpen/amiga_lightpen.cpp.
 		data_out[15:0] = lpen_frozen
 		    ? {vpos_lpen[7:0], hpos_lpen[8:1]}
-		    : {vpos[7:0], |hpos[8:1] ? hpos[8:1] - 8'd1 : ersy ? 8'd0 : htotal[8:1]};
+		    : {vpos[7:0], |hpos[8:1] ? hpos[8:1] - 8'd1 : ersy ? 8'd0 : htotal_cck};
 	// HHPOSR ($1DA, ECS, read only) reports the same horizontal counter VHPOSR
 	// does, in the low byte and on its own. WinUAE custom.cpp: HHPOSR() returns
 	// the light pen latch when one is armed and hhpos otherwise, masked to
@@ -164,7 +164,7 @@ always @(*) begin
 	else if (ecs && reg_address_in[8:1]==HHPOSR[8:1])
 		data_out[15:0] = {8'h00, lpen_frozen
 		    ? hpos_lpen[8:1]
-		    : (|hpos[8:1] ? hpos[8:1] - 8'd1 : ersy ? 8'd0 : htotal[8:1])};
+		    : (|hpos[8:1] ? hpos[8:1] - 8'd1 : ersy ? 8'd0 : htotal_cck)};
 	else
 		data_out[15:0] = 0;
 end
@@ -290,8 +290,34 @@ always @ (posedge clk) begin
 	end
 end
 
+// NTSC lines are 227.5 colour clocks, which the chipset produces by alternating
+// 227 and 228. long_line is that alternation, declared here because the line
+// length below depends on it.
+//
+// WinUAE custom.cpp:
+//
+//     if (!(new_beamcon0 & BEAMCON0_PAL) && !(new_beamcon0 & BEAMCON0_LOLDIS)) {
+//         lol = lol ? false : true;
+//         linetoggle = true;
+//     } else {
+//         lol = false;
+//         linetoggle = false;
+//     }
+//     ...
+//     maxhpos = maxhpos_short + lol;
+//
+// The toggle was already here and already correct -- what was missing is the
+// second half, the line actually being a colour clock longer. That is
+// htotal_cck below, and it is what end_of_line, htotal_out and the VHPOSR wrap
+// value all use, so nothing has to know about long_line separately.
+reg long_line;
+
 // programmable display mode values
-wire [ 8:0] htotal  =             varbeamen ? htotal_reg  : HTOTAL_VAL << 1; // line length of 227 CCKs in PAL mode (NTSC line length of 227.5 CCKs is not supported)
+wire [ 8:0] htotal  =             varbeamen ? htotal_reg  : HTOTAL_VAL << 1; // line length of 227 CCKs; NTSC alternates 227/228 via long_line
+
+// The last colour clock of THIS line. htotal is the short-line length, as
+// WinUAE's maxhpos_short is, and a long line runs one colour clock past it.
+wire [ 7:0] htotal_cck = htotal[8:1] + {7'd0, long_line};
 wire [ 8:0] hsstrt  = varhsyen && varbeamen ? hsstrt_reg  : HSSTRT_VAL[8:0];
 wire [ 8:0] hsstop  = varhsyen && varbeamen ? hsstop_reg  : HSSTOP_VAL[8:0];
 wire [ 8:0] hcenter = varhsyen && varbeamen ? hcenter_reg : HCENTER_VAL[8:0];
@@ -303,7 +329,10 @@ wire [10:0] vsstop  = varvsyen && varbeamen ? vsstop_reg  : VSSTOP_VAL[10:0];
 //wire [10:0] vbstrt  = varvben  && varbeamen ? vbstrt_reg  : VBSTRT_VAL[10:0];
 wire [10:0] vbstop  = varvben  && varbeamen ? vbstop_reg  : pal ? VBSTOP_PAL_VAL : VBSTOP_NTSC_VAL;
 
-assign htotal_out    = htotal;
+// The effective length, not the short-line one. agnus.v:483 wraps its DMA slot
+// lookahead at htotal[8:1], so exporting the short length would make the slot
+// grid wrap one colour clock early on every long line.
+assign htotal_out    = {htotal_cck, htotal[0]};
 assign harddis_out   = harddis || varbeamen || varvben;
 assign varbeamen_out = varbeamen;
 
@@ -318,7 +347,7 @@ assign varbeamen_out = varbeamen;
 reg end_of_line;
 always @(posedge clk) begin
 	if (clk7_en) begin
-		if (hpos[8:0]=={htotal[8:1],1'b0})
+		if (hpos[8:0]=={htotal_cck,1'b0})
 			end_of_line <= 1'b1;
 		else
 			end_of_line <= 1'b0;
@@ -339,11 +368,15 @@ end
 
 always @(cck) hpos[0] = cck;
 
-//long line signal (not used, only for better NTSC compatibility)
-reg long_line;	 // long line signal for NTSC compatibility (actually long lines are not supported yet)
+// The long-line alternation itself. Declared above, next to the line length it
+// feeds. VPOSW bit 7 also writes it -- WinUAE custom.cpp:7712,
+// "lol = (i & 0x0080) != 0" -- which is how a program resynchronises the
+// alternation rather than waiting for it to come round.
 always @(posedge clk) begin
 	if (clk7_en) begin
-		if (end_of_line)
+		if (reg_address_in[8:1]==VPOSW[8:1])
+			long_line <= data_in[7];
+		else if (end_of_line)
 			if (pal || (loldis && varbeamen))
 				long_line <= 1'b0;
 			else if (!(loldis && varbeamen))

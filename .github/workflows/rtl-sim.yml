@@ -177,6 +177,17 @@ jobs:
           vvp tb_hh | tee out_hh.log
           grep -q "RUN: PASS" out_hh.log
 
+      # NTSC lines are 227.5 colour clocks, produced by alternating 227 and 228.
+      # long_line toggled for years with nothing consuming it. Also guards the
+      # cases that must NOT alternate -- PAL, BEAMCON0 PAL and LOLDIS.
+      - name: NTSC long lines
+        run: |
+          set -euo pipefail
+          cd rtl/sim/beamcounter
+          iverilog -g2012 -o tb_ll ../../agnus_beamcounter.v tb_beamcounter_longline.sv
+          vvp tb_ll | tee out_ll.log
+          grep -q "RUN: PASS" out_ll.log
+
       # ADKCON attach: one audio channel modulating the next. Covers both
       # directions of the old failure -- the modulator being heard when it should
       # be silent, and the modulation not happening -- plus channel 3, which is
