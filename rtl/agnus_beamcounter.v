@@ -129,8 +129,26 @@ always @(*) begin
 		data_out[15:0] = {long_frame,1'b0,ecs,ntsc,2'b00,{2{aga}},long_line,4'b0000,
 		                  lpen_frozen ? vpos_lpen[10:8] : vpos[10:8]};
 	else if (reg_address_in[8:1]==VHPOSR[8:1] || reg_address_in[8:1]==VHPOSW[8:1])
-		data_out[15:0] = lpen_frozen ? {vpos_lpen[7:0], hpos_lpen[8:1]}
-		                             : {vpos[7:0], hpos[8:1]};
+		// The live half is 06f30af verbatim: the internal hpos runs one colour
+		// clock ahead of what real Agnus reports, so the readback decrements it,
+		// and a zero means the htotal wrap unless an ERSY genlock freeze is
+		// holding it there. Measured upstream against the vAmigaTS VPOS suite.
+		//
+		// The frozen half deliberately does NOT get that correction. hpos_lpen
+		// does not hold a sample of the internal counter -- it holds the value a
+		// program is meant to READ, computed by userspace from WinUAE's raster
+		// geometry, which is already reported-space. Decrementing it again would
+		// shift the pen one colour clock left of where userspace aimed it.
+		//
+		// The trigger comparison in the latch below is the loose end: it matches
+		// the internal hpos against that reported-space target, so it arms one
+		// colour clock early. Left alone rather than guessed at -- the position
+		// path has never been verified against a gun that locks, and the
+		// userspace constants would need re-measuring with it. See the note on
+		// LPEN_HPOS_MIN in support/lightpen/amiga_lightpen.cpp.
+		data_out[15:0] = lpen_frozen
+		    ? {vpos_lpen[7:0], hpos_lpen[8:1]}
+		    : {vpos[7:0], |hpos[8:1] ? hpos[8:1] - 8'd1 : ersy ? 8'd0 : htotal[8:1]};
 	else
 		data_out[15:0] = 0;
 end
@@ -377,7 +395,7 @@ end
 //in interlaced mode every second frame is vtotal+1 long
 wire last_line = long_frame ? extra_line : vpos_equ_vtotal;
 
-assign field1 = ~long_frame;
+assign field1 = (~long_frame) & lace;
 
 //generate end of frame signal
 wire end_of_frame = vpos_inc & last_line;

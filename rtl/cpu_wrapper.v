@@ -33,9 +33,9 @@ module cpu_wrapper
 	input             ph1,
 	input             ph2,
 
-	input       [1:0] cpucfg,
+	input       [2:0] cpucfg,
 	input       [2:0] fastramcfg,
-	input       [3:0] cachecfg,
+	input       [2:0] cachecfg,
 	input             bootrom,
 
 	// Park request. While high the CPU is allowed to finish whatever bus
@@ -339,7 +339,7 @@ cpu_inst_p
   .nresetout(reset_out_p),
   .longword(longword),
   
-  .cpu(cpucfg),
+  .cpu(cpucfg[1:0]),
   .busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
   .cacr_out(cacr_p),
   // D-cache software toggle: bit 8 of CACR (real 030 spec).
@@ -439,12 +439,17 @@ always @(posedge clk) begin
 	end
 end
 
-// Stock-speed 14 MHz throttle. cachecfg[3]=1 forces a 9-sysclk cooldown
+// Stock-speed 14 MHz throttle. forces a 4-sysclk cooldown
 // after every clkena tick. During cooldown, the bus controllers sit in
 // IDLE (no in-flight transaction, since CPU hasn't moved on yet), so no
-// memory handshake is at risk. Net pipeline rate drops ~10x to ~1.37 MIPS,
+// 148931d shortened that from 9: at 9 the throttle ran at HALF A1200 speed.
+// It matters now because the matching userspace change puts the CD32 and
+// A1200 presets on this throttle.
 // landing near a real A1200 020 at 14 MHz.
-wire stock_speed   = cachecfg[3];
+// 67af318 moved this bit: it used to arrive as cachecfg[3] and now arrives
+// as cpucfg[2]. Both are t_cpu_config[5] on the wire -- userio.v just routes
+// it through a different field -- so nothing changes for userspace.
+wire stock_speed   = cpucfg[2];
 // clkena gates the CPU pipeline forward-tick. The bridge fires cdtv_selack
 // combinationally with sel, so the data is available on the same cycle —
 // equivalent to fastchip_ready being asserted "immediately" alongside
@@ -487,7 +492,7 @@ reg [3:0] cooldown;
 always @(posedge clk) begin
 	if (~reset)                                cooldown <= 4'd0;
 	else if (cooldown != 4'd0)                 cooldown <= cooldown - 4'd1;
-	else if (stock_speed & clkena_p_base)      cooldown <= 4'd9;
+	else if (stock_speed & clkena_p_base)      cooldown <= 4'd4;
 end
 wire clkena_p_throttled = clkena_p_base & (cooldown == 4'd0);
 
