@@ -19,6 +19,10 @@ module cia_timerb
   input  tmra_ovf,        // Timer A underflow signal for cascade mode
   output  irq,            // Timer underflow interrupt request
 
+  // PB7 output, CRB bits 1 and 2. Same meaning as timer A's PB6.
+  output  pb_on,
+  output  pb_val,
+
   // Save state, laid out exactly as timer A's: {tmr, tmlh, tmll, tmcr}.
   // See cia_timera.v for why these are exported rather than read back.
   output [38:0] ss_state,
@@ -48,8 +52,8 @@ assign count = tmcr[6] ? tmra_ovf : eclk;
 
 // Timer Control Register (CRB) bit definitions:
 // Bit 0: START - Start/stop timer (1=start, 0=stop)
-// Bit 1: PBON - PB7 output mode (not implemented in simplified version)
-// Bit 2: OUTMODE - PB7 output mode (not implemented)
+// Bit 1: PBON - drive PB7 from the timer instead of the port register
+// Bit 2: OUTMODE - 0=pulse for one count on underflow, 1=toggle on underflow
 // Bit 3: RUNMODE - 0=continuous, 1=one-shot
 // Bit 4: LOAD - Force load timer from latch (strobe, write-only)
 // Bit 5-6: INMODE - Count source:
@@ -142,7 +146,19 @@ assign zero = ~|tmr;                    // Timer equals zero
 assign underflow = zero & start & count; // Underflow when counting through zero
 
 // Output signals
-assign irq = underflow;  // Interrupt request on underflow
+assign irq = underflow;
+
+// PB7, same shape as timer A's PB6. The toggle flop is deliberately not in
+// ss_state -- see the note in rtl/ss_state.vh.
+reg pb_tgl;
+always @(posedge clk)
+  if (clk7_en) begin
+    if (reset)          pb_tgl <= 1'b0;
+    else if (underflow) pb_tgl <= ~pb_tgl;
+  end
+
+assign pb_on  = tmcr[1];
+assign pb_val = tmcr[2] ? pb_tgl : underflow;  // Interrupt request on underflow
 
 // CPU read data multiplexer
 // Note: Bit 7 of CRB (ALARM bit) is handled by Timer D module

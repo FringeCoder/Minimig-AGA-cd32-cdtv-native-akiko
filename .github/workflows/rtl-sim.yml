@@ -201,6 +201,18 @@ jobs:
           vvp tb | tee out.log
           grep -q "RUN: PASS" out.log
 
+      # Three of the four things ciaa.v's 2005 header lists as not implemented:
+      # CIA-A's port B, PB6/PB7 driven by the timers, and CIA-B's serial data
+      # register. The fourth is the CNT count-source selects, which stay
+      # unimplemented and are guarded by their own step above.
+      - name: CIA port B, PB6/PB7 and the CIA-B serial register
+        run: |
+          set -euo pipefail
+          cd rtl/sim/cia
+          iverilog -g2012 -o tb             ../../ciaa.v ../../ciab.v ../../cia_timera.v ../../cia_timerb.v             ../../cia_int.v ../../cia_timerd.v tb_cia_leftovers.sv
+          vvp tb | tee out.log
+          grep -q "RUN: PASS" out.log
+
       # TG68KdotC_Kernel's savestate restore. VHDL, so GHDL rather than Icarus.
       # The bench boots the kernel from reset vectors, freezes it at 80
       # successive clocks across one pass of a test program, restores the whole

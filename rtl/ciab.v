@@ -80,8 +80,11 @@ module ciab
   wire  tb;                 // Timer B interrupt
   wire  tmra_ovf;           // Timer A underflow signal
 
-  reg    [7:0] sdr_latch;   // Serial data register (dummy)
+  reg    [7:0] sdr_latch;   // Serial data register
   wire  [7:0] sdr_out;      // SDR output
+  wire  spmode;             // Timer A serial port mode (0=input, 1=output)
+  wire  ta_pb_on, ta_pb_val;  // Timer A driving PB6
+  wire  tb_pb_on, tb_pb_val;  // Timer B driving PB7
 
   reg    tick_del;          // Delayed tick for edge detection
 
@@ -130,8 +133,24 @@ assign  crb  = (enable && rs==4'hF) ? 1'b1 : 1'b0;
 // Data output multiplexer - OR together all module outputs
 assign data_out = icr_out | tmra_out | tmrb_out | tmrd_out | sdr_out | pb_out | pa_out;
 
-// Dummy serial port data register
-// CIA B's serial port is not implemented in this simplified version
+// Serial port data register.
+//
+// The shift register is clocked by timer A underflow, not by the CNT pin.
+// WinUAE cia.cpp does the shift inside the timer A underflow path, gated on
+// (cr & (CR_SPMODE | CR_RUNMODE)) == CR_SPMODE -- in output mode the CIA
+// GENERATES CNT rather than receiving it, so nothing external is needed. That
+// is what makes this implementable here: CIA-B's CNT pin goes to the expansion
+// bus and is unconnected on a stock Amiga, so input mode has no source on real
+// hardware either and an input-mode read returns whatever was last shifted in,
+// which is nothing.
+//
+// A write while a shift is running is held and starts when the current byte
+// finishes, again following WinUAE's sdr_load.
+//
+// sdr_buf, sdr_cnt and sdr_load are deliberately NOT in ss_state -- see the
+// note in rtl/ss_state.vh. A save taken mid-transmission restores with the
+// shifter idle and that byte's SP interrupt lost. That is strictly better than
+// what this did before, which was to never transmit and never interrupt at all.
 always @(posedge clk)
   if (ss_ld)
     sdr_latch[7:0] <= ss_ld_data[39:32];
@@ -140,6 +159,50 @@ always @(posedge clk)
       sdr_latch[7:0] <= 8'h00;
     else if (wr & sdr)
       sdr_latch[7:0] <= data_in[7:0];
+  end
+
+reg [7:0] sdr_buf;    // the byte being shifted out
+reg [3:0] sdr_cnt;    // bits left to shift, 0 = idle
+reg       sdr_load;   // a byte is waiting for the current one to finish
+reg       ser_int;    // SP interrupt: a byte has finished
+
+always @(posedge clk)
+  if (clk7_en) begin
+    ser_int <= 1'b0;
+    if (reset) begin
+      sdr_buf  <= 8'h00;
+      sdr_cnt  <= 4'd0;
+      sdr_load <= 1'b0;
+    end
+    else if (!spmode) begin
+      // Input mode. Nothing drives CNT on this machine, so the shifter simply
+      // does not run; drop any transmission in progress rather than leaving it
+      // half done across a mode change.
+      sdr_cnt  <= 4'd0;
+      sdr_load <= 1'b0;
+    end
+    else begin
+      if (wr & sdr) begin
+        if (sdr_cnt == 4'd0) begin
+          sdr_buf <= data_in[7:0];
+          sdr_cnt <= 4'd8;
+        end
+        else sdr_load <= 1'b1;
+      end
+
+      if (ta && sdr_cnt != 4'd0) begin
+        sdr_buf <= {sdr_buf[6:0], 1'b0};
+        sdr_cnt <= sdr_cnt - 4'd1;
+        if (sdr_cnt == 4'd1) begin
+          ser_int <= 1'b1;
+          if (sdr_load) begin
+            sdr_buf  <= sdr_latch[7:0];
+            sdr_cnt  <= 4'd8;
+            sdr_load <= 1'b0;
+          end
+        end
+      end
+    end
   end
 
 // SDR read returns last written value
@@ -235,8 +298,19 @@ begin
 end
 
 // Port B outputs with pull-up simulation
-// All bits are typically configured as outputs for disk control
-assign portb_out[7:0] = (~ddrportb[7:0]) | regportb[7:0];
+// All bits are typically configured as outputs for disk control.
+//
+// PB6 and PB7 can be driven by the timers instead of by the port register when
+// PBON is set, exactly as on CIA-A. Note what those two pins are here: /SEL3 and
+// /MTR. A program that sets PBON on CIA-B is driving the drive-select and motor
+// lines from a timer, which on a real Amiga is just as true and just as
+// destructive. This is faithful, not safe -- and no Amiga software does it,
+// which is why it has gone unnoticed since 2005.
+wire [7:0] portb_pins = (~ddrportb[7:0]) | regportb[7:0];
+
+assign portb_out[7:0] = {tb_pb_on ? tb_pb_val : portb_pins[7],
+                         ta_pb_on ? ta_pb_val : portb_pins[6],
+                         portb_pins[5:0]};
 
 // Delayed tick signal for edge detection
 always @(posedge clk)
@@ -260,7 +334,7 @@ cia_int cnt
   .tb(tb),
   .alrm(alrm),
   .flag(flag),              // Disk index pulse interrupt
-  .ser(1'b0),               // Serial port not implemented
+  .ser(ser_int),            // SP: a serial byte has finished shifting
   .data_in(data_in),
   .data_out(icr_out),
   .irq(irq),
@@ -283,7 +357,10 @@ cia_timera tmra
   .data_out(tmra_out),
   .eclk(eclk),
   .tmra_ovf(tmra_ovf),
+  .spmode(spmode),
   .irq(ta),
+  .pb_on(ta_pb_on),
+  .pb_val(ta_pb_val),
   .ss_state(ss_tmra),
   .ss_ld(ss_ld),
   .ss_ld_data(ss_ld_data[88:50])
@@ -304,6 +381,8 @@ cia_timerb tmrb
   .eclk(eclk),
   .tmra_ovf(tmra_ovf),
   .irq(tb),
+  .pb_on(tb_pb_on),
+  .pb_val(tb_pb_val),
   .ss_state(ss_tmrb),
   .ss_ld(ss_ld),
   .ss_ld_data(ss_ld_data[127:89])

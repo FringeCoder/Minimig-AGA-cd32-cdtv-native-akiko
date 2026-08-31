@@ -20,6 +20,13 @@ module cia_timera
   output  spmode,         // Serial port mode: 0=input, 1=output
   output  irq,            // Timer underflow interrupt request
 
+  // PB6 output, CRA bits 1 and 2. pb_on is PBON: while it is set the port B
+  // pin is driven by the timer instead of by the port register. pb_val is
+  // OUTMODE: 0 pulses high for the one count the timer underflows on, 1
+  // toggles on every underflow.
+  output  pb_on,
+  output  pb_val,
+
   // Save state. {tmr, tmlh, tmll, tmcr} -- the counter, both latch
   // bytes and the control register. Exported rather than read over the
   // bus: a timer's value cannot be recovered from the writes that set
@@ -49,8 +56,8 @@ assign count = eclk;
 
 // Timer Control Register (CRA) bit definitions:
 // Bit 0: START - Start/stop timer (1=start, 0=stop)
-// Bit 1: PBON - PB6 output mode (not implemented in simplified version)
-// Bit 2: OUTMODE - PB6 output mode (not implemented)
+// Bit 1: PBON - drive PB6 from the timer instead of the port register
+// Bit 2: OUTMODE - 0=pulse for one count on underflow, 1=toggle on underflow
 // Bit 3: RUNMODE - 0=continuous, 1=one-shot
 // Bit 4: LOAD - Force load timer from latch (strobe, write-only)
 // Bit 5: INMODE - Count source: 0=system clock, 1=CNT pin (simplified to eclk only)
@@ -149,6 +156,20 @@ assign underflow = zero & start & count; // Underflow when counting through zero
 // Output signals
 assign tmra_ovf = underflow;  // Timer A overflow for Timer B cascade mode
 assign irq = underflow;       // Interrupt request on underflow
+
+// PB6. The toggle flop is deliberately not in ss_state: see the note in
+// rtl/ss_state.vh. It is half a cycle of a timer output on a port pin, and
+// capturing it would push the state section past the padding it currently
+// fits in and invalidate every save file on disk.
+reg pb_tgl;
+always @(posedge clk)
+  if (clk7_en) begin
+    if (reset)          pb_tgl <= 1'b0;
+    else if (underflow) pb_tgl <= ~pb_tgl;
+  end
+
+assign pb_on  = tmcr[1];
+assign pb_val = tmcr[2] ? pb_tgl : underflow;
 
 // CPU read data multiplexer
 // Reading timer returns current count
