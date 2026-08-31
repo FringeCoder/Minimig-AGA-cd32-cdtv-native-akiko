@@ -1,5 +1,5 @@
 
-module cdda #(parameter CLK_RATE)
+module cdda #(parameter CLK_RATE = 0)
 (
 	input             CLK,
 	input             nRESET,
