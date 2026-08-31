@@ -1,40 +1,25 @@
 #!/usr/bin/env bash
-# Re-fit the CURRENT netlist across candidate seeds, stopping at the first with
-# real margin.
+# SUPERSEDED. This now delegates to seed_sweep_both.sh.
 #
-# Synthesis is not re-run: the seed only affects placement, and the map database
-# in this tree already matches the source. The seed order is the ranking from
-# the earlier full sweep, which is a prior rather than a promise -- that sweep
-# measured a different netlist, which is exactly why its best seed came out
-# negative here.
+# The original stopped at the first seed whose SETUP slack cleared a target, and
+# never looked at hold. That is the more dangerous of the two old scripts,
+# because stopping early on a partial measurement is exactly how a build with a
+# hold violation gets picked and then trusted -- it does not merely rank wrong,
+# it stops looking.
+#
+# Concretely, in the 2026-08-31 sweep the first candidate was seed 1 at +0.134
+# setup and -0.495 hold. This script would have taken it, assembled it, printed
+# "GOOD", and exited 0.
+#
+# seed_sweep_both.sh keeps the same early-exit behaviour but requires BOTH
+# slacks positive and clear of its target before it stops, keeps every
+# both-positive bitstream on the way, and says plainly when nothing qualifies
+# instead of reporting a least-bad seed.
+#
+# Kept as a delegating wrapper rather than deleted: the name appears in older
+# notes and commit messages, and it should do the right thing when typed.
 set -u
-Q=/c/intelFPGA_lite/17.0/quartus/bin64
-OUT=seed_sweep
-mkdir -p "$OUT"
-R="$OUT/refit.txt"
-# refit.txt is seeded with the seed 4 result from the full compile above.
-TARGET=0.15
-
-for SEED in 10 16 18 14 7 2 11 15 1 3 5 8; do
-    "$Q/quartus_fit" --seed=$SEED Minimig > "$OUT/refit_fit_$SEED.log" 2>&1 || { echo "seed $SEED FIT FAILED" | tee -a "$R"; continue; }
-    "$Q/quartus_sta" Minimig > "$OUT/refit_sta_$SEED.log" 2>&1
-    s=$(grep -oE "Worst-case setup slack is [-0-9.]+" output_files/Minimig.sta.rpt | tail -1 | grep -oE "[-0-9.]+$")
-    echo "seed $SEED  slack ${s:-unknown}" | tee -a "$R"
-    ok=$(awk -v a="${s:-0}" -v t="$TARGET" 'BEGIN{print (a>=t)?1:0}')
-    if [ "$ok" = "1" ]; then
-        "$Q/quartus_asm" Minimig > "$OUT/refit_asm_$SEED.log" 2>&1
-        cp output_files/Minimig.rbf "$OUT/Minimig_good_seed$SEED.rbf"
-        echo "GOOD: seed $SEED at $s -- rbf saved" | tee -a "$R"
-        exit 0
-    else
-        # Keep every positive build: if nothing clears the target, the best
-        # measured seed still needs a bitstream and refitting it costs another
-        # fifteen minutes for a placement already computed once.
-        ok2=$(awk -v a="${s:-0}" 'BEGIN{print (a>0)?1:0}')
-        if [ "$ok2" = "1" ]; then
-            "$Q/quartus_asm" Minimig > "$OUT/refit_asm_$SEED.log" 2>&1
-            cp output_files/Minimig.rbf "$OUT/Minimig_pos_seed$SEED.rbf"
-        fi
-    fi
-done
-echo "no seed reached $TARGET" | tee -a "$R"
+here=$(cd "$(dirname "$0")" && pwd)
+echo "refit_until_good.sh is superseded -- running seed_sweep_both.sh instead."
+echo "  (it requires BOTH slacks positive before it calls a seed good)"
+exec bash "$here/seed_sweep_both.sh" "$@"

@@ -1,42 +1,20 @@
 #!/usr/bin/env bash
-# Placement seed sweep.
+# SUPERSEDED. This now delegates to seed_sweep_both.sh.
 #
-# This design fits within a few tenths of a nanosecond of its constraint, and
-# three builds today came out NEGATIVE -- Quartus is deterministic, so the same
-# source refits identically and only the seed moves the placement. Rather than
-# reseed reactively each time a build fails, sweep once and keep the best.
+# The original ranked candidates on "Worst-case setup slack" alone. That is how
+# seed 16 once topped a list at +0.113 setup while carrying -0.346 hold and very
+# nearly got deployed on the strength of the better number, and it is not a
+# historical curiosity: in the 2026-08-31 sweep seed 1 came back at +0.134 setup
+# with -0.495 hold, which this script would have selected and assembled.
 #
-# Synthesis is run ONCE: the seed only affects fitting, so each candidate is
-# fit + timing + assemble, which is about two thirds the cost of a full compile.
-# Every candidate's .rbf is kept, so the winner needs no re-fit to produce one.
+# A hold violation is not a slower-clock problem. It fails at every frequency,
+# so a build is only a candidate when BOTH slacks are positive.
+#
+# Kept as a delegating wrapper rather than deleted, because the name is in
+# people's fingers and in older notes. Typing it should do the right thing, not
+# fail with "no such file" and invite someone to fish the old one out of git.
 set -u
-Q=/c/intelFPGA_lite/17.0/quartus/bin64
-OUT=seed_sweep
-mkdir -p "$OUT"
-RESULTS="$OUT/results.txt"
-
-# Wait for any fit already in flight -- the one running now is seed 9 and its
-# result counts as a data point like any other.
-while tasklist 2>/dev/null | grep -qiE "quartus_(map|fit|asm|sta)"; do sleep 30; done
-
-if [ -f output_files/Minimig.sta.rpt ]; then
-    s=$(grep -oE "Worst-case setup slack is [-0-9.]+" output_files/Minimig.sta.rpt | tail -1 | grep -oE "[-0-9.]+$")
-    echo "seed 9 (in-flight build)  slack ${s}" | tee -a "$RESULTS"
-    [ -f output_files/Minimig.rbf ] && cp output_files/Minimig.rbf "$OUT/Minimig_seed9.rbf"
-fi
-
-# Synthesis once. Everything after this is placement only.
-"$Q/quartus_map" Minimig > "$OUT/map.log" 2>&1 || { echo "SYNTHESIS FAILED" | tee -a "$RESULTS"; exit 1; }
-
-for SEED in 1 2 3 4 5 6 7 10 11 12 13 14 15 16 17 18; do
-    "$Q/quartus_fit" --seed=$SEED Minimig > "$OUT/fit_$SEED.log" 2>&1
-    if [ $? -ne 0 ]; then echo "seed $SEED  FIT FAILED" | tee -a "$RESULTS"; continue; fi
-    "$Q/quartus_sta" Minimig > "$OUT/sta_$SEED.log" 2>&1
-    s=$(grep -oE "Worst-case setup slack is [-0-9.]+" output_files/Minimig.sta.rpt | tail -1 | grep -oE "[-0-9.]+$")
-    "$Q/quartus_asm" Minimig > "$OUT/asm_$SEED.log" 2>&1
-    [ -f output_files/Minimig.rbf ] && cp output_files/Minimig.rbf "$OUT/Minimig_seed$SEED.rbf"
-    echo "seed $SEED  slack ${s:-unknown}" | tee -a "$RESULTS"
-done
-
-echo "== sweep complete ==" | tee -a "$RESULTS"
-sort -k4 -g -r "$RESULTS" 2>/dev/null | head -5 | tee -a "$RESULTS"
+here=$(cd "$(dirname "$0")" && pwd)
+echo "seed_sweep.sh is superseded -- running seed_sweep_both.sh instead."
+echo "  (it records both slacks and rejects a build that fails either)"
+exec bash "$here/seed_sweep_both.sh" "$@"
