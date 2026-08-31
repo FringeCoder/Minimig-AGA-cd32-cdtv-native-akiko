@@ -177,6 +177,18 @@ jobs:
           vvp tb_hh | tee out_hh.log
           grep -q "RUN: PASS" out_hh.log
 
+      # ADKCON attach: one audio channel modulating the next. Covers both
+      # directions of the old failure -- the modulator being heard when it should
+      # be silent, and the modulation not happening -- plus channel 3, which is
+      # silenced by its attach bits even though it has nothing to modulate.
+      - name: Paula audio channel modulation
+        run: |
+          set -euo pipefail
+          cd rtl/sim/paula
+          iverilog -g2012 -o tb             ../../paula_audio.v ../../paula_audio_channel.v             ../../paula_audio_mixer.v ../../paula_audio_volume.v             tb_paula_audio_attach.sv
+          vvp tb | tee out.log
+          grep -q "RUN: PASS" out.log
+
       # TG68KdotC_Kernel's savestate restore. VHDL, so GHDL rather than Icarus.
       # The bench boots the kernel from reset vectors, freezes it at 80
       # successive clocks across one pass of a test program, restores the whole

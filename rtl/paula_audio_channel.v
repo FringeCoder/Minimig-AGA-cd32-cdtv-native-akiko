@@ -1,5 +1,33 @@
-//This module handles a single amiga audio channel. attached modes are not supported
+//This module handles a single amiga audio channel.
 // 2020-09-07: pwm controlled volume gated sample output implemented by OKK
+// 2026-08-31: ADKCON attach (modulation) modes implemented
+//
+// Attach mode, ADKCON bits 0..7. Bit n attaches channel n's VOLUME to channel
+// n+1, bit 4+n attaches its PERIOD. The modulating channel stops being heard and
+// its fetched data words become the next channel's volume or period instead --
+// two channels spent for one richer voice, modulated at the audio DMA rate
+// rather than at whatever rate the CPU manages.
+//
+// From WinUAE audio.cpp. loaddat():
+//
+//     int audav = adkcon & (0x01 << nr);
+//     int audap = adkcon & (0x10 << nr);
+//     if (audav || (modper && audap)) {
+//         if (nr >= 3) return;
+//         if (modper && audap)  cdp[1].per = ...cdp->dat...;
+//         else if (audav)       update_volume(nr + 1, cdp->dat);
+//     }
+//
+// and the two call sites that give the timing: loaddat(nr, true) on the 2->3
+// state transition (period), plain loaddat(nr) on 3->2 (volume). WinUAE's states
+// 2 and 3 are the high and low sample of the fetched word, which are our
+// AUDIO_STATE_3 and AUDIO_STATE_4, so the period strobe is 3->4 and the volume
+// strobe is 4->3.
+//
+// Silencing is separate, and it is not conditional on there being a channel to
+// modulate -- audio_update_adkmasks() masks channel n's output whenever either
+// of its attach bits is set, channel 3 included, where the modulation itself
+// does nothing.
 
 module paula_audio_channel
 (
@@ -11,6 +39,14 @@ module paula_audio_channel
   input  dmaena,          //dma enable
   input  [3:1] reg_address_in,    //register address input
   input   [15:0] data,       //bus data input
+  input   att_vol,        //ADKCON: this channel's volume is attached to the next
+  input   att_per,        //ADKCON: this channel's period is attached to the next
+  input   mod_vol_we,      //previous channel is writing our volume
+  input   mod_per_we,      //previous channel is writing our period
+  input   [15:0] mod_data,    //previous channel's data word
+  output  reg mod_vol_stb,    //we are writing the next channel's volume
+  output  reg mod_per_stb,    //we are writing the next channel's period
+  output  [15:0] mod_dout,    //our data word, for the next channel
   output  [6:0] volume,      //channel volume output
   output  [7:0] sample,      //channel sample output
   output  [7:0] sample_okk,  //channel sample output (PWM gated by volumectr like suggested in the HW manual)
@@ -91,6 +127,8 @@ always @(posedge clk) begin
       audper[15:0] <= 16'h00_00;
     else if (aen && (reg_address_in[3:1]==AUDPER[3:1]))
       audper[15:0] <= data[15:0];
+    else if (mod_per_we)  //period modulated by the previous channel
+      audper[15:0] <= mod_data[15:0];
   end
 end
 
@@ -101,6 +139,8 @@ always @(posedge clk) begin
       audvol[6:0] <= 7'b000_0000;
     else if (aen && (reg_address_in[3:1]==AUDVOL[3:1]))
       audvol[6:0] <= data[6:0];
+    else if (mod_vol_we)  //volume modulated by the previous channel
+      audvol[6:0] <= mod_data[6:0];
   end
 end
 
@@ -197,11 +237,43 @@ always @(posedge clk) begin
   end
 end
 
+// A channel with either attach bit set is not heard: its data is the next
+// channel's volume or period, not a sample. WinUAE audio_update_adkmasks():
+//
+//     unsigned long t = adkcon | (adkcon >> 4);
+//     audio_channel[0].data.adk_mask = (((t >> 0) & 1) - 1);
+//
+// which is a full mask when neither bit is set and zero when either is.
+wire attached = att_vol | att_per;
+
 //assign sample[7:0] = penhi ? datbuf[15:8] : datbuf[7:0];
-assign sample[7:0] = silence ? 8'b0 : (penhi ? datbuf[15:8] : datbuf[7:0]);
+assign sample[7:0] = (silence | attached) ? 8'b0 : (penhi ? datbuf[15:8] : datbuf[7:0]);
 
 // By: OKK (The correct way Paula really works!)
-assign sample_okk[7:0] = (silence | !volgate ? 8'b0 : (penhi ? datbuf[15:8] : datbuf[7:0])); // pwm volume gated sample output
+assign sample_okk[7:0] = (silence | attached | !volgate ? 8'b0 : (penhi ? datbuf[15:8] : datbuf[7:0])); // pwm volume gated sample output
+
+// Modulation strobes. The next channel's registers are loaded from the word
+// this channel just fetched, on the same two state transitions WinUAE hangs
+// loaddat() off. Registered rather than decoded inside the transition function
+// so the FSM's output list is left alone -- every branch there assigns every
+// output, and two more would be two more chances to leave a latch behind.
+assign mod_dout[15:0] = auddat[15:0];
+
+always @(posedge clk) begin
+  if (clk7_en) begin
+    mod_per_stb <= 1'b0;
+    mod_vol_stb <= 1'b0;
+    if (reset) begin
+      mod_per_stb <= 1'b0;
+      mod_vol_stb <= 1'b0;
+    end else if (cck) begin
+      if (audio_state == AUDIO_STATE_3 && audio_next == AUDIO_STATE_4)
+        mod_per_stb <= att_per;
+      if (audio_state == AUDIO_STATE_4 && audio_next == AUDIO_STATE_3)
+        mod_vol_stb <= att_vol;
+    end
+  end
+end
 
 //volume output
 assign volume[6:0] = audvol[6:0];
