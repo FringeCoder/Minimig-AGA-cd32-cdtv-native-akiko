@@ -68,13 +68,31 @@ Actions:
    problem returns". It was attempted, it landed, the problem returned, and a
    seed then absorbed it. That whole sequence is worth more than the original
    prediction.
-2. **Open.** Identify the current binding path and write it up the way that doc
-   did. Note `Minimig.sta.rpt` is a summary report and carries no per-path
-   detail — this needs a `quartus_sta` run with `report_timing -setup`, which is
-   minutes against the existing netlist, not a re-fit. The destination is very
-   likely no longer `sd_addr`: the last per-path capture we have,
-   `setup_paths.rpt` from 2026-08-17, shows
-   `ciab:CIAB1|regportb[6]` to `sdram_ctrl:ram1|sd_cas`.
+2. **Done 2026-08-31.** `quartus_sta -t` with `report_timing -setup -npaths 10`
+   against the seed 10 netlist. Ten seconds, no re-fit. **The destination is not
+   `sd_addr`, and it is not in `sdram_ctrl` at all** — neither appears anywhere
+   in the worst ten. Seven of the ten end inside `ss_ctrl`:
+
+    0.117  f2sdram~FF_3780                     -> ss_ctrl|state.S_L_KICK_CHK
+    0.122  f2sdram~FF_3780                     -> ss_ctrl|state.S_L_KICK_CHK
+    0.146  f2sdram~FF_3777                     -> ss_ctrl|state.S_L_KICK_CHK
+    0.151  f2sdram~FF_3777                     -> ss_ctrl|state.S_L_KICK_CHK
+    0.219  ss_ctrl|hdr_length[12]              -> ss_ctrl|rd_idx[1]
+    0.219  ss_ctrl|hdr_length[12]              -> ss_ctrl|rd_idx[2]
+    0.230  ss_ctrl|hdr_length[12]              -> ss_ctrl|rd_idx[23]
+    0.263  ddram_ctrl|a2065_ddram_arbiter|busy -> f2sdram~FF_1381
+    0.286  f2sdram~FF_3780                     -> ss_ctrl|state.S_L_MAGIC
+    0.307  ss_ctrl|rd_data[52]                 -> ss_ctrl|rd_idx[1]
+
+   Hold is comfortable and unrelated: worst +0.234 on an `IIR_filter` tap, with
+   `ss_ctrl|kick_pairs[12]` third at +0.247.
+
+   Two of the three shapes here are the save state controller's restore-side
+   load path — the DDR3 read arriving at the Kickstart-check and magic-check
+   states, and the header/index arithmetic feeding `rd_idx`. **That is T17's
+   subject matter, which promotes T17 from tidiness to the targeted fix.**
+   `docs/sdram-timing-headroom.md` has been updated with the same finding, since
+   its whole `sd_addr` framing predates it.
 3. ~~Only then decide whether the four chipset commits in the pending merge are
    affordable.~~ **Answered: they fit on seed 10.**
 
@@ -301,7 +319,7 @@ called the `-1` arm a "placeholder until Phase 33". The teardown is `cmd_stop()`
 clearing `cd_cdda_lba_next/end` and `cd_cdda_drv`; the `-1` to `-2` advance
 those comments wrapped was always correct.
 
-## T17 — Trim the save state diagnostic scaffolding  [SIM + FIT]
+## T17 — Trim the save state diagnostic scaffolding  [SIM + FIT] — HOT
 
 `ss_ctrl.v` is 2,530 lines, and the save state notes already flag the peek
 window, fault and interrupt latches and free-running counters as large and
@@ -312,9 +330,23 @@ to diagnose a bug which has since been fixed is the cheapest slack available.**
 It costs no capability, and unlike every other timing idea on this list it
 cannot break behaviour, because behaviour does not depend on it.
 
-Do this before attempting any HOT accuracy item. Keep whatever the ssdiag
-sub-channel in `support/minimig/minimig_ssdiag.cpp` still consumes; drop the
-rest, and re-fit to measure what came back.
+Keep whatever the ssdiag sub-channel in `support/minimig/minimig_ssdiag.cpp`
+still consumes; drop the rest, and re-fit to measure what came back.
+
+**Promoted 2026-08-31 on new evidence.** T0 action 2 measured the current worst
+setup paths, and seven of the ten end inside `ss_ctrl` — the worst of them all
+at +0.117, from the DDR3 read into `state.S_L_KICK_CHK`. So this is not slack
+gathered from wherever it happens to be lying about; it is the binding logic.
+Two shapes to aim at:
+
+- the restore-side load states, where a DDR3 read feeds `S_L_KICK_CHK` and
+  `S_L_MAGIC` — four of the worst ten, including both of the top two
+- the header and index arithmetic, `hdr_length[12]` into `rd_idx[*]` and
+  `rd_data[52]` into `rd_idx[1]` — four more
+
+Neither is diagnostic scaffolding as such, so the trim alone may not reach them.
+Measure after trimming before deciding whether the load path also needs a
+pipeline stage. T22's bench is what makes any of this safe to believe.
 
 ## T18 — The save state "not captured" list is stale  [no code] — [DONE 2026-08-31]
 
@@ -451,19 +483,22 @@ invite someone to recover the original from git.
 turned out not to be a gate, which is what most of the original ranking hung
 off: nothing below is ordered by how much timing slack it buys any more.
 
-1. **T3, T19** — the remaining little-or-no-code items. T3 is a decision rather
+1. **T17** — promoted, on evidence gathered after the first re-rank. Seven of
+   the ten worst setup paths now end inside `ss_ctrl`, so trimming the
+   diagnostic scaffolding is no longer generic slack-hunting: it is work on the
+   logic that is actually binding. It still cannot change behaviour, which makes
+   it the only timing item on this list with no accuracy risk.
+2. **T3, T19** — the remaining little-or-no-code items. T3 is a decision rather
    than a task: port `rtl/sim/chipset` to Icarus and add it to the workflow —
    which is cheaper now that a parse gate runs ahead of the benches — or delete
    it. Leaving it is how the last two rotted.
-2. **T0 actions 1 and 2** — the `sdram-timing-headroom.md` update, and the
-   `quartus_sta` capture of the current binding path. Minutes each, and action 2
-   is what says where the slack actually is now rather than where it was in
-   2026-08.
 3. **T2, T4, T6** — cold path, evidenced, simulation-verifiable. T4 is the best
    value here.
 4. **T22** — before the next upstream sync rather than after. Its value is
    catching the merge that quietly removes the save state park, and that is only
-   useful if it exists beforehand.
+   useful if it exists beforehand. It also overlaps T17: both are about
+   `ss_ctrl`, and a bench that freezes and resumes is what makes trimming it
+   safe to believe.
 5. **T7** — measurement only; it justifies or kills T9 and the other HOT work.
 6. **T13, T14, T15** — our own loose ends, all TITLE-verifiable.
 7. **T17** — previously ranked as "the cheapest move against T0". With T0 not a
