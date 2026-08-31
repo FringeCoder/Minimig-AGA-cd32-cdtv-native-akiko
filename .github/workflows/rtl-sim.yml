@@ -189,6 +189,18 @@ jobs:
           vvp tb | tee out.log
           grep -q "RUN: PASS" out.log
 
+      # cpu_wrapper's save state park, stock-speed throttle and chip-slot guard.
+      # All three are things an upstream merge can remove without anyone
+      # noticing, and the park came within one conflict resolution of exactly
+      # that at 74d6ce0. The two CPU cores are stubbed -- see cpu_core_stubs.v.
+      - name: CPU wrapper park and throttle
+        run: |
+          set -euo pipefail
+          cd rtl/sim/cpuwrap
+          iverilog -g2012 -o tb             ../../cpu_wrapper.v ../../memory_router.v             cpu_core_stubs.v tb_cpu_wrapper_park.sv
+          vvp tb | tee out.log
+          grep -q "RUN: PASS" out.log
+
       # TG68KdotC_Kernel's savestate restore. VHDL, so GHDL rather than Icarus.
       # The bench boots the kernel from reset vectors, freezes it at 80
       # successive clocks across one pass of a test program, restores the whole
