@@ -3,6 +3,12 @@
 Written 2026-08-31 after the `74d6ce0` sync. Every item cites a file and line or
 an upstream commit. Nothing here is inferred from behaviour alone.
 
+**Re-verified 2026-08-31 (second pass)** against core `46b33f5` and userspace
+`a02de37`, fifteen commits after this was written. Every open item below was
+re-checked against the current code and its citations still resolve. What
+changed: T0's numbers were superseded by a seed choice and are corrected below,
+and T1, T16, T18, T21 and T21a are now done.
+
 ## How we verify, given no reference Amiga
 
 We cannot measure against real hardware. That rules out the method upstream uses
@@ -24,36 +30,57 @@ Anything with no verification route is marked as such and ranked accordingly.
 
 ---
 
-## T0 — Timing headroom is the blocker for everything else  [FIT]
+## T0 — Timing headroom is thin, but it is not the blocker  [FIT]
 
-**This gates every HOT item below. Do not start one until this is understood.**
+**Corrected 2026-08-31. The reading this section was written on has since been
+superseded by a seed choice, and the conclusion drawn from it was wrong.**
 
-`docs/sdram-timing-headroom.md` (2026-08-06) already established that this core
-has no headroom, that `sd_addr` was the repeated destination of the binding
-path, and it designated a fix: split the chip and CPU address loads and select
-at the output.
+`docs/sdram-timing-headroom.md` (2026-08-06) established that this core has no
+headroom, that `sd_addr` was the repeated destination of the binding path, and
+it designated a fix: split the chip and CPU address loads and select at the
+output.
 
-**That fix was done** — our `5cb32ea perf(sdram): split sd_addr into chip and
-CPU halves, select at the output` — and the problem has returned anyway. Current
-state, tip of `sync/minimig-upstream-74d6ce0`: **setup −0.347, hold −0.401**,
-TNS −3.303 / −1.104. The last four builds needed two seed sweeps to close, and
-seed 1 was rejected in one sweep for a −0.495 hold violation behind a healthy
-setup number.
+That fix was done — our `5cb32ea perf(sdram): split sd_addr into chip and CPU
+halves, select at the output` — and the problem returned anyway. This section
+first recorded **setup −0.347, hold −0.401**, TNS −3.303 / −1.104 at the tip of
+`sync/minimig-upstream-74d6ce0`, and concluded that the merge's chipset commits
+might have to be dropped.
+
+**They did not.** The merge closed on seed 10 — `1a4c33e quartus: seed 10 for
+the 74d6ce0 netlist` — and `output_files/Minimig.sta.rpt` now reads:
+
+    Worst-case setup slack is 0.117
+    Worst-case hold slack is 0.234
+
+Both positive, TNS 0.000 on every domain, worst-case domain
+`emu|pll|...|counter[0].output_counter|divclk`. So all four chipset commits are
+affordable as they stand, `7ce2980` included, and nothing needs re-fitting.
+
+What survives is the premise, not the blocker. **+0.117 ns of setup margin is
+thin, and it took a sweep to find it** — seed 1 in that same sweep was rejected
+at +0.134 setup / −0.495 hold. Every HOT item still needs its own fit before it
+can be believed. But do not treat T0 as gating them, and do not rank other work
+by how much slack it buys.
 
 Actions:
-1. Update `docs/sdram-timing-headroom.md` — it still says the designated fix is
-   "not attempted. This is the one to reach for when the problem returns". It
-   was attempted, it landed, and the problem returned regardless. Recording that
-   is worth more than the original prediction.
-2. Identify the current binding path from `Minimig.sta.rpt` and write it up the
-   way that doc did. The destination may no longer be `sd_addr`.
-3. Only then decide whether the four chipset commits in the pending merge are
-   affordable. `7ce2980` (DMA slot grid advanced a colour clock) is the prime
-   suspect and the obvious first thing to drop and re-fit.
+1. **Open.** Update `docs/sdram-timing-headroom.md:107` — it still says the
+   designated fix is "not attempted. This is the one to reach for when the
+   problem returns". It was attempted, it landed, the problem returned, and a
+   seed then absorbed it. That whole sequence is worth more than the original
+   prediction.
+2. **Open.** Identify the current binding path and write it up the way that doc
+   did. Note `Minimig.sta.rpt` is a summary report and carries no per-path
+   detail — this needs a `quartus_sta` run with `report_timing -setup`, which is
+   minutes against the existing netlist, not a re-fit. The destination is very
+   likely no longer `sd_addr`: the last per-path capture we have,
+   `setup_paths.rpt` from 2026-08-17, shows
+   `ciab:CIAB1|regportb[6]` to `sdram_ctrl:ram1|sd_cas`.
+3. ~~Only then decide whether the four chipset commits in the pending merge are
+   affordable.~~ **Answered: they fit on seed 10.**
 
 ---
 
-## T1 — CIA CNT: guard the revert in CI  [SIM]
+## T1 — CIA CNT: guard the revert in CI  [SIM] — [DONE 2026-08-31]
 
 **Decided 2026-08-31: we are NOT reporting this upstream.** So the revert is
 permanent, it will be re-applied on every future Minimig-AGA sync, and the only
@@ -73,16 +100,18 @@ control. It has already been forgotten once between two syncs five days apart,
 and the failure is near-silent: a title starts and then hangs, with every data
 path healthy, which is the hardest possible thing to attribute.
 
-**Action: add a CI assertion.** A grep step in `rtl-sim.yml` that fails the
-build if either count source is not the eclk form:
+**Done.** `rtl-sim.yml` now carries a "CIA count source is eclk" step that fails
+the build if either source is not the eclk form:
 
-    rtl/cia_timera.v   assign count = eclk;
-    rtl/cia_timerb.v   assign count = tmcr[6] ? tmra_ovf : eclk;
+    rtl/cia_timera.v:48   assign count = eclk;
+    rtl/cia_timerb.v:47   assign count = tmcr[6] ? tmra_ovf : eclk;
 
-Seconds to run, and it converts a thing someone must remember into a thing the
-pipeline refuses. Word the failure message so it explains *why* rather than just
-reporting a missing string — the next person to hit it will be mid-merge and
-will otherwise assume the assertion is stale and delete it.
+The revert `6df82c1` moved both lines — they were `:52` and `:51` when this was
+written — so the step matches on the assign text, not on line numbers. The
+failure message and the comment above the step explain *why* rather than
+reporting a missing string, and say explicitly not to delete the step as stale:
+the next person to hit it will be mid-merge and would otherwise assume exactly
+that.
 
 The alternative — wiring CIA-A CNT to a synthesised keyboard clock so the
 upstream commit can be taken properly — stays open but unscheduled. It is
@@ -261,11 +290,16 @@ rather than a dormant one.
 log "unimplemented". Directory sharing works; file attribute changes silently do
 nothing.
 
-## T16 — Deferred CDDA pump teardown  [TITLE]
+## T16 — Deferred CDDA pump teardown  [TITLE] — [DONE 2026-08-31]
 
-`akiko_cd32.cpp:2686` — "Phase 33 will tear down the CDDA pump here. For now
-we...". Someone should confirm whether Phase 33 happened or whether this is
-permanent.
+Phase 33 happened. `akiko_cd32.cpp:916` tears down an in-flight pump, `:1159`
+arms it from `cd_cdda_lba_next/end`, and `:1688` is the streaming section.
+
+Only two stale comments survived it, both now corrected: `:2686` claimed the
+teardown was still to come, and the `cd_audio_timeout` legend at `:285` still
+called the `-1` arm a "placeholder until Phase 33". The teardown is `cmd_stop()`
+clearing `cd_cdda_lba_next/end` and `cd_cdda_drv`; the `-1` to `-2` advance
+those comments wrapped was always correct.
 
 ## T17 — Trim the save state diagnostic scaffolding  [SIM + FIT]
 
@@ -282,7 +316,7 @@ Do this before attempting any HOT accuracy item. Keep whatever the ssdiag
 sub-channel in `support/minimig/minimig_ssdiag.cpp` still consumes; drop the
 rest, and re-fit to measure what came back.
 
-## T18 — The save state "not captured" list is stale  [no code]
+## T18 — The save state "not captured" list is stale  [no code] — [DONE 2026-08-31]
 
 The record from 2026-08-18 lists AGA colour banks, Akiko/CD state and fast RAM
 as "not captured at all". **All three have since been implemented:**
@@ -293,10 +327,16 @@ as "not captured at all". **All three have since been implemented:**
 - `ss_ctrl.v:158-254` — Zorro II fast RAM, an 8 MB window, and a conditional
   payload section in both directions
 
-Someone reading that list would go and re-implement finished work. Correct it.
-Also still listed and worth re-checking: "the Kickstart gate can become strict
-now that the fingerprint matches", and "only Arabian Nights verified" — since
-then Jim Power, Cannon Fodder, Flink and Castlevania AGA have all been exercised.
+Someone reading that list would go and re-implement finished work.
+
+**Corrected.** Note the stale record is not a file in either repo — it is the
+`savestate-restore-state-2026-08-18` memory file, whose "not captured at all"
+bullet has been replaced with the three citations above and a "do not go and
+re-implement them" warning. The title list was corrected in the same pass (Jim
+Power, Cannon Fodder, Flink and Castlevania AGA, not just Arabian Nights), and
+its stale −0.058 ns `cpu_cache_new` timing note was replaced with the seed 10
+numbers from T0. "The Kickstart gate can become strict now that the fingerprint
+matches" is genuinely still open and stays on that list.
 
 ## T19 — Doc staleness  [no code]
 
@@ -307,7 +347,7 @@ of every sync rather than the bottom.
 
 ---
 
-## T21 — CI has no syntax gate, so a parse error costs a 35-minute fit  [SIM]
+## T21 — CI has no syntax gate, so a parse error costs a 35-minute fit  [SIM] — [DONE 2026-08-31]
 
 Every step in `rtl-sim.yml` compiles a small subset of files for one bench.
 **Nothing ever parses `Minimig.sv`, and most of `rtl/` is never parsed at all.**
@@ -333,10 +373,14 @@ filtered by matching only on `syntax error`, `has already been declared` and
 
     iverilog -g2012 -t null -o /dev/null <file> 2>&1
 
-Add it as a first step in `rtl-sim.yml`, before the benches — it is seconds of
-runtime and it fails the cheap way.
+**Done.** `syntax_check.sh` at the repo root, wired in as the first step of
+`rtl-sim.yml` before the benches. It covers `rtl/**` (excluding `rtl/sim/`) plus
+the root sources, which is broader than the survey above: **99 files, 56 clean,
+43 unknown-module-only, 0 syntax errors** once T21a was fixed. Verified to fail
+the way it should by injecting a stray `.` into the `cdda` instantiation, which
+it reported as `Minimig.sv:2879: syntax error` with exit 1.
 
-### T21a — `rtl/cdda.v` has a parameter with no default
+### T21a — `rtl/cdda.v` has a parameter with no default  [DONE 2026-08-31]
 
 The single syntax hit above is real, not a false positive:
 
@@ -346,6 +390,10 @@ Quartus accepts it; Icarus rejects it under both `-g2012` and `-g2005-sv`. There
 is exactly one instantiation, `Minimig.sv:2878` (`cdda #(28375160)`), so giving
 it `= 0` costs nothing and makes the file parse anywhere. Needed before T21 can
 be clean, and worth doing regardless for portability.
+
+**Done** — `parameter CLK_RATE = 0`. The instantiation still passes the real
+value explicitly, so nothing takes the default; it exists only so the file
+parses standalone.
 
 ## T22 — `cpu_wrapper.v` has no bench  [SIM]
 
@@ -399,25 +447,30 @@ invite someone to recover the original from git.
 
 ## Order
 
-1. **T21 + T21a** — minutes of work, and it stops a whole class of error costing
-   half an hour each. Do this first simply because everything else below is
-   cheaper once it exists.
-2. **T0** — gates every HOT item, and is the honest blocker on the pending
-   merge. **T17 is the cheapest move against it** and should be tried first,
-   since it removes logic rather than adding any.
-3. **T1, T3, T18, T19** — small or no code. T1 belongs alongside T21 in practice:
-   both are CI gates that turn something a person must remember into something
-   the pipeline enforces, and T1's failure mode has already escaped once.
-   T18 stops someone re-implementing finished work.
-4. **T2, T4, T6** — cold path, evidenced, simulation-verifiable. T4 is the best
+**Re-ranked 2026-08-31 (second pass).** T1, T16, T18, T21 and T21a are done. T0
+turned out not to be a gate, which is what most of the original ranking hung
+off: nothing below is ordered by how much timing slack it buys any more.
+
+1. **T3, T19** — the remaining little-or-no-code items. T3 is a decision rather
+   than a task: port `rtl/sim/chipset` to Icarus and add it to the workflow —
+   which is cheaper now that a parse gate runs ahead of the benches — or delete
+   it. Leaving it is how the last two rotted.
+2. **T0 actions 1 and 2** — the `sdram-timing-headroom.md` update, and the
+   `quartus_sta` capture of the current binding path. Minutes each, and action 2
+   is what says where the slack actually is now rather than where it was in
+   2026-08.
+3. **T2, T4, T6** — cold path, evidenced, simulation-verifiable. T4 is the best
    value here.
-5. **T7** — measurement only; it justifies or kills T9 and the other HOT work.
-6. **T22** — before the next upstream sync rather than after. Its value is
+4. **T22** — before the next upstream sync rather than after. Its value is
    catching the merge that quietly removes the save state park, and that is only
    useful if it exists beforehand.
-7. **T13, T14, T15, T16** — our own loose ends, all TITLE-verifiable.
+5. **T7** — measurement only; it justifies or kills T9 and the other HOT work.
+6. **T13, T14, T15** — our own loose ends, all TITLE-verifiable.
+7. **T17** — previously ranked as "the cheapest move against T0". With T0 not a
+   blocker this is ordinary cleanup: still worth doing, still the cheapest slack
+   if a HOT item later needs some, but no longer a prerequisite for anything.
 8. **T5, T8** — steady cold-path accuracy work.
-9. **T9, T10, T11, T12** — only with T0 resolved and T7 in hand.
+9. **T9, T10, T11, T12** — each needs its own fit, and T7 in hand first.
 
 ## What is not on this list
 
