@@ -23,6 +23,16 @@ module tb_lightpen_latch;
 	// never taken in the cycle the latch is arming.
 	localparam [7:0] SAMPLE_COL = 8'd150;
 
+	// What VHPOSR reports for that column. 06f30af decrements the live readback,
+	// because the internal hpos runs one colour clock ahead of what real Agnus
+	// reports -- so a beam sitting at column 150 reads back as 149.
+	//
+	// The frozen readback is NOT decremented, and the expectations for the two
+	// frozen cases below are deliberately left at their stored values: the light
+	// pen latch holds a value already in reported-space, not a counter sample.
+	// That asymmetry is the thing this bench now pins down.
+	localparam [7:0] SAMPLE_RD = SAMPLE_COL - 8'd1;
+
 	reg         clk = 0;
 	reg         clk7_en = 0;
 	reg         reset = 1;
@@ -127,7 +137,7 @@ module tb_lightpen_latch;
 
 		// ---- 1. bit 3 clear: VHPOSR is the beam, untouched -------------------
 		goto_line(11'd60);
-		expect_eq("no pen, VHPOSR tracks beam", {8'd60, SAMPLE_COL});
+		expect_eq("no pen, VHPOSR tracks beam", {8'd60, SAMPLE_RD});
 
 		// ---- 2. bit 3 set, no pen: it must still advance ----------------------
 		// The fallback freezes it through vblank; the unfreeze at the end of
@@ -161,20 +171,20 @@ module tb_lightpen_latch;
 		expect_eq("frozen at the pen", {8'd100, 8'd60});
 
 		goto_line(11'd50);             // next frame, ahead of the pen's line
-		expect_eq("unfrozen after vblank", {8'd50, SAMPLE_COL});
+		expect_eq("unfrozen after vblank", {8'd50, SAMPLE_RD});
 
 		// ---- 5. clearing bit 3 releases immediately ---------------------------
 		goto_line(11'd200);
 		expect_eq("frozen at the pen again", {8'd100, 8'd60});
 		wr(A_BPLCON0, 16'h0000);
 		goto_line(11'd220);
-		expect_eq("released by clearing bit 3", {8'd220, SAMPLE_COL});
+		expect_eq("released by clearing bit 3", {8'd220, SAMPLE_RD});
 
 		// ---- 6. the off-screen sentinel is refused ----------------------------
 		lpen_vpos = 11'h7FF;
 		wr(A_BPLCON0, 16'h0008);
 		goto_line(11'd150);
-		expect_eq("sentinel is not a pen position", {8'd150, SAMPLE_COL});
+		expect_eq("sentinel is not a pen position", {8'd150, SAMPLE_RD});
 
 		if (errors == 0) $display("RUN: PASS");
 		else             $display("RUN: FAIL (%0d)", errors);
