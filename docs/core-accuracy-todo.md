@@ -253,7 +253,7 @@ Bench: `rtl/sim/paula/tb_paula_audio_attach.sv`, in CI, eleven checks. Note also
 T14 — with attach implemented, ADKCON not being cleared at boot stopped being
 dormant, and that has been fixed on the userspace side.
 
-## T5 — The rest of the 2005 CIA list  [SIM]
+## T5 — The rest of the 2005 CIA list  [SIM] — [DONE 2026-08-31]
 
 Still true, from the same header:
 
@@ -263,6 +263,29 @@ Still true, from the same header:
 - PB6/PB7 toggling by timer A/B — `cia_timera.v:52-53`, `cia_timerb.v:51-52`.
 
 All cold-path and small. The serial register has the most software exposure.
+
+**All three done.** The serial register looked like it needed the CNT pin, which
+would have meant undoing T1's revert, and it does not: WinUAE `cia.cpp` shifts
+inside the timer A underflow path, gated on
+`(cr & (CR_SPMODE | CR_RUNMODE)) == CR_SPMODE`, because in output mode the CIA
+*generates* CNT rather than receiving it. CIA-B's CNT goes to the expansion bus
+and is unconnected on a stock Amiga, so input mode has no source on real hardware
+either. Output mode is implemented, input mode is explicitly inert, and SP now
+reaches the interrupt controller instead of `.ser(1'b0)`. T1's revert and its
+guard are untouched.
+
+CIA-A port B had no output register at all -- a PRB write was dropped and a read
+returned the pins whatever DDRB said. PB6/PB7 are now driveable by the timers
+(PBON, and OUTMODE choosing pulse or toggle). Note what those two pins are on
+CIA-B: /SEL3 and /MTR. A program setting PBON there drives drive-select and motor
+from a timer, which is exactly what a real Amiga does. Faithful, not safe.
+
+None of the new state is captured in `ss_state`, and `rtl/ss_state.vh` explains
+why: 19 bits of padding are free before the state section lengthens, the new
+state is 23, and lengthening it moves every section after it -- the 1.2 case in
+`ss_ctrl.v`'s version notes, which would refuse every save file on disk.
+
+Bench: `rtl/sim/cia/tb_cia_leftovers.sv`, in CI, eleven checks.
 
 ## T6 — `HHPOSR` is not implemented at all  [SIM] — [DONE 2026-08-31]
 
@@ -340,7 +363,7 @@ decodes. Every one is either an exact nibble compare or matches the device.
 
 ---
 
-## T9 — NTSC line length is wrong for every NTSC title  [SUITE + FIT] — HOT
+## T9 — NTSC line length is wrong for every NTSC title  [SUITE + FIT] — [DONE 2026-08-31]
 
 `agnus_beamcounter.v:88` and `:318`:
 
@@ -355,7 +378,25 @@ with the scaffolding already present. Also squarely in the hot path, so it is
 gated on T0. `VSSTOP_VAL = 5` is the same story vertically: "PAL vsync width:
 2.5 lines (NTSC: 3 lines - not implemented)".
 
-## T10 — Is the STRHOR hack still right after `7ce2980`?  [SIM] — HOT
+**Done, but not yet fitted.** The toggle condition here was already right and
+already matched WinUAE's; what was missing was the other half,
+`maxhpos = maxhpos_short + lol`. So `htotal` keeps meaning the short-line length
+and a new `htotal_cck` adds `long_line` to it.
+
+One thing that would have made this half-work: `htotal_out` had to carry the
+effective length rather than the short one, because `agnus.v:483` derives the DMA
+slot lookahead wrap from `htotal[8:1]` and would otherwise have wrapped the slot
+grid one colour clock early on every long line. VPOSW bit 7 now writes
+`long_line` too, which it did not before -- WinUAE `custom.cpp:7712`.
+
+Bench: `rtl/sim/beamcounter/tb_beamcounter_longline.sv`, in CI. Eight NTSC lines
+sum to 1812 last-colour-clock values, which is the 227.5 average, and PAL,
+BEAMCON0 PAL and LOLDIS are each held flat.
+
+**Still needs a fit.** Nothing here has been on hardware, and this is hot-path
+logic. `VSSTOP_VAL` is untouched and still open.
+
+## T10 — Is the STRHOR hack still right after `7ce2980`?  [SIM] — [DONE 2026-08-31]
 
 `agnus.v:532`: `assign strhor_paula = hpos==(6*2+1) ? 1'b1 : 1'b0; //hack`
 
@@ -364,16 +405,74 @@ with it**. Whether this hand-tuned constant is still correct after that is an
 open question, and it would surface as a subtle raster artefact rather than a
 crash — the hardest kind to notice.
 
-## T11 — Bitplane pointer write delay  [SIM] — HOT
+**Answered, and the premise was a misreading.** `7ce2980` moved `strhor_denise`
+to `hpos_slot` and deliberately left `strhor_paula` alone. Its own message says
+so: "hde and strhor_paula are deliberately left on the raw counter ...
+strhor_paula is an existing hack that is out of scope here." Denise had to move
+because it has no `hde` port and takes its whole horizontal phase from that
+strobe; Paula's does not.
+
+Checked for a race as well, since the grid moving under a strobe that did not is
+the obvious way this could still bite. `strhor_paula` latches Paula's per-line
+DMA request registers, and the earliest consumer is the channel 0 audio slot at
+`hpos_slot` `9'b0001_0010_1` in `agnus_audiodma.v` -- colour clock 18 on the
+grid, 17 raw, against the strobe at raw colour clock 6. Eleven colour clocks of
+margin; a one colour clock shift does not close it.
+
+The constant is still a hand-tuned hack with no recorded derivation. That is a
+separate question from whether `7ce2980` disturbed it, and it did not. Written up
+at the site.
+
+## T11 — Bitplane pointer write delay  [SIM] — HOT — [SCOPED 2026-08-31, NOT ATTEMPTED]
 
 `agnus_bitplanedma.v:223`: "TODO high bitplane pointer probably needs a delay
 (writing to pointer doesn't seem to take effect next cycle ...)".
 
-## T12 — Superhires scroller select  [SIM] — HOT
+**Scoped against WinUAE, and it is not a delay on this register.** The behaviour
+is in the inherited `TODO` file, from Toni Wilen: writing BPLxPT when exactly the
+next cycle has DMA to the matching BPLxDAT, the write goes nowhere, and the same
+is true of sprite and blitter registers.
+
+WinUAE models it as a four-slot RGA pipeline -- `custom.cpp`'s
+`rga_pipe[(slot + rga_slot_first_offset) & 3]`, with `write_rga_update()`
+capturing the pointer into the pipeline ahead of the access, and even modelling
+the collision case ("DMA address pointer conflict causes both old and new address
+to become old OR new"). A write landing after the capture is not seen by that
+access, which is the "goes nowhere".
+
+Reproducing that means a pipelined address capture on every DMA channel --
+bitplane, sprite, blitter, audio, disk -- because the TODO says the same is true
+of all of them. That is a chipset-wide rearchitecture in the hot path, on a
+design with 0.117 ns of setup margin, and the software that demonstrates it is
+the TLC PowerTrax demo, which cannot be run here.
+
+**Not attempted, deliberately.** A one-line delay on this register would not
+reproduce the behaviour and would perturb the fetch for nothing. Recorded at the
+site so the next person does not start there.
+
+## T12 — Superhires scroller select  [SIM] — HOT — [BLOCKED: needs a display]
 
 `denise_bitplane_shifter.v:113`: `sh_select = {aga, scroll[0], 1'b1};` with "MSB
 bit should probably be 0, this is a hack for kickstart screen", and `:108` "TODO
 test if this is correct".
+
+**WinUAE cannot settle this one, checked 2026-08-31.** The superhires scroller is
+Minimig's own compensation for a Denise pipeline that is not cycle exact -- an
+eight-deep sub-pixel delay line with a selected tap. WinUAE has no corresponding
+structure, because it computes pixel positions directly rather than delaying a
+stream to line them up. So there is nothing to compare a tap against: the right
+tap is a property of THIS implementation's latency, and the only instrument that
+can read it is the display.
+
+Re-tagged from SIM to blocked. A bench can only assert whatever tap is written
+into it, which is not a test.
+
+One observation for whoever gets to a screen, recorded at the site: the lores
+case selects `{aga, scroll[1:0]}`, an AGA base of 4 plus the scroll, while the
+hires case selects `{aga, scroll[0], 1'b1}`, an AGA base of 5 or 7. The bases
+differ. Whether that is the bug or the compensation is exactly the question, and
+guessing at it is how the light pen trigger cost two rounds before someone
+measured it.
 
 ---
 

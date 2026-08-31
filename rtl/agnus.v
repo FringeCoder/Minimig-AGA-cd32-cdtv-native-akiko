@@ -529,6 +529,21 @@ agnus_beamcounter  bc1
 //in real Amiga Denise's hpos counter seems to be advanced by 4 CCKs in regards to Agnus' one
 //Minimig isn't cycle exact and compensation for different data delay in implemented Denise's video pipeline is required
 assign strhor_denise = hpos_slot==(6*2-1) && (vpos > 8 || ecs) ? 1'b1 : 1'b0;
+// Left on the raw counter deliberately, and checked again after 7ce2980 moved
+// the slot grid. 7ce2980's own message says so: "hde and strhor_paula are
+// deliberately left on the raw counter ... strhor_paula is an existing hack that
+// is out of scope here." Only strhor_denise moved to hpos_slot, because Denise
+// has no hde port and takes its entire horizontal phase from that strobe.
+//
+// The advance cannot have moved this one into a race either. strhor_paula
+// latches Paula's per-line DMA request registers (paula_audio.v: dmal <= dmareq
+// on strhor), and the earliest consumer of those is the channel 0 audio slot at
+// hpos_slot 9'b0001_0010_1 in agnus_audiodma.v -- colour clock 18 on the grid,
+// so 17 raw, against this strobe at raw colour clock 6. Eleven colour clocks of
+// margin, and a one colour clock grid shift does not close that.
+//
+// The hand-tuned constant itself is still a hack, and still unexplained. That is
+// a separate question from whether 7ce2980 disturbed it, which it did not.
 assign strhor_paula = hpos==(6*2+1) ? 1'b1 : 1'b0; //hack
 
 //--------------------------------------------------------------------------------------

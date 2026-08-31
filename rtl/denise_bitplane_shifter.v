@@ -105,7 +105,22 @@ end
 assign scroller_out = scroller[select];
 
 
-// superhires scroller control // TODO test if this is correct
+// superhires scroller control
+//
+// TODO test if this is correct -- and note, checked 2026-08-31, that WinUAE
+// cannot settle it. This delay line is Minimig's own compensation for a Denise
+// pipeline that is not cycle exact; WinUAE has no corresponding structure to
+// compare a tap against, because it computes pixel positions directly rather
+// than delaying a stream to line them up. So the right tap is a property of
+// THIS implementation's latency, and the only instrument that can read it is the
+// display.
+//
+// Worth writing down what looks inconsistent, for whoever gets to a screen: the
+// lores case selects {aga, scroll[1:0]}, an AGA base of 4 plus the scroll, while
+// the hires case selects {aga, scroll[0], 1'b1}, an AGA base of 5 or 7. The
+// bases differ. Whether that is the bug or the compensation is exactly what
+// needs looking at, and guessing at it is how the light pen trigger cost two
+// rounds before someone measured it.
 always @ (*) begin
   if (shres) begin
     sh_select = aga ? 3'b110 : 3'b011;
