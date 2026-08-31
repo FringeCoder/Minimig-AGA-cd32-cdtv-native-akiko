@@ -136,7 +136,7 @@ upstream commit can be taken properly — stays open but unscheduled. It is
 speculative work on a cold path with no way to validate the result here, and it
 buys nothing that the guard does not.
 
-## T2 — `hbstrt_reg` is the wrong width  [SIM]
+## T2 — `hbstrt_reg` is the wrong width  [SIM] — [DONE 2026-08-31]
 
 `agnus_beamcounter.v:229`, `:257`:
 
@@ -149,7 +149,29 @@ to write HBSTRT above 9 bits and check the blanking edge lands where asked. The
 compare at `:540` is against `hpos`, so widening the register means revisiting
 that too.
 
-## T3 — The last bench outside CI  [SIM]
+**Done, and the register did not need widening after all.** What the extra bits
+are for was never recorded here, so: WinUAE `custom.cpp` masks HBSTRT and HBSTOP
+to `0x7ff` while HTOTAL, HSSTRT, HSSTOP and HCENTER are masked to `0xff`, so
+these two are the only ones carrying anything above bit 7. `drawing.cpp`
+`update_hblank()` gives the layout — bits 7:0 are the colour clock, bits 10:8
+place the edge inside it at 35 ns, and the half-colour-clock position it derives
+is `(reg & 0xff) << 1 | ((reg >> 10) & 1)`.
+
+`hpos` counts half colour clocks, which is exactly what bit 10 expresses. So the
+write became `{data_in[7:0], data_in[10]}` and the register keeps its 9 bits: it
+holds the comparison value, not the raw register, and 9 bits is the right width
+for that. The compare at `:540` therefore needed no revisiting. Bits 9:8 stay
+dropped — they need the 35 ns comparators the chipset does not have, which is
+the separate item in `TODO`.
+
+**`hbstop_reg` had the identical defect** and was fixed with it. The TODO only
+sat on HBSTRT because that is where someone happened to write it.
+
+Bench: `rtl/sim/beamcounter/tb_beamcounter_hblank.sv`, in CI. It also asserts
+that bits 9:8 stay ignored, because folding them in would move the edge by a
+whole colour clock.
+
+## T3 — The last bench outside CI  [SIM] — [DONE 2026-08-31]
 
 `rtl/sim/chipset` is the only one of ten bench directories not in the workflow.
 It is ModelSim-only, which is exactly how the two CDTV benches silently stopped
@@ -158,9 +180,24 @@ compiling at the `b265a3b` merge and stayed broken until last week.
 Either port it to Icarus and add it, or delete it. Leaving a bench that nothing
 runs is how the last two rotted.
 
+**Deleted, and the premise above was wrong.** It is not a ModelSim-only bench
+waiting to be ported — its DUT does not exist in this branch at all. `6f8abca`
+added the bench and its two runners without `rtl/chipset_bus_trace.v`, which
+`git log --all` finds only on the unmerged `hybris-blit-vpos-trace` and
+`hybris-blt-dest-trace` branches, and nothing in `rtl/` or `Minimig.sv`
+references `chipset_bus_trace` or `uio_cs_trace`. `run_chipset_trace.do`
+compiles a file that is not there, so it has never run under any simulator here.
+
+The bench is sound — five tests over the ring's drain order, sentinels and wrap
+— and is preserved in history and on both of those branches, where the module
+also lives. Restore the directory alongside the module if the trace ring is ever
+merged. Vendoring a sim-only copy of the module was considered and rejected: a
+CI step passing forever against logic the design does not contain is the same
+dead weight in a new shape.
+
 ---
 
-## T4 — Paula channel modulation (ADKCON attach bits) is absent  [SIM]
+## T4 — Paula channel modulation (ADKCON attach bits) is absent  [SIM] — [DONE 2026-08-31]
 
 Nothing to do with attaching hardware — this is Paula using one audio channel to
 modulate the next. `paula_audio_channel.v:1` says "attached modes are not
@@ -197,6 +234,25 @@ item on this list.
 No specific title is named here on purpose — the mechanism is established from
 the register decode, but no software has been verified against it on this core.
 
+**Done.** The timing came from `loaddat()`'s two call sites rather than the
+function alone: the period write hangs off WinUAE's 2->3 state transition and
+the volume write off 3->2, which are our `AUDIO_STATE_3 -> 4` and `4 -> 3`,
+those states being the high and low sample of the fetched word. Silencing is
+`audio_update_adkmasks()`, which builds its mask from `adkcon | (adkcon >> 4)`
+with no special case for the last channel — so channel 3 is silenced by its own
+attach bits even though `loaddat()` returns early for it and it modulates
+nothing. That asymmetry is deliberate and is asserted.
+
+Two things deliberately not carried over, both recorded in the commit: WinUAE's
+period clamp, because this core does not clamp a CPU write to AUDxPER either and
+clamping only the modulated path would make the two disagree; and suppressing
+the modulator's own sample buffer load, because the output is masked to zero
+regardless.
+
+Bench: `rtl/sim/paula/tb_paula_audio_attach.sv`, in CI, eleven checks. Note also
+T14 — with attach implemented, ADKCON not being cleared at boot stopped being
+dormant, and that has been fixed on the userspace side.
+
 ## T5 — The rest of the 2005 CIA list  [SIM]
 
 Still true, from the same header:
@@ -208,10 +264,26 @@ Still true, from the same header:
 
 All cold-path and small. The serial register has the most software exposure.
 
-## T6 — `HHPOSR` is not implemented at all  [SIM]
+## T6 — `HHPOSR` is not implemented at all  [SIM] — [DONE 2026-08-31]
 
 No occurrence anywhere in `rtl/`. ECS register, limited exposure, but WinUAE
 implements it and light-pen-aware code reads it. Cheap, and easy to bench.
+
+**Done.** WinUAE returns the light pen latch when one is armed and `hhpos`
+otherwise, masked to `0xff`, and refuses the read without ECS Agnus. `hhpos` is
+assigned `agnus_hpos` every colour clock except in BEAMCON0 DUAL mode, where it
+free-runs and HHPOSW (`$1D8`) reseeds it. This core has no DUAL mode, so HHPOSR
+is exactly the horizontal half of VHPOSR — same decrement, same ERSY case at the
+wrap, same freeze — and is implemented by sharing that expression rather than
+duplicating the counter.
+
+HHPOSW stays undecoded: with `hhpos` not free-running there is nothing for a
+write to hold, and a register that accepted a value and then ignored it would be
+worse than one that is absent.
+
+Bench: `rtl/sim/beamcounter/tb_beamcounter_hhposr.sv`, in CI. It asserts the
+VHPOSR equality, which holds only while DUAL mode is absent — so if DUAL is ever
+added, that bench is where it will say so.
 
 ---
 
@@ -241,6 +313,30 @@ Audit `gayle.v`, `cart.v`, `cdtv_bridge.v`, `akiko.v` against the hardware maps.
 `gayle.v:55` already records one deliberate omission (`$DA8000` IDE INTREQ, "not
 implemented as scsi.device doesn't use it") — fine, but it should be the only
 one.
+
+**Audited 2026-08-31. No over-broad decode found beyond the one `74d6ce0` had
+already fixed.** Recording the result so nobody audits it twice.
+
+Checked: `gary.v`'s selects (the generators for all of the above), `gayle.v`'s
+internal nibble decodes, `cart.v`, and the `akiko.v` / `cdtv_bridge.v` register
+decodes. Every one is either an exact nibble compare or matches the device.
+
+- `sel_rtc` looks wrong at first — 64 KB for sixteen nibble registers — and is
+  not. WinUAE `memory.cpp` maps `clock_bank` at `0xDC` for one bank with
+  `startmask 0xdc0000`, so the clock really does mirror across the whole
+  `$DC0000-$DCFFFF`. That is the device, not the decode.
+- **There is a real overlap, and it is resolved downstream rather than in the
+  decode.** `sel_cdtv_nvram` (`$DC8000-$DCFFFF`) sits inside `sel_rtc`, and both
+  assert together. `cpu_wrapper`'s `cpu_din` mux takes `cdtv_selack` ahead of the
+  chip bus and `sel_cdtv_nvram` is one of its terms, so an NVRAM read wins and
+  the clock's contribution to the wired-OR at `minimig.v:1364` is discarded. It
+  works, but nothing said so; `gary.v` now does. Anything else put in
+  `$DC1000-$DCFFFF` without that selack short-circuit gets its data OR'd with a
+  clock nibble, and the symptom appears in the new device.
+- Two comments were wrong rather than the logic. `gayle.v`'s port comment said
+  `$DExxxx` when `gary.v` gives it only `$DE1xxx` — a twelve-bit decode, so
+  `sel_gayleid`'s re-check of `addr[15:12]` is redundant rather than load
+  bearing. And `sel_rtg` was commented `$B8xxxxx`, one x too many. Both fixed.
 
 ---
 
@@ -283,7 +379,7 @@ test if this is correct".
 
 ## Ours, not upstream's
 
-## T13 — The SNAC light gun trigger is not wired  [TITLE]
+## T13 — The SNAC light gun trigger is not wired  [TITLE] — [DONE 2026-08-31]
 
 `support/lightpen/amiga_lightpen.cpp:133` — the button routing was deliberately
 put in the shared module so "the SNAC gun can use the same route **when its
@@ -293,7 +389,7 @@ one aims but cannot fire.
 Small userspace change, and the one light-pen item that is actually testable —
 unlike the position path, which is blocked on a gun that locks to the display.
 
-## T14 — Three registers the boot ROM never clears  [TITLE]
+## T14 — Three registers the boot ROM never clears  [TITLE] — [DONE 2026-08-31]
 
 `support/minimig/minimig_boot.cpp:318`, `:321`, `:349` — CLXCON (`$dff098`),
 ADKCON (`$dff09e`) and BPLCON3 (`$dff106`) are commented out with bare TODOs
@@ -302,7 +398,7 @@ whatever the previous title left behind. Note T4 is the ADKCON one: if audio
 attach is implemented, leaving ADKCON uninitialised at boot becomes a live bug
 rather than a dormant one.
 
-## T15 — `minimig_share` file actions  [TITLE]
+## T15 — `minimig_share` file actions  [TITLE] — [DONE 2026-08-31]
 
 `minimig_share.cpp:851`, `:858` — `ACTION_SET_PROTECT` and `ACTION_SET_COMMENT`
 log "unimplemented". Directory sharing works; file attribute changes silently do
@@ -427,7 +523,7 @@ be clean, and worth doing regardless for portability.
 value explicitly, so nothing takes the default; it exists only so the file
 parses standalone.
 
-## T22 — `cpu_wrapper.v` has no bench  [SIM]
+## T22 — `cpu_wrapper.v` has no bench  [SIM] — [DONE 2026-08-31]
 
 Of the modules surveyed it is the only one with no simulation coverage at all,
 and it is not a quiet corner. It holds:
@@ -450,6 +546,22 @@ will eventually break it again the way this one almost did.
 A bench that freezes and resumes across a range of boundary conditions would
 have caught the merge conflict automatically instead of relying on someone
 reading both sides carefully.
+
+**Done.** `rtl/sim/cpuwrap/tb_cpu_wrapper_park.sv`, in CI, twenty checks over all
+three: the park latching and surviving the boundary going away, releasing on
+`ss_arm`, not carrying into a second park, and not deadlocking a CPU armed while
+never reaching a boundary; the bus-settled gate and each of the four sources
+that can settle it; the cooldown being exactly four cycles under stock speed and
+absent otherwise; and `chipreq` asserting for a plain chip access but not while
+either bridge has it.
+
+Both CPU cores are stubbed — `rtl/sim/cpuwrap/cpu_core_stubs.v`. None of this
+needs a working 68000, only control over `busstate` and `ss_at_boundary`.
+
+Verified by mutation rather than by assertion alone: reverting the park to a
+live gate, setting the cooldown back to 9, and dropping `~cdtv_selack` from
+`chipreq` fails five of the twenty checks, and the live-gate mutation shows the
+CPU running freely through the whole window a restore needs it stopped.
 
 ## T20 — The legacy seed scripts ranked on setup alone  [DONE 2026-08-31]
 
