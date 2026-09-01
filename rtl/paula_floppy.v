@@ -172,6 +172,12 @@ reg   [3:0] disk_present;	//disk present status
 reg   [3:0] disk_writable;	//disk write access status
 reg   [3:0] disk_fluxmode; // disk data isn't MFM, its raw flux, encoded at 50ns resolution. 0=INDEX, 255=12.7uS/254, 2 Flux per WORD. 
 reg   [3:0] disk_fluxdensitymode; // disk data is MFM + speed for those 8 bits (similar to IPF format and a bit like how Winuae works)
+// Per drive: the mounted image is an Amiga HD floppy -- 1760K, 22 sectors per
+// track, rather than 880K and 11. Set from userspace; see the command decode at
+// the bottom of this file. It changes exactly two things in here, the rotation
+// rate and the drive ID. Everything else about HD lives in userspace, which is
+// what builds the MFM track.
+reg   [3:0] disk_hd;
 
 wire        _selx;			//active whenever any drive is selected
 wire  [1:0] sel;				//selected drive number
@@ -481,27 +487,57 @@ reg index_ext_pulse;
 wire _externalIndex;
 assign _externalIndex = virtualFloppyMode ? _virtualFluxIndex : _index_ext;
 
-// 300 RPM floppy disk rotation signal
-reg [3:0] rpm_pulse_cnt;
 always @(posedge clk) begin
   if (clk7_en) begin
-	 // Looking for falling edge 
+	 // Looking for falling edge
 	 last_ext_index <= _externalIndex;
-	 index_ext_pulse <= ~_externalIndex && last_ext_index;  
-
-    if (sof) begin
-      if (rpm_pulse_cnt==11 || !ntsc && rpm_pulse_cnt==9)
-        rpm_pulse_cnt <= 0;
-      else
-        rpm_pulse_cnt <= rpm_pulse_cnt + 4'd1;
-    end
+	 index_ext_pulse <= ~_externalIndex && last_ext_index;
   end
 end
+
+// Disk rotation: 300 RPM for a DD disk, 150 RPM for an HD one.
+//
+// sof is start of frame, so this divides the frame rate down to the revolution
+// rate. PAL 50/10 and NTSC 60/12 both give 5 rev/s, which is 300 RPM -- what
+// the original single counter did, wrapping at 9 or 11.
+//
+// An Amiga HD disk carries twice the data per track, and Paula's bit cell is
+// fixed, so the only way the extra data fits is for the disk to turn at half
+// speed. That is what a real Amiga HD drive does: 150 RPM. So the divisor
+// doubles, to 19 or 23, which is also why the counter no longer fits in 4 bits.
+//
+// One counter per drive rather than one shared. Two drives can hold disks of
+// different densities and they rotate independently, so a single counter could
+// not serve a DD disk in df0 and an HD disk in df1 at the same time.
+reg  [4:0] rpm_pulse_cnt [0:3];
+wire [3:0] rpm_index;
+
+genvar r;
+generate
+  for (r = 0; r < 4; r = r + 1) begin : gen_rpm
+    wire [4:0] rpm_last = disk_hd[r] ? (ntsc ? 5'd23 : 5'd19)
+                                     : (ntsc ? 5'd11 : 5'd9);
+    always @(posedge clk) begin
+      if (clk7_en) begin
+        if (sof) begin
+          if (rpm_pulse_cnt[r] == rpm_last)
+            rpm_pulse_cnt[r] <= 5'd0;
+          else
+            rpm_pulse_cnt[r] <= rpm_pulse_cnt[r] + 5'd1;
+        end
+      end
+    end
+    assign rpm_index[r] = ~|rpm_pulse_cnt[r];
+  end
+endgenerate
 
     
 // disk index pulses output
 wire index_adf;
-assign index_adf = |(~_sel & motor_on) & ~|rpm_pulse_cnt & sof;
+// Same shape as before -- any selected, spinning drive at the top of its
+// revolution -- but each drive now consults its own counter, so a DD and an HD
+// disk in two drives each get their own index rate.
+assign index_adf = |(~_sel & motor_on & rpm_index) & sof;
 assign index = flux_inuse ? index_ext_pulse : index_adf;
 
 //--------------------------------------------------------------------------------------
@@ -620,6 +656,7 @@ end
 // settle that against real software first -- do not assume the form below is
 // verified.
 localparam [31:0] DRIVE_ID_35DD = 32'hFFFFFFFF;
+localparam [31:0] DRIVE_ID_35HD = 32'hAAAAAAAA;
 
 reg  [4:0] id_scnt [0:3];
 wire [3:0] idbit;
@@ -641,7 +678,10 @@ generate
     end
     // Read out combinationally rather than latched: WinUAE computes idbit
     // immediately after the increment, so it always reflects the current count.
-    assign idbit[d] = DRIVE_ID_35DD[31 - id_scnt[d]];
+    // Which ID the drive reports depends on the disk in it -- that is how
+    // Kickstart learns a drive is HD.
+    wire [31:0] drive_id = disk_hd[d] ? DRIVE_ID_35HD : DRIVE_ID_35DD;
+    assign idbit[d] = drive_id[31 - id_scnt[d]];
   end
 endgenerate
 
@@ -948,12 +988,21 @@ parameter DISKDMA_INT    = 2'b11;
 //disk present and write protect status
 always @(posedge clk) begin
   if (clk7_en) begin
-  	if(reset)
+  	if(reset) begin
   		{disk_fluxdensitymode[3:0], disk_fluxmode[3:0], disk_writable[3:0],disk_present[3:0]} <= 16'b0000_0000_0000_0000;
+  		disk_hd[3:0] <= 4'b0000;
+  	end
   	else if (rx_data[15:12]==4'b0001 && stb7 && !cmd_cnt)
 		{disk_fluxmode[3:0], disk_writable[3:0],disk_present[3:0]} <= rx_data[11:0];		
 	else if (rx_data[15:12]==4'b0010 && stb7 && !cmd_cnt)
-		{disk_fluxdensitymode[3:0]} <= rx_data[3:0];		
+		{disk_fluxdensitymode[3:0]} <= rx_data[3:0];
+	// 0011: one bit per drive, set when the mounted image is an Amiga HD floppy.
+	// A new opcode rather than a reuse of the 0010 density bits: those belong to
+	// the MiSTerFloppy virtual flux drive's bit-cell timing, which is a different
+	// path entirely. One field meaning two things depending on which path happens
+	// to be live is how a subtle bug gets written.
+	else if (rx_data[15:12]==4'b0011 && stb7 && !cmd_cnt)
+		{disk_hd[3:0]} <= rx_data[3:0];
   end
 end
 
