@@ -4,3 +4,19 @@ seed 16  setup -0.347   hold -0.401   worst -0.401
 seed 1   setup -0.248   hold 0.247    worst -0.248
 seed 10  setup 0.117    hold 0.234    worst 0.117
 GOOD: seed 10  setup 0.117  hold 0.234  -- both clear 0.10, rbf saved
+
+== 2026-09-01 full compile, branch chore/ci-gates-and-backlog-corrections ==
+== accuracy changes T2/T4/T5/T6/T9, seed 10 ==
+   setup +0.159   hold -0.470  -> REJECTED on hold
+   Exactly one violating path, and a large gap to the next (+0.210):
+     emu|ss_cpu_a7[4] -> ss_ctrl|ss_serdes|shifter[1585]   -0.470
+   Nothing in the accuracy changes is near that path -- it is the save state
+   serdes shifter load, i.e. placement noise of the kind a seed moves. Sweeping.
+== sweep started 2026-09-01 01:55 ==
+== baseline for this netlist: seed 16  setup -0.347  hold -0.401 ==
+seed 16  setup -0.217   hold 0.027    worst -0.217
+seed 1   setup -0.264   hold 0.247    worst -0.264
+seed 10  setup 0.159    hold -0.470   worst -0.470
+seed 4   setup -0.130   hold 0.245    worst -0.130
+seed 18  setup 0.135    hold 0.252    worst 0.135
+GOOD: seed 18  setup 0.135  hold 0.252  -- both clear 0.10, rbf saved
