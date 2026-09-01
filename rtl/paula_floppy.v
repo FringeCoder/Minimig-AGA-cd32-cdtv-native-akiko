@@ -585,6 +585,66 @@ always @(posedge clk) begin
   end
 end
 
+// Drive ID shift register.
+//
+// A drive reports its type on _RDY while its motor is off, most significant bit
+// first, one bit per selection. Kickstart uses that to tell a DD drive from an
+// HD one -- and with no ID register anywhere in this core, HD detection cannot
+// work at all today.
+//
+// WinUAE disk.cpp, in the CIA-A PRA handler:
+//
+//     /* motor/id flipflop is set only when drive select goes from high to low */
+//     if (!((selected | disabled) & (1 << dr)) && (prev_selected & (1 << dr))) {
+//         drv->drive_id_scnt++;
+//         drv->drive_id_scnt &= 31;
+//         drv->idbit = (drv->drive_id & (1L << (31 - drv->drive_id_scnt))) ? 1 : 0;
+//
+// and drive_motor() restarts the counter when the motor goes off ("Reset id
+// shift reg counter"). That is the same falling edge of _sel the motor latches
+// above already use, so this rides alongside them.
+//
+// HONEST SCOPE. DRIVE_ID_35DD is all ones, so every shifted bit is 1 and this
+// is behaviour-identical to the unconditional ready it feeds -- synthesis folds
+// the counter away entirely and it costs nothing. It is here so the mechanism
+// is correct and documented, and so reporting a different drive makes this a
+// one-line change rather than a new feature:
+//
+//     35DD  0xFFFFFFFF     35HD  0xAAAAAAAA
+//     525SD 0x55555555     none  0x00000000
+//
+// One detail is deliberately left unresolved because it cannot be observed with
+// an all-ones ID: WinUAE increments the counter on the select edge and THEN may
+// reset it inside drive_motor() if that same selection turns the motor off, so
+// the two orderings differ by one position. Anyone reporting a non-DD ID has to
+// settle that against real software first -- do not assume the form below is
+// verified.
+localparam [31:0] DRIVE_ID_35DD = 32'hFFFFFFFF;
+
+reg  [4:0] id_scnt [0:3];
+wire [3:0] idbit;
+
+genvar d;
+generate
+  for (d = 0; d < 4; d = d + 1) begin : gen_drive_id
+    always @(posedge clk) begin
+      if (clk7_en) begin
+        if (reset)
+          id_scnt[d] <= 5'd0;
+        else if (!_sel[d] && _sel_del[d]) begin
+          if (_motor)                      // this selection turns the motor off
+            id_scnt[d] <= 5'd0;
+          else
+            id_scnt[d] <= id_scnt[d] + 5'd1;
+        end
+      end
+    end
+    // Read out combinationally rather than latched: WinUAE computes idbit
+    // immediately after the increment, so it always reflects the current count.
+    assign idbit[d] = DRIVE_ID_35DD[31 - id_scnt[d]];
+  end
+endgenerate
+
 wire _change_adf, _wprot_adf, _track0_adf; //original ADF emulation signals
 //_ready,_track0 and _change signals
 assign _change_adf = &(_sel | _disk_change);
@@ -616,13 +676,40 @@ assign _dsktrack0 = ~(dsktrack[sel]==0);
 assign dsktrack79 = dsktrack[sel]==82;
 
 // drive _ready signal control
-// Amiga DD drive activates _ready whenever _sel is active and motor is off
-// or whenever _sel is active, motor is on and there is a disk inserted (not implemented - _ready is active when _sel is active)
+//
+// An Amiga DD drive asserts _ready when it is selected and either the motor is
+// off -- in which case the line carries the drive ID bit, not a constant -- or
+// the motor is on AND a disk is actually inserted. The second half was missing:
+// _ready was asserted on selection alone, so a spinning empty drive reported
+// ready and software waiting for a disk was told it had one.
+//
+// WinUAE disk.cpp DISK_status(), bit 5 of CIA-A PRA, active low:
+//
+//     if (drive_running(drv)) {                       // motor on
+//         if (drive_diskready(drv) && ...) st &= ~0x20;
+//     } else {                                        // motor off
+//         if (cs_df0idhw || dr > 0) { if (drv->idbit) st &= ~0x20; }
+//         else                      { if (drive_diskready(drv)) st &= ~0x20; }
+//     }
+//
+// Note what stays: ready still responds to _SEL with the motor off. The 2008
+// changelog at the top of this file records an incompatibility from making
+// _READY motor-dependent, and that behaviour is preserved -- the motor only
+// gains a say when it is actually running.
+//
+// The per-drive AND-of-(_sel | ~exists) form is kept, just with the readiness
+// term folded in. drives[1:0] is the drive count, so drive 3 exists only at 3,
+// drive 2 from 2, drive 1 from 1, drive 0 always.
 wire _ready_adf;
-assign _ready_adf   = (_sel[3] | ~(drives[1] & drives[0])) 
-         & (_sel[2] | ~drives[1]) 
-         & (_sel[1] | ~(drives[1] | drives[0])) 
-         & (_sel[0]);
+wire [3:0] drive_exists = {drives[1] & drives[0],
+                           drives[1],
+                           drives[1] | drives[0],
+                           1'b1};
+
+// Motor running: a disk must be present. Motor stopped: the ID bit.
+wire [3:0] drive_rdy = (motor_on & disk_present) | (~motor_on & idbit);
+
+assign _ready_adf = ~|(drive_exists & ~_sel & drive_rdy);
 assign _ready = flux_inuse ? (virtualFloppyMode ? _virtualFluxDataReady : _ready_ext) : _ready_adf;
 
 //--------------------------------------------------------------------------------------
