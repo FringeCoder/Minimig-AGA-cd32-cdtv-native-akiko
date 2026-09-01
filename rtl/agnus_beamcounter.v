@@ -242,14 +242,30 @@ reg [ 8:0] htotal_reg;
 reg [ 8:0] hsstrt_reg;
 reg [ 8:0] hsstop_reg;
 reg [ 8:0] hcenter_reg;
-// HBSTRT and HBSTOP are the only two of these that carry sub-colour-clock
-// position: WinUAE masks them to 0x7ff and the other four to 0xff. Bits 7:0 are
-// the colour clock, bits 10:8 place the edge inside it at 35 ns. These registers
-// hold the comparison value rather than the raw write, and hpos counts half
-// colour clocks, so what is stored is {CCK, bit 10} -- bit 10 being worth
-// exactly half a colour clock. Bits 9:8 are below this counter's resolution and
-// are dropped; representing them needs the 35 ns comparators the chipset does
-// not have. See rtl/sim/beamcounter/tb_beamcounter_hblank.sv.
+// HBSTRT and HBSTOP do carry sub-colour-clock position -- WinUAE masks them to
+// 0x7ff where the other four horizontal registers get 0xff -- but those extra
+// bits belong to a mechanism this core does not have, and they must NOT reach
+// the comparison below.
+//
+// Two different consumers, and only one of them is us. drawing.cpp's
+// update_hblank() builds denise_phbstrt_lores from bit 10, and does so ONLY
+// inside `if (exthblankon_aga)`; its else branch sets every programmed position
+// to -1. That is Denise's extended-HBLANK path, AGA only, absent here.
+//
+// What this register drives is the Agnus-side programmed blanking, and for that
+// WinUAE uses colour clocks and nothing finer -- custom.cpp keeps the raw write
+// but compares against hbstrt_cck:
+//
+//     hbstrt = value & 0x7ff;
+//     hbstrt_cck = hbstrt & 0xff;
+//     ...
+//     if (hhp == hbstrt_cck) { agnus_phblank = true; ... }
+//
+// so the stored comparison value is the colour clock shifted up, with a zero in
+// the half-colour-clock position. Feeding bit 10 in here instead shifts every
+// programmed blanking edge by half a lores pixel, which on hardware reads as a
+// blurred picture and a doubled OSD -- measured 2026-09-01, PAL, and the reason
+// this comment is longer than the code.
 reg [ 8:0] hbstrt_reg;
 reg [ 8:0] hbstop_reg;
 reg [10:0] vtotal_reg;
@@ -278,8 +294,8 @@ always @ (posedge clk) begin
 				HSSTRT [8:1] : hsstrt_reg  <= {data_in[ 7:0], 1'b0};
 				HSSTOP [8:1] : hsstop_reg  <= {data_in[ 7:0], 1'b0};
 				HCENTER[8:1] : hcenter_reg <= {data_in[ 7:0], 1'b0};
-				HBSTRT [8:1] : hbstrt_reg  <= {data_in[ 7:0], data_in[10]};
-				HBSTOP [8:1] : hbstop_reg  <= {data_in[ 7:0], data_in[10]};
+				HBSTRT [8:1] : hbstrt_reg  <= {data_in[ 7:0], 1'b0};
+				HBSTOP [8:1] : hbstop_reg  <= {data_in[ 7:0], 1'b0};
 				VTOTAL [8:1] : vtotal_reg  <= {data_in[10:0]};
 				VSSTRT [8:1] : vsstrt_reg  <= {data_in[10:0]};
 				VSSTOP [8:1] : vsstop_reg  <= {data_in[10:0]};

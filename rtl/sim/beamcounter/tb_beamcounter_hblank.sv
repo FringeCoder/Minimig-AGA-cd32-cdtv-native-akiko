@@ -4,25 +4,32 @@
 // programmable horizontal registers that carry sub-colour-clock position, and
 // the core was throwing that away.
 //
-// The register layout, from WinUAE. custom.cpp masks HBSTRT and HBSTOP to
-// 0x7ff while HTOTAL, HSSTRT, HSSTOP and HCENTER are masked to 0xff, so only
-// these two have anything above bit 7. drawing.cpp update_hblank() then says
-// what the extra bits mean:
+// The contract: bits 7:0 select the colour clock, and EVERYTHING ABOVE BIT 7 IS
+// IGNORED. That is not obvious, it is the opposite of a first reading of
+// WinUAE, and getting it wrong shipped a visible regression -- so most of this
+// bench exists to hold the upper bits down.
 //
-//     denise_phbstrt       = hbstrt_denise_reg & 0xff;                  // CCK
+// The trap. custom.cpp masks HBSTRT and HBSTOP to 0x7ff where the other four
+// horizontal registers get 0xff, and drawing.cpp's update_hblank() builds a
+// half-colour-clock position out of bit 10:
+//
 //     denise_phbstrt_lores = (denise_phbstrt << 1) |
-//                            ((hbstrt_denise_reg >> 10) & 1);           // half CCK
-//     denise_phbstrt     <<= 3;
-//     denise_phbstrt      |= (hbstrt_denise_reg >> 8) & 7;              // 35 ns
+//                            ((hbstrt_denise_reg >> 10) & 1);
 //
-// So bits 7:0 are the colour clock, and bits 10:8 place the edge within it at
-// 35 ns resolution -- of which bit 10 alone is worth half a colour clock.
+// which reads like exactly what our hpos wants, since hpos counts half colour
+// clocks. It is not. That block runs ONLY inside `if (exthblankon_aga)`, and
+// its else branch sets every programmed position to -1: it is Denise's
+// extended-HBLANK path, AGA only, and this core does not implement it.
 //
-// Our hpos counts half colour clocks (140 ns), which is exactly the resolution
-// bit 10 expresses and no more. Bits 9:8 are below what this counter can
-// represent at all; they need the 35 ns comparators that the whole chipset
-// lacks here, which is a separate and much larger job. So the contract this
-// bench holds the RTL to is: bits 7:0 and bit 10, and no pretence about 9:8.
+// The Agnus-side programmed blanking that this register really drives compares
+// against colour clocks and nothing finer:
+//
+//     hbstrt_cck = hbstrt & 0xff;
+//     if (hhp == hbstrt_cck) { agnus_phblank = true; ... }
+//
+// Feeding bit 10 into the comparison instead shifts every programmed blanking
+// edge by half a lores pixel. On hardware, 2026-09-01, that was a blurred
+// picture and an OSD drawn twice with a horizontal offset.
 //
 // Runs standalone under Icarus:
 //   iverilog -g2012 -o tb ../../agnus_beamcounter.v tb_beamcounter_hblank.sv && vvp tb
@@ -179,36 +186,42 @@ module tb_beamcounter_hblank;
 		next_stop(at);
 		expect_pos("HBSTOP=20, aligned", at, 9'd40);
 
-		// Bit 10 is half a colour clock. Same colour clock, edge one hpos later.
+		// Bit 10 must NOT move the edge. This is the regression guard: it is the
+		// bit that looks like a half colour clock and belongs to a path this
+		// core does not have.
 		wr(A_HBSTRT, 16'd100 | 16'h0400);
 		next_start(at); next_start(at);
-		expect_pos("HBSTRT=100 + bit10, half a CCK later", at, 9'd201);
+		expect_pos("HBSTRT=100 + bit10 ignored", at, 9'd200);
 
-		// Unchanged HBSTOP must not have moved with it.
+		// Unchanged HBSTOP has not moved either.
 		next_stop(at);
 		expect_pos("HBSTOP=20 still aligned", at, 9'd40);
 
-		// And the same for the stop edge on its own.
+		// Same for the stop edge on its own.
 		wr(A_HBSTOP, 16'd20 | 16'h0400);
 		next_stop(at); next_stop(at);
-		expect_pos("HBSTOP=20 + bit10, half a CCK later", at, 9'd41);
+		expect_pos("HBSTOP=20 + bit10 ignored", at, 9'd40);
 
-		// Bits 9:8 are below this counter's resolution. They must be ignored,
-		// not folded into the comparison -- a core that treated the register as
-		// a plain 11-bit position would land these somewhere far away.
+		// Bits 9:8 are the 35 ns part of the same field, equally not ours.
 		wr(A_HBSTRT, 16'd100 | 16'h0300);
 		next_start(at); next_start(at);
 		expect_pos("HBSTRT=100 + bits 9:8 ignored", at, 9'd200);
 
-		// Bits above 10 are not part of the register at all.
+		// And everything above bit 10 is not part of the register at all.
 		wr(A_HBSTRT, 16'd100 | 16'hF800);
 		next_start(at); next_start(at);
 		expect_pos("HBSTRT=100 + bits 15:11 ignored", at, 9'd200);
 
+		// The whole upper byte at once, which is what a caller passing the raw
+		// register value would look like.
+		wr(A_HBSTRT, 16'd100 | 16'hFF00);
+		next_start(at); next_start(at);
+		expect_pos("HBSTRT=100 + whole upper byte ignored", at, 9'd200);
+
 		// A high colour clock still works: 8 bits of CCK reach the whole line.
 		wr(A_HBSTRT, 16'd220 | 16'h0400);
 		next_start(at); next_start(at);
-		expect_pos("HBSTRT=220 + bit10", at, 9'd441);
+		expect_pos("HBSTRT=220 + bit10 ignored", at, 9'd440);
 
 		if (errors == 0) $display("RUN: PASS");
 		else             $display("RUN: FAIL (%0d)", errors);
