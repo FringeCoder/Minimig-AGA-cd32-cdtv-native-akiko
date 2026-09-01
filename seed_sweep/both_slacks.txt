@@ -20,3 +20,12 @@ seed 10  setup 0.159    hold -0.470   worst -0.470
 seed 4   setup -0.130   hold 0.245    worst -0.130
 seed 18  setup 0.135    hold 0.252    worst 0.135
 GOOD: seed 18  setup 0.135  hold 0.252  -- both clear 0.10, rbf saved
+
+== 2026-09-01 recompile after the HBSTRT/HBSTOP bit-10 revert (b16a427) ==
+   seed 18   setup -0.146   hold +0.199  -> REJECTED on setup
+   Seed 18 was chosen for the pre-revert netlist; the revert changed it enough
+   that the seed no longer closes. Sweeping again.
+== sweep started 2026-09-01 20:36 ==
+== baseline for this netlist: seed 16  setup -0.347  hold -0.401 ==
+seed 16  setup 0.105    hold 0.245    worst 0.105
+GOOD: seed 16  setup 0.105  hold 0.245  -- both clear 0.10, rbf saved
