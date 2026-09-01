@@ -29,7 +29,26 @@ set -uo pipefail
 
 IVERILOG=${IVERILOG:-iverilog}
 NULLOUT=${TMPDIR:-/tmp}/syntax_check.$$
-trap 'rm -f "$NULLOUT"' EXIT
+BUILD_ID_STUB=0
+trap 'rm -f "$NULLOUT"; [ "$BUILD_ID_STUB" = 1 ] && rm -f build_id.v' EXIT
+
+# Minimig.sv includes build_id.v, which Quartus generates from its pre-flow
+# script (sys/build_id.tcl) and .gitignore excludes. A clean checkout therefore
+# does not have it, and Minimig.sv -- the single file this gate exists to cover,
+# since nothing else in CI parses it -- fails on the missing include rather than
+# on anything about its own syntax. Icarus reports that as a syntax error on the
+# line AFTER the include, which is a thoroughly misleading place to start
+# looking.
+#
+# This bit was learned the hard way: the gate passed locally and failed on its
+# first CI run, because a Quartus compile on the dev machine had left build_id.v
+# lying around. Stand one in when it is absent, and take it away again so a
+# later real build still gets Quartus's.
+if [ ! -f build_id.v ]; then
+  printf '`define BUILD_DATE "000000"
+' > build_id.v
+  BUILD_ID_STUB=1
+fi
 
 mapfile -t FILES < <(
   { find rtl -name '*.v' -o -name '*.sv'; ls *.v *.sv 2>/dev/null; } \
