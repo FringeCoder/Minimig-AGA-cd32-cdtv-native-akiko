@@ -18,7 +18,16 @@
 //     ...
 //     maxhpos = maxhpos_short + lol;
 //
-// and custom.cpp:7712 for VPOSW, "lol = (i & 0x0080) != 0".
+// and for VPOSW, custom.cpp's VPOSW() handler:
+//
+//     // LOL is always reset when VPOSW is written to.
+//     if (lol) { lol = false; setmaxhpos(); }
+//
+// A write RESETS the alternation. It does not load it from a data bit. This
+// bench originally asserted the opposite, taken from custom.cpp:7712 -- which
+// is inside restore_custom(), a savestate blob reader, not the register
+// handler. The implementation and the bench came from the same misreading, so
+// they agreed with each other and CI passed while a PAL screen was wrong.
 //
 // What this measures is the last colour clock index of each line, which is one
 // less than the line length. 226 is a 227-clock line, 227 a 228-clock one.
@@ -192,22 +201,28 @@ module tb_beamcounter_longline;
 		wr(A_BEAMCON0, VARBEAMEN);
 		sample_lines(3, lo, hi, total);
 
-		// ---- 6. VPOSW bit 7 writes the alternation phase ---------------------
-		// A program resynchronises the alternation rather than waiting for it to
-		// come round. Writing 1 makes the NEXT line the long one.
-		wr(A_VPOSW, 16'h0080);
-		if (dut.long_line !== 1'b1) begin
-			$display("FAIL: VPOSW bit 7 did not set long_line");
-			errors = errors + 1;
-		end else begin
-			$display("ok:   VPOSW bit 7 sets long_line");
-		end
-		wr(A_VPOSW, 16'h0000);
+		// ---- 6. VPOSW always RESETS the alternation -------------------------
+		// Whatever the data carries. Bit 7 set is the case that matters: it is
+		// what the first version of this wrongly loaded into long_line, and on
+		// PAL that left a 228 colour clock line on screen.
+		reset = 1; ntsc = 1'b1; repeat (40) @(posedge clk); reset = 0;
+		sample_lines(3, lo, hi, total);
+		force dut.long_line = 1'b1;      // pretend we are mid-alternation
+		release dut.long_line;
+		wr(A_VPOSW, 16'h0080);           // bit 7 SET
 		if (dut.long_line !== 1'b0) begin
-			$display("FAIL: VPOSW bit 7 did not clear long_line");
+			$display("FAIL: VPOSW with bit 7 set did not reset long_line");
 			errors = errors + 1;
 		end else begin
-			$display("ok:   VPOSW bit 7 clears long_line");
+			$display("ok:   VPOSW with bit 7 set resets long_line");
+		end
+
+		wr(A_VPOSW, 16'hFFFF);           // every bit set
+		if (dut.long_line !== 1'b0) begin
+			$display("FAIL: VPOSW with all bits set did not reset long_line");
+			errors = errors + 1;
+		end else begin
+			$display("ok:   VPOSW with all bits set resets long_line");
 		end
 
 		if (errors == 0) $display("RUN: PASS");

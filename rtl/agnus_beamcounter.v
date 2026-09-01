@@ -385,13 +385,35 @@ end
 always @(cck) hpos[0] = cck;
 
 // The long-line alternation itself. Declared above, next to the line length it
-// feeds. VPOSW bit 7 also writes it -- WinUAE custom.cpp:7712,
-// "lol = (i & 0x0080) != 0" -- which is how a program resynchronises the
-// alternation rather than waiting for it to come round.
+// feeds.
+//
+// VPOSW RESETS it. It does not write it from a data bit, which is what this
+// first shipped as and what put a wrong line length on a PAL screen. WinUAE's
+// actual handler, custom.cpp VPOSW():
+//
+//     // LOL is always reset when VPOSW is written to.
+//     // Implemented in all NTSC Agnus versions and ECS/AGA Agnus in NTSC mode.
+//     if (lol) {
+//         lol = false;
+//         setmaxhpos();
+//     }
+//
+// The earlier version came from custom.cpp:7712, "lol = (i & 0x0080) != 0",
+// which is NOT the register handler -- it is inside restore_custom(), reading a
+// savestate blob word by word, where the comments merely label the sequence.
+// Reading a savestate reader as if it were hardware semantics is how this got
+// written, and the same mistake in the same session also produced the HBSTRT
+// bit 10 change. If a line looks like it defines a register's behaviour, check
+// which function it is in.
+//
+// Why it mattered so much: this branch takes priority over the end-of-line
+// clear below, so on a PAL machine -- where long_line must always be 0 -- a
+// VPOSW write carrying bit 7 left it SET until the next end of line, making
+// that line 228 colour clocks instead of 227.
 always @(posedge clk) begin
 	if (clk7_en) begin
 		if (reg_address_in[8:1]==VPOSW[8:1])
-			long_line <= data_in[7];
+			long_line <= 1'b0;
 		else if (end_of_line)
 			if (pal || (loldis && varbeamen))
 				long_line <= 1'b0;
