@@ -29,3 +29,14 @@ GOOD: seed 18  setup 0.135  hold 0.252  -- both clear 0.10, rbf saved
 == baseline for this netlist: seed 16  setup -0.347  hold -0.401 ==
 seed 16  setup 0.105    hold 0.245    worst 0.105
 GOOD: seed 16  setup 0.105  hold 0.245  -- both clear 0.10, rbf saved
+
+== 2026-09-01 recompile after the VPOSW long_line fix (75bae0d) ==
+   seed 16   setup +0.071   hold -0.493  -> REJECTED on hold
+   Seed 16 closed the previous netlist at +0.105/+0.245. One line of RTL
+   (VPOSW writing long_line vs resetting it) moved it to a hold violation.
+== sweep started 2026-09-01 23:39 ==
+== baseline for this netlist: seed 16  setup -0.347  hold -0.401 ==
+seed 16  setup 0.071    hold -0.493   worst -0.493
+seed 1   setup 0.037    hold 0.247    worst 0.037
+seed 10  setup 0.287    hold 0.188    worst 0.188
+GOOD: seed 10  setup 0.287  hold 0.188  -- both clear 0.10, rbf saved
