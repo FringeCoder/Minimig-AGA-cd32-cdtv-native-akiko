@@ -136,7 +136,7 @@ upstream commit can be taken properly — stays open but unscheduled. It is
 speculative work on a cold path with no way to validate the result here, and it
 buys nothing that the guard does not.
 
-## T2 — `hbstrt_reg` is the wrong width  [SIM] — [DONE 2026-08-31]
+## T2 — `hbstrt_reg` is the wrong width  [SIM] — [WONTFIX 2026-09-01]
 
 `agnus_beamcounter.v:229`, `:257`:
 
@@ -149,27 +149,53 @@ to write HBSTRT above 9 bits and check the blanking edge lands where asked. The
 compare at `:540` is against `hpos`, so widening the register means revisiting
 that too.
 
-**Done, and the register did not need widening after all.** What the extra bits
-are for was never recorded here, so: WinUAE `custom.cpp` masks HBSTRT and HBSTOP
-to `0x7ff` while HTOTAL, HSSTRT, HSSTOP and HCENTER are masked to `0xff`, so
-these two are the only ones carrying anything above bit 7. `drawing.cpp`
-`update_hblank()` gives the layout — bits 7:0 are the colour clock, bits 10:8
-place the edge inside it at 35 ns, and the half-colour-clock position it derives
-is `(reg & 0xff) << 1 | ((reg >> 10) & 1)`.
+**Attempted, shipped, broke the picture, reverted. Do not try this again without
+reading the whole of `update_hblank()`.**
 
-`hpos` counts half colour clocks, which is exactly what bit 10 expresses. So the
-write became `{data_in[7:0], data_in[10]}` and the register keeps its 9 bits: it
-holds the comparison value, not the raw register, and 9 bits is the right width
-for that. The compare at `:540` therefore needed no revisiting. Bits 9:8 stay
-dropped — they need the 35 ns comparators the chipset does not have, which is
-the separate item in `TODO`.
+The reasoning looked solid. `custom.cpp` masks HBSTRT and HBSTOP to `0x7ff`
+where the other four horizontal registers get `0xff`, so these two are the only
+ones carrying anything above bit 7, and `drawing.cpp` builds a
+half-colour-clock position from bit 10:
 
-**`hbstop_reg` had the identical defect** and was fixed with it. The TODO only
-sat on HBSTRT because that is where someone happened to write it.
+    denise_phbstrt_lores = (denise_phbstrt << 1) |
+                           ((hbstrt_denise_reg >> 10) & 1);
 
-Bench: `rtl/sim/beamcounter/tb_beamcounter_hblank.sv`, in CI. It also asserts
-that bits 9:8 stay ignored, because folding them in would move the edge by a
-whole colour clock.
+`hpos` counts half colour clocks, so that looks like precisely the resolution we
+can represent. The write became `{data_in[7:0], data_in[10]}`, a bench asserted
+the edge moved, CI passed, and the fit closed.
+
+**On hardware it blurred the picture in PAL and drew the OSD twice with a
+horizontal offset.** Flink switching to NTSC on the fly made both correct, which
+is what identified it: the NTSC long-line work is inactive in PAL, so the fault
+had to be the other change that moves a blanking edge.
+
+The line that was missed is the one above the block quoted: it runs only inside
+`if (exthblankon_aga)`, and its else branch sets every programmed position to
+`-1`. That is Denise's extended-HBLANK path, AGA only, and this core does not
+implement it. What `hbstrt_reg` actually drives is the Agnus-side programmed
+blanking — WinUAE's `agnus_phblank` — which compares against colour clocks and
+nothing finer:
+
+    hbstrt_cck = hbstrt & 0xff;
+    if (hhp == hbstrt_cck) { agnus_phblank = true; ... }
+
+So the original `{data_in[7:0], 1'b0}` was right all along, and bit 10 shifted
+every programmed blanking edge by half a lores pixel.
+
+The 2005 comment that started this — "not correct size, this should have
+[10:0]" — is about storing the raw register so the extra bits reach the Denise
+path. Storing them is harmless. Using them in this comparison is not, and there
+is nothing here to use them for until extended HBLANK exists.
+
+The bench now asserts the opposite and is the guard: bit 10, bits 9:8, bits
+15:11 and the whole upper byte must all leave the edge where the low byte put
+it. Its header explains the trap, because the next person will read the same
+function and reach the same wrong conclusion.
+
+**Lesson worth keeping beyond this item:** a bench that asserts the behaviour
+you just implemented proves only that you implemented it. Both the bench and the
+implementation came from the same misreading, so they agreed with each other and
+neither could catch it. What caught it was hardware.
 
 ## T3 — The last bench outside CI  [SIM] — [DONE 2026-08-31]
 
