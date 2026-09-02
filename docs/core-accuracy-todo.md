@@ -313,7 +313,7 @@ state is 23, and lengthening it moves every section after it -- the 1.2 case in
 
 Bench: `rtl/sim/cia/tb_cia_leftovers.sv`, in CI, eleven checks.
 
-## T6 — `HHPOSR` is not implemented at all  [SIM] — [DONE 2026-08-31]
+## T6 — `HHPOSR` is not implemented at all  [SIM] — [DONE 2026-08-31, SHIPPED OFF 2026-09-02]
 
 No occurrence anywhere in `rtl/`. ECS register, limited exposure, but WinUAE
 implements it and light-pen-aware code reads it. Cheap, and easy to bench.
@@ -389,7 +389,7 @@ decodes. Every one is either an exact nibble compare or matches the device.
 
 ---
 
-## T9 — NTSC line length is wrong for every NTSC title  [SUITE + FIT] — [DONE 2026-08-31]
+## T9 — NTSC line length is wrong for every NTSC title  [SUITE + FIT] — [REVERTED ON HARDWARE 2026-09-02]
 
 `agnus_beamcounter.v:88` and `:318`:
 
@@ -419,8 +419,47 @@ Bench: `rtl/sim/beamcounter/tb_beamcounter_longline.sv`, in CI. Eight NTSC lines
 sum to 1812 last-colour-clock values, which is the 227.5 average, and PAL,
 BEAMCON0 PAL and LOLDIS are each held flat.
 
-**Still needs a fit.** Nothing here has been on hardware, and this is hot-path
-logic. `VSSTOP_VAL` is untouched and still open.
+**It went to hardware, and it had to be switched back off.**  [2026-09-02]
+
+On a PAL machine running Flink the picture was blurred and the OSD was drawn
+twice with a horizontal offset. Three fixes were reasoned out of WinUAE across
+two days -- the HBSTRT bit 10 revert, the VPOSW reset, and a re-read of the
+toggle condition -- and none of them changed the fault. What identified it was
+restoring `amigacd.rbf.pre-accuracy-0901` from the MiSTer's `_Test/` directory
+and A/B testing on the machine: that core was clean immediately. One core swap,
+no compile, and it succeeded where three rounds of reading had failed. Do that
+first next time.
+
+Two things were wrong, and only one of them is a bug in the usual sense.
+
+**`pal` in this module is BEAMCON0 bit 5, not the machine's video setting.** It
+resets to `~ntsc` and is then overwritten by any program that writes BEAMCON0.
+Flink sets VARBEAMEN and does not set bit 5 -- which a program that programs
+every beam register explicitly has no reason to do -- so `pal` went to 0 on a
+PAL machine and the alternation ran. Every other PAL line became 228 colour
+clocks instead of 227.
+
+**And that is what WinUAE does too.** The guard at `custom.cpp:10959` is exactly
+`!(new_beamcon0 & BEAMCON0_PAL) && !(new_beamcon0 & BEAMCON0_LOLDIS)`, and
+`setmaxhpos()` adds `lol` to a programmed `maxhpos` unconditionally. The
+implementation was faithful. It was still wrong for this platform: WinUAE
+renders into a host window that resamples freely, and the MiSTer feeds a
+fixed-rate scaler that cannot absorb an alternating line length. The blur is the
+scaler resampling; the doubled OSD is the same thing at OSD scale.
+
+So the accuracy is real and unshippable as it stands. `LONG_LINES` now defaults
+to `1'b0` (and `HHPOSR_DECODE` with it, only to keep the next hardware test to
+one variable), which makes the synthesised video path bit-identical to the core
+confirmed good. `rtl/sim/beamcounter/tb_beamcounter_longline.sv` overrides the
+parameter to 1, so the feature stays covered in simulation.
+
+Anyone picking this up: the open question is not whether the RTL matches WinUAE.
+It does. It is whether the MiSTer video pipeline can be made to accept a
+227.5-colour-clock line at all -- and that is a question for the scaler and
+`video.cpp`, not for `agnus_beamcounter.v`. Until that is answered, leave the
+parameter off.
+
+`VSSTOP_VAL` is untouched and still open.
 
 ## T10 — Is the STRHOR hack still right after `7ce2980`?  [SIM] — [DONE 2026-08-31]
 
