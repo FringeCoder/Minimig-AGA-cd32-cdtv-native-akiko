@@ -738,7 +738,33 @@ wire [31:0] ss_clut_wr_data;
 // ss_rom_scan inside ss_ctrl -- driving that one from the peek states as
 // well widened its fan-in enough to fail setup -- and merged here, where
 // it costs a single OR gate.
-wire        ss_port_own = ss_freeze | ss_rom_scan | ss_peek_scan;
+//
+// ss_rom_scan is NOT in this OR, though it used to be, and its absence is
+// deliberate. Both scans run frozen now, so rom_scan is a strict subset of
+// ss_freeze and the term was redundant -- see the WIRING note at the top of
+// rtl/ss_ctrl.v, which has said so since the restore was made to freeze up
+// front.
+//
+// Removing it is a timing fix. With ss_ctrl's DDR3 read return registered,
+// rom_scan became the binding path in the whole design, and not by a little:
+//
+//     0.095  ss_ctrl|rom_scan -> sdram_ctrl|cpu_cache|fill_tag[10]
+//     0.124  ss_ctrl|rom_scan -> sdram_ctrl|cpu_cache|cpu_sm_tag_dat_w[*]  (x10)
+//
+// eleven of the worst twelve. It is a mode flag, static for the length of a
+// scan, that reaches the CPU cache's tag logic through the muxes below and was
+// being timed at a single cycle. A multicycle would have been the obvious
+// move and would also have been a lie: the mux really does have to take effect
+// at once. Deleting a redundant term removes the path instead of excusing it.
+//
+// The redundancy is proven, not assumed. rtl/tb/ss_ctrl_tb.v carries a sticky
+// observer -- `always @(posedge clk) if (rom_scan && !freeze) scan_unfrozen <=
+// 1'b1;` -- asserted as "never scans the ROM unfrozen", and it holds across
+// save, restore, fast RAM, the refusal paths and the scan timeout. That
+// assertion is what makes this safe to delete, and it must keep passing: if a
+// future change lets a scan run unfrozen again, the term has to come back
+// here at the same time.
+wire        ss_port_own = ss_freeze | ss_peek_scan;
 
 // Where the Kickstart ROM physically lives in SDRAM, as the CPU port's own
 // word address -- DERIVED, not assumed. Amiga $F80000 goes through
