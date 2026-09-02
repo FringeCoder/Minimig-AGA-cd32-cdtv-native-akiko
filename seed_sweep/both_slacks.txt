@@ -46,3 +46,11 @@ seed 16  setup -0.203   hold 0.200    worst -0.203
 seed 1   setup 0.002    hold 0.251    worst 0.002
 seed 4   setup 0.146    hold 0.248    worst 0.146
 GOOD: seed 4  setup 0.146  hold 0.248  -- both clear 0.10, rbf saved
+== sweep started 2026-09-02 20:11 ==
+== baseline for this netlist: seed 10  setup -0.134  hold -0.350 ==
+seed 16  setup 0.003    hold 0.240    worst 0.003
+seed 1   setup 0.071    hold 0.221    worst 0.071
+seed 4   setup 0.086    hold 0.255    worst 0.086
+seed 18  setup 0.060    hold -0.475   worst -0.475
+seed 7   setup 0.253    hold 0.244    worst 0.244
+GOOD: seed 7  setup 0.253  hold 0.244  -- both clear 0.10, rbf saved
