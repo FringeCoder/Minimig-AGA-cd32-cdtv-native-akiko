@@ -313,7 +313,7 @@ state is 23, and lengthening it moves every section after it -- the 1.2 case in
 
 Bench: `rtl/sim/cia/tb_cia_leftovers.sv`, in CI, eleven checks.
 
-## T6 — `HHPOSR` is not implemented at all  [SIM] — [DONE 2026-08-31, SHIPPED OFF 2026-09-02]
+## T6 — `HHPOSR` is not implemented at all  [SIM] — [DONE 2026-08-31, RE-ENABLED 2026-09-02]
 
 No occurrence anywhere in `rtl/`. ECS register, limited exposure, but WinUAE
 implements it and light-pen-aware code reads it. Cheap, and easy to bench.

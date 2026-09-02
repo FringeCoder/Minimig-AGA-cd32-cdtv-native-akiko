@@ -119,18 +119,23 @@ parameter VBSTOP_NTSC_VAL = 9'd20;           // vertical blanking end (PAL 26 li
 // faithful to WinUAE is not sufficient here: WinUAE feeds a host window that
 // resamples freely, and this feeds a fixed-rate scaler that does not.
 //
-// HHPOSR_DECODE is disabled for a different reason: it is the ONLY other
-// functional video change on the branch, so leaving it on would mean the next
-// hardware test still has two variables in it. It is very unlikely to be the
-// fault -- a read-only ECS register nothing in the boot path touches -- but
-// "unlikely" is what the last three attempts were built on.
+// HHPOSR_DECODE was switched off at the same time, for a different reason: it
+// was the only other functional video change on the branch, and leaving it on
+// would have put two variables into the hardware test that had to settle this.
+// That test was run on 2026-09-02 with both off -- Flink correct in PAL, save
+// and restore correct -- so the isolation has served its purpose and the
+// readback is back on. It was never implicated: a read-only ECS register that
+// nothing in the boot path touches.
 //
-// To re-enable either, turn ONE of them on, fit it, and put it on the machine
-// by itself. Do not turn both on in the same build. The benches under
-// rtl/sim/beamcounter/ override these to 1'b1, so simulation coverage of both
-// features is unaffected by the default.
-parameter LONG_LINES    = 1'b0;   // NTSC 227/228 line alternation
-parameter HHPOSR_DECODE = 1'b0;   // HHPOSR ($1DA) readback
+// LONG_LINES stays off, and not because of doubt about the RTL. The question
+// it is waiting on is whether the MiSTer video pipeline can carry a
+// 227.5-colour-clock line at all, which is a question for the scaler and
+// video.cpp rather than for this file. Turn it on by itself, fit it, and put
+// it on the machine alone. The benches under rtl/sim/beamcounter/ override
+// both parameters to 1'b1, so simulation coverage is unaffected by either
+// default.
+parameter LONG_LINES    = 1'b0;   // NTSC 227/228 alternation -- OFF, see above
+parameter HHPOSR_DECODE = 1'b1;   // HHPOSR ($1DA) readback
 
 //wire	[8:0] vbstop;		// vertical blanking stop
 
