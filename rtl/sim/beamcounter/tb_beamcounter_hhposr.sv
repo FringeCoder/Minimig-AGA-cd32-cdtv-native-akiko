@@ -57,7 +57,10 @@ module tb_beamcounter_hhposr;
 	end
 	always @(posedge clk) if (clk7_en) cck <= ~cck;
 
-	agnus_beamcounter dut (
+	// HHPOSR_DECODE defaults OFF in the RTL -- the readback is not currently
+	// shipped, see the comment on the parameter. Turned on here so this bench
+	// keeps testing the decode itself.
+	agnus_beamcounter #(.HHPOSR_DECODE(1'b1)) dut (
 		.clk(clk), .clk7_en(clk7_en), .reset(reset), .cck(cck),
 		.ntsc(1'b0), .aga(1'b1), .ecs(ecs), .a1k(1'b0),
 		.data_in(data_in), .data_out(data_out), .reg_address_in(reg_address_in),

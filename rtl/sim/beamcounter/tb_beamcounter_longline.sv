@@ -69,7 +69,10 @@ module tb_beamcounter_longline;
 	end
 	always @(posedge clk) if (clk7_en) cck <= ~cck;
 
-	agnus_beamcounter dut (
+	// LONG_LINES defaults OFF in the RTL -- the alternation is not currently
+	// shipped, see the comment on the parameter. Turned on here so this bench
+	// keeps testing the feature itself.
+	agnus_beamcounter #(.LONG_LINES(1'b1)) dut (
 		.clk(clk), .clk7_en(clk7_en), .reset(reset), .cck(cck),
 		.ntsc(ntsc), .aga(1'b1), .ecs(1'b1), .a1k(1'b0),
 		.data_in(data_in), .data_out(), .reg_address_in(reg_address_in),

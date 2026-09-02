@@ -92,6 +92,46 @@ parameter VTOTAL_NTSC_VAL = 11'd262 - 11'd1; // total number of lines (PAL: 312 
 parameter VBSTOP_PAL_VAL  = 9'd25;           // vertical blanking end (PAL 26 lines, NTSC vblank 21 lines)
 parameter VBSTOP_NTSC_VAL = 9'd20;           // vertical blanking end (PAL 26 lines, NTSC vblank 21 lines)
 
+// Two accuracy features, BOTH DISABLED BY DEFAULT, because between them they
+// are the only functional video difference between this file and the last core
+// confirmed good on hardware -- and one of them broke that hardware.
+//
+// The story, because a switch with no explanation gets flipped back:
+//
+// A PAL machine (chipset byte 0x18, NTSC bit clear) running Flink showed a
+// blurred picture and an OSD drawn twice with a horizontal offset. PAL only;
+// Flink's own NTSC mode was correct. Three separate fixes were reasoned out
+// from WinUAE and shipped, and none of them changed the fault. Rolling the core
+// back to the build before this work fixed it immediately, which is what
+// finally identified the file rather than the theory.
+//
+// The mechanism, for LONG_LINES: `pal` in this module is NOT the machine's
+// video setting. It is BEAMCON0 bit 5, and any program that takes over beam
+// timing writes BEAMCON0. Flink sets VARBEAMEN; if it does not also set bit 5 --
+// which a program that programs every beam register explicitly has no reason to
+// do -- then `pal` goes to 0 on a PAL machine, the alternation below starts
+// running, and every other PAL line is 228 colour clocks instead of 227. A CRT
+// would not care. The MiSTer scaler resamples it, which is the blur, and draws
+// the OSD twice.
+//
+// That matches WinUAE, whose guard at custom.cpp:10959 is exactly
+// `!(new_beamcon0 & BEAMCON0_PAL) && !(new_beamcon0 & BEAMCON0_LOLDIS)`. Being
+// faithful to WinUAE is not sufficient here: WinUAE feeds a host window that
+// resamples freely, and this feeds a fixed-rate scaler that does not.
+//
+// HHPOSR_DECODE is disabled for a different reason: it is the ONLY other
+// functional video change on the branch, so leaving it on would mean the next
+// hardware test still has two variables in it. It is very unlikely to be the
+// fault -- a read-only ECS register nothing in the boot path touches -- but
+// "unlikely" is what the last three attempts were built on.
+//
+// To re-enable either, turn ONE of them on, fit it, and put it on the machine
+// by itself. Do not turn both on in the same build. The benches under
+// rtl/sim/beamcounter/ override these to 1'b1, so simulation coverage of both
+// features is unaffected by the default.
+parameter LONG_LINES    = 1'b0;   // NTSC 227/228 line alternation
+parameter HHPOSR_DECODE = 1'b0;   // HHPOSR ($1DA) readback
+
 //wire	[8:0] vbstop;		// vertical blanking stop
 
 //beam position output signals
@@ -161,7 +201,7 @@ always @(*) begin
 	// exactly -- decrement, ERSY case, light pen freeze and all. HHPOSW is not
 	// decoded for the same reason: with hhpos not free-running there is nothing
 	// for a write to hold.
-	else if (ecs && reg_address_in[8:1]==HHPOSR[8:1])
+	else if (HHPOSR_DECODE && ecs && reg_address_in[8:1]==HHPOSR[8:1])
 		data_out[15:0] = {8'h00, lpen_frozen
 		    ? hpos_lpen[8:1]
 		    : (|hpos[8:1] ? hpos[8:1] - 8'd1 : ersy ? 8'd0 : htotal_cck)};
@@ -333,7 +373,9 @@ wire [ 8:0] htotal  =             varbeamen ? htotal_reg  : HTOTAL_VAL << 1; // 
 
 // The last colour clock of THIS line. htotal is the short-line length, as
 // WinUAE's maxhpos_short is, and a long line runs one colour clock past it.
-wire [ 7:0] htotal_cck = htotal[8:1] + {7'd0, long_line};
+// With LONG_LINES off this is htotal[8:1] exactly, so end_of_line, htotal_out
+// and the VHPOSR wrap value are all bit-identical to the pre-accuracy core.
+wire [ 7:0] htotal_cck = htotal[8:1] + {7'd0, long_line & LONG_LINES};
 wire [ 8:0] hsstrt  = varhsyen && varbeamen ? hsstrt_reg  : HSSTRT_VAL[8:0];
 wire [ 8:0] hsstop  = varhsyen && varbeamen ? hsstop_reg  : HSSTOP_VAL[8:0];
 wire [ 8:0] hcenter = varhsyen && varbeamen ? hcenter_reg : HCENTER_VAL[8:0];
