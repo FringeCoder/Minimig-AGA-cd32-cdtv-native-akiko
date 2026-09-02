@@ -54,7 +54,7 @@ module userio
 	input      [15:0] IO_DIN,
 	output reg  [7:0] memory_config,
 	output reg  [5:0] chipset_config,
-	output reg  [3:0] floppy_config,
+	output reg  [4:0] floppy_config,	// [4] no drives at all, [3:2] count-1, [0] turbo
 	output reg [11:0] floppy_ext_drive,	// external drive per unit, 3 bits each
 	output reg [10:0] lpen_vpos,	// light-pen vertical position latch (AmigaCD, PSX GunCon)
 	output reg  [8:0] lpen_hpos,	// light-pen horizontal position latch (AmigaCD, PSX GunCon)
@@ -430,7 +430,11 @@ wire chip_cfg_sel     = (cmd[3:0] == 3); // XXXGEANT || chipset config  | G - AG
 wire cpu_cfg_sel      = (cmd[3:0] == 4); // XXXXKCTT || cpu config      | K - fast kickstart enable, C - CPU cache enable, TT - CPU type (00=68k, 01=68k10, 10=68k20)
 wire memory_cfg_sel   = (cmd[3:0] == 5); // XHFFSSCC || memory config   | H - HRTmon, FF - fast, SS - slow, CC - chip
 wire video_cfg_sel    = (cmd[3:0] == 6); // DDHHLLSS || video config    | DD - dither, HH - hires interp. filter, LL - lowres interp. filter, SS - scanline mode
-wire floppy_cfg_sel   = (cmd[3:0] == 7); // XXXXXFFS || floppy config   | FF - drive number, S - floppy speed
+// XXXNFFxS: S floppy speed, FF drive count minus one, N = the machine has NO
+// floppy drive at all. N is a fifth bit rather than a fifth value of FF because
+// FF is two bits wide on both sides of the link and count-minus-one has no
+// spare encoding -- 0 through 3 already mean one through four drives.
+wire floppy_cfg_sel   = (cmd[3:0] == 7);
 wire harddisk_cfg_sel = (cmd[3:0] == 8); // XXXXXSMC || harddisk config | S - enable slave HDD, M - enable master HDD, C - enable HDD controler
 wire joystick_cfg_sel = (cmd[3:0] == 9); // XXXXSMMX || joystick config | S - swap joysticks, MM - dig/analog/cd32
 wire floppyex01_cfg_sel = (cmd[3:0] == 10);// XXAAABBB || external floppy config, AAA/BBB = drive number (1-4), 0 = disabled
@@ -471,7 +475,7 @@ always @(posedge clk) begin
 				if (cpu_cfg_sel)      t_cpu_config <= IO_DIN[5:0];
 				if (memory_cfg_sel)   t_memory_config <= IO_DIN[7:0];
 				if (video_cfg_sel)    {blver, ar, scanline} <= {IO_DIN[11:8],IO_DIN[2:0]};
-				if (floppy_cfg_sel)   floppy_config <= IO_DIN[3:0];
+				if (floppy_cfg_sel)   floppy_config <= IO_DIN[4:0];
 				if (floppyex01_cfg_sel) floppy_ext_drive[5:0]  <= IO_DIN[5:0];
 				if (floppyex23_cfg_sel) floppy_ext_drive[11:6] <= IO_DIN[5:0];
 				if (userport_cfg_sel)   user_port_mode         <= IO_DIN[1:0];

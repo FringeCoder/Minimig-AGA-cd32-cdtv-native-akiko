@@ -596,7 +596,7 @@ wire [15:0] cart_data_out;
 wire        usrrst;				//user reset from osd interface
 wire        hires;				//hires signal from Denise for interpolation filter enable in Amber
 wire  [7:0] memory_config;		//memory configuration
-wire  [3:0] floppy_config;		//floppy drives configuration (external settings, drive number and speed)
+wire  [4:0] floppy_config;		//floppy drives configuration (no-drives flag, drive number and speed)
 wire [11:0] floppy_ext_drive;	//external floppy drive config (3 bits per drive)
 wire [10:0] lpen_vpos;			//light-pen vertical position, latched by userspace (userio.v -> agnus)
 wire  [8:0] lpen_hpos;			//light-pen horizontal position, latched by userspace (userio.v -> agnus)
@@ -771,6 +771,7 @@ paula PAULA1
 	.rdata_okk(rdata_okk),
 
 	.floppy_drives(floppy_config[3:2]),
+	.floppy_none(floppy_config[4]),
 	.floppy_ext_drive(floppy_ext_drive),
 	.floppy_speed_allowed(floppy_config[0]),
 	.floppy_speed(floppy_speed),

@@ -42,6 +42,7 @@ module tb_floppy_ready;
 	reg  [3:0]  _sel = 4'b1111;      // active low, none selected
 	reg         _motor = 1'b1;       // active low, motor off
 	reg  [1:0]  floppy_drives = 2'd0;
+	reg         floppy_none   = 1'b0;   // CD32 / CDTV: no drive at all
 
 	wire        _ready;
 
@@ -66,6 +67,7 @@ module tb_floppy_ready;
 		.IO_ENA(1'b0), .IO_STROBE(1'b0), .IO_WAIT(), .IO_DIN(16'h0000), .IO_DOUT(),
 		.fdd_led(),
 		.floppy_drives(floppy_drives),
+		.floppy_none(floppy_none),
 		.floppy_ext_drive(12'd0),
 		.floppy_speed_allowed(1'b0), .floppy_speed(),
 		.enable_mister_floppy(1'b0),          // keeps flux_inuse low, so _ready = _ready_adf
@@ -98,6 +100,7 @@ module tb_floppy_ready;
 		begin
 			@(negedge clk);
 			floppy_drives = n;
+			floppy_none   = 1'b0;
 			reset = 1'b1;
 			repeat (20) @(posedge clk);
 			@(negedge clk);
@@ -187,6 +190,58 @@ module tb_floppy_ready;
 		// ---- 8. motor off still ignores the disk on a present drive ----------
 		select_drive(1, 0);
 		check_ready("drive 1, motor off, no disk in it", 1'b1);
+
+		// ---- 9. a machine with NO drive at all -----------------------------
+		// CD32 and CDTV. floppy_none forces drive_exists to zero, so _READY
+		// never asserts however the drive is poked -- which is how the machine
+		// announces "there is nothing here": the 32-bit drive ID clocks out of
+		// _RDY as zeros instead of the $FFFFFFFF a DD drive returns, and
+		// trackdisk.device then never opens a unit and never allocates the
+		// ~19 KB chip RAM MFM buffer that goes with one.
+		//
+		// Latched during reset like the drive count, so this needs a reset.
+		@(negedge clk);
+		floppy_drives = 2'd1;          // two drives configured...
+		floppy_none   = 1'b1;          // ...and none of them exist
+		reset = 1'b1;
+		repeat (20) @(posedge clk);
+		@(negedge clk);
+		reset = 1'b0;
+		repeat (20) @(posedge clk);
+		dut.disk_present = 4'b1111;    // disks in every slot, which changes nothing
+		repeat (8) @(posedge clk);
+
+		select_drive(0, 1);
+		check_ready("no-drive machine: df0 selected, motor ON, disk present", 1'b0);
+		select_drive(0, 0);
+		check_ready("no-drive machine: df0 selected, motor off", 1'b0);
+		select_drive(1, 1);
+		check_ready("no-drive machine: df1 selected, motor ON, disk present", 1'b0);
+
+		// The other three status lines are active low and must stay INACTIVE,
+		// or the machine reports a half-present drive: track zero and write
+		// protect for something that is not there.
+		if (dut._track0 !== 1'b1) begin
+			$display("FAIL: no-drive machine asserted _track0");
+			errors = errors + 1;
+		end else $display("ok:   no-drive machine leaves _track0 inactive");
+		if (dut._wprot !== 1'b1) begin
+			$display("FAIL: no-drive machine asserted _wprot");
+			errors = errors + 1;
+		end else $display("ok:   no-drive machine leaves _wprot inactive");
+		if (dut._change !== 1'b1) begin
+			$display("FAIL: no-drive machine asserted _change");
+			errors = errors + 1;
+		end else $display("ok:   no-drive machine leaves _change inactive");
+
+		// And back again: clearing floppy_none must restore a working drive,
+		// so the flag cannot be a one-way latch that bricks the drive for the
+		// rest of the session.
+		reset_with_drives(2'd0);
+		dut.disk_present = 4'b0001;
+		repeat (8) @(posedge clk);
+		select_drive(0, 1);
+		check_ready("floppy_none cleared: df0 works again", 1'b1);
 
 		if (errors == 0) $display("RUN: PASS");
 		else             $display("RUN: FAIL (%0d)", errors);

@@ -107,6 +107,10 @@ module paula_floppy
 
 	output        fdd_led,			//disk activity LED, active when DMA is on
 	input	[1:0]   floppy_drives,	//floppy drive number
+	// The machine has NO floppy drive at all -- a CD32 or a CDTV. Separate from
+	// floppy_drives because that field is a count MINUS ONE and cannot express
+	// zero: 0 already means one drive. Latched with the count during reset.
+	input           floppy_none,
 	input [11:0]  floppy_ext_drive,   // external drive number to use AAABBBCCCDDD
 	input floppy_speed_allowed,
 	output floppy_speed,
@@ -177,6 +181,7 @@ wire        _selx;			//active whenever any drive is selected
 wire  [1:0] sel;				//selected drive number
 
 reg   [1:0] drives;			//number of currently connected floppy drives (1-4)
+reg         no_drives;		//this machine has none at all (CD32, CDTV)
 
 reg   [3:0] _disk_change;
 reg         _step_del;
@@ -468,8 +473,10 @@ end
 //active floppy drive number, updated during reset
 always @(posedge clk) begin
   if (clk7_en) begin
-  	if (reset)
-  		drives <= floppy_drives;
+  	if (reset) begin
+  		drives    <= floppy_drives;
+  		no_drives <= floppy_none;
+  	end
   end
 end
 
@@ -501,7 +508,8 @@ end
     
 // disk index pulses output
 wire index_adf;
-assign index_adf = |(~_sel & motor_on) & ~|rpm_pulse_cnt & sof;
+// Likewise the index pulse: no disk is turning if no drive exists.
+assign index_adf = ~no_drives & (|(~_sel & motor_on) & ~|rpm_pulse_cnt & sof);
 assign index = flux_inuse ? index_ext_pulse : index_adf;
 
 //--------------------------------------------------------------------------------------
@@ -647,9 +655,14 @@ endgenerate
 
 wire _change_adf, _wprot_adf, _track0_adf; //original ADF emulation signals
 //_ready,_track0 and _change signals
-assign _change_adf = &(_sel | _disk_change);
-assign _wprot_adf = &(_sel | disk_writable);
-assign  _track0_adf =&(_selx | _dsktrack0);
+// All three are active low and must stay INACTIVE when there is no drive to
+// answer. They are &(_sel | <per-drive>) forms that know nothing about
+// drive_exists, so no_drives has to appear in each one; without it a CD32 would
+// report track zero and write-protect for a drive it does not have, which is
+// exactly the kind of half-present drive that confuses a probe.
+assign _change_adf = no_drives | &(_sel | _disk_change);
+assign _wprot_adf  = no_drives | &(_sel | disk_writable);
+assign _track0_adf = no_drives | &(_selx | _dsktrack0);
 
 assign _change = (flux_inuse & ~virtualFloppyMode) ? _change_ext : _change_adf;
 assign _wprot =  virtualFloppyMode ? 1'b0 : (flux_inuse ? _wprot_ext : _wprot_adf);   // Virtual floppy is read only
@@ -701,7 +714,20 @@ assign dsktrack79 = dsktrack[sel]==82;
 // term folded in. drives[1:0] is the drive count, so drive 3 exists only at 3,
 // drive 2 from 2, drive 1 from 1, drive 0 always.
 wire _ready_adf;
-wire [3:0] drive_exists = {drives[1] & drives[0],
+//
+// no_drives forces all four off, which is what a CD32 and a CDTV actually have.
+// This is the whole mechanism, and it is the authentic one: a drive announces
+// itself by clocking a 32-bit ID out on _RDY with the motor stopped, and a
+// drive that is not there returns all ZEROS rather than the $FFFFFFFF a DD
+// drive returns. With drive_exists clear, _ready_adf never asserts, the ID
+// reads back as zeros, and trackdisk.device concludes there is no unit -- so it
+// never opens one and never allocates the MFM track buffer that goes with it.
+//
+// That buffer is the point. It is roughly 19 KB of CHIP RAM per unit, because
+// floppy DMA can only reach chip RAM, and on a 2 MB CD32 running a title that
+// wants nearly all of it that is memory the machine should never have spent.
+wire [3:0] drive_exists = no_drives ? 4'b0000 :
+                          {drives[1] & drives[0],
                            drives[1],
                            drives[1] | drives[0],
                            1'b1};
