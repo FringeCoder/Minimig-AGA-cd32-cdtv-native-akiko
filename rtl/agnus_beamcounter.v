@@ -74,6 +74,7 @@ parameter VBSTRT   = 9'h1CC;
 parameter VBSTOP   = 9'h1CE;
 parameter HSSTRT   = 9'h1DE;
 parameter BEAMCON0 = 9'h1DC;
+parameter HHPOSR   = 9'h1DA;
 parameter VSSTRT   = 9'h1E0;
 parameter HCENTER  = 9'h1E2;
 
@@ -85,11 +86,56 @@ parameter HCENTER_VAL     = 256+4+4;         // position of vsync pulse during t
 parameter VSSTRT_VAL      = 2;               // vertical sync start
 parameter VSSTOP_VAL      = 5;               // PAL vsync width: 2.5 lines (NTSC: 3 lines - not implemented)
 parameter VBSTRT_VAL      = 0;               // vertical blanking start
-parameter HTOTAL_VAL      = 8'd227 - 8'd1;   // line length of 227 CCKs in PAL mode (NTSC line length of 227.5 CCKs is not supported)
+parameter HTOTAL_VAL      = 8'd227 - 8'd1;   // line length of 227 CCKs; NTSC alternates 227/228 via long_line
 parameter VTOTAL_PAL_VAL  = 11'd312 - 11'd1; // total number of lines (PAL: 312 lines, NTSC: 262)
 parameter VTOTAL_NTSC_VAL = 11'd262 - 11'd1; // total number of lines (PAL: 312 lines, NTSC: 262)
 parameter VBSTOP_PAL_VAL  = 9'd25;           // vertical blanking end (PAL 26 lines, NTSC vblank 21 lines)
 parameter VBSTOP_NTSC_VAL = 9'd20;           // vertical blanking end (PAL 26 lines, NTSC vblank 21 lines)
+
+// Two accuracy features, BOTH DISABLED BY DEFAULT, because between them they
+// are the only functional video difference between this file and the last core
+// confirmed good on hardware -- and one of them broke that hardware.
+//
+// The story, because a switch with no explanation gets flipped back:
+//
+// A PAL machine (chipset byte 0x18, NTSC bit clear) running Flink showed a
+// blurred picture and an OSD drawn twice with a horizontal offset. PAL only;
+// Flink's own NTSC mode was correct. Three separate fixes were reasoned out
+// from WinUAE and shipped, and none of them changed the fault. Rolling the core
+// back to the build before this work fixed it immediately, which is what
+// finally identified the file rather than the theory.
+//
+// The mechanism, for LONG_LINES: `pal` in this module is NOT the machine's
+// video setting. It is BEAMCON0 bit 5, and any program that takes over beam
+// timing writes BEAMCON0. Flink sets VARBEAMEN; if it does not also set bit 5 --
+// which a program that programs every beam register explicitly has no reason to
+// do -- then `pal` goes to 0 on a PAL machine, the alternation below starts
+// running, and every other PAL line is 228 colour clocks instead of 227. A CRT
+// would not care. The MiSTer scaler resamples it, which is the blur, and draws
+// the OSD twice.
+//
+// That matches WinUAE, whose guard at custom.cpp:10959 is exactly
+// `!(new_beamcon0 & BEAMCON0_PAL) && !(new_beamcon0 & BEAMCON0_LOLDIS)`. Being
+// faithful to WinUAE is not sufficient here: WinUAE feeds a host window that
+// resamples freely, and this feeds a fixed-rate scaler that does not.
+//
+// HHPOSR_DECODE was switched off at the same time, for a different reason: it
+// was the only other functional video change on the branch, and leaving it on
+// would have put two variables into the hardware test that had to settle this.
+// That test was run on 2026-09-02 with both off -- Flink correct in PAL, save
+// and restore correct -- so the isolation has served its purpose and the
+// readback is back on. It was never implicated: a read-only ECS register that
+// nothing in the boot path touches.
+//
+// LONG_LINES stays off, and not because of doubt about the RTL. The question
+// it is waiting on is whether the MiSTer video pipeline can carry a
+// 227.5-colour-clock line at all, which is a question for the scaler and
+// video.cpp rather than for this file. Turn it on by itself, fit it, and put
+// it on the machine alone. The benches under rtl/sim/beamcounter/ override
+// both parameters to 1'b1, so simulation coverage is unaffected by either
+// default.
+parameter LONG_LINES    = 1'b0;   // NTSC 227/228 alternation -- OFF, see above
+parameter HHPOSR_DECODE = 1'b1;   // HHPOSR ($1DA) readback
 
 //wire	[8:0] vbstop;		// vertical blanking stop
 
@@ -148,7 +194,22 @@ always @(*) begin
 		// LPEN_HPOS_MIN in support/lightpen/amiga_lightpen.cpp.
 		data_out[15:0] = lpen_frozen
 		    ? {vpos_lpen[7:0], hpos_lpen[8:1]}
-		    : {vpos[7:0], |hpos[8:1] ? hpos[8:1] - 8'd1 : ersy ? 8'd0 : htotal[8:1]};
+		    : {vpos[7:0], |hpos[8:1] ? hpos[8:1] - 8'd1 : ersy ? 8'd0 : htotal_cck};
+	// HHPOSR ($1DA, ECS, read only) reports the same horizontal counter VHPOSR
+	// does, in the low byte and on its own. WinUAE custom.cpp: HHPOSR() returns
+	// the light pen latch when one is armed and hhpos otherwise, masked to
+	// 0xff; hhpos is assigned agnus_hpos every colour clock except in BEAMCON0
+	// DUAL mode, where it free-runs and HHPOSW ($1D8) can reseed it.
+	//
+	// This core does not implement DUAL mode, so outside it the two readbacks
+	// agree by construction and this mirrors the horizontal half of VHPOSR
+	// exactly -- decrement, ERSY case, light pen freeze and all. HHPOSW is not
+	// decoded for the same reason: with hhpos not free-running there is nothing
+	// for a write to hold.
+	else if (HHPOSR_DECODE && ecs && reg_address_in[8:1]==HHPOSR[8:1])
+		data_out[15:0] = {8'h00, lpen_frozen
+		    ? hpos_lpen[8:1]
+		    : (|hpos[8:1] ? hpos[8:1] - 8'd1 : ersy ? 8'd0 : htotal_cck)};
 	else
 		data_out[15:0] = 0;
 end
@@ -226,7 +287,31 @@ reg [ 8:0] htotal_reg;
 reg [ 8:0] hsstrt_reg;
 reg [ 8:0] hsstop_reg;
 reg [ 8:0] hcenter_reg;
-reg [ 8:0] hbstrt_reg; // not correct size, this should have [10:0]
+// HBSTRT and HBSTOP do carry sub-colour-clock position -- WinUAE masks them to
+// 0x7ff where the other four horizontal registers get 0xff -- but those extra
+// bits belong to a mechanism this core does not have, and they must NOT reach
+// the comparison below.
+//
+// Two different consumers, and only one of them is us. drawing.cpp's
+// update_hblank() builds denise_phbstrt_lores from bit 10, and does so ONLY
+// inside `if (exthblankon_aga)`; its else branch sets every programmed position
+// to -1. That is Denise's extended-HBLANK path, AGA only, absent here.
+//
+// What this register drives is the Agnus-side programmed blanking, and for that
+// WinUAE uses colour clocks and nothing finer -- custom.cpp keeps the raw write
+// but compares against hbstrt_cck:
+//
+//     hbstrt = value & 0x7ff;
+//     hbstrt_cck = hbstrt & 0xff;
+//     ...
+//     if (hhp == hbstrt_cck) { agnus_phblank = true; ... }
+//
+// so the stored comparison value is the colour clock shifted up, with a zero in
+// the half-colour-clock position. Feeding bit 10 in here instead shifts every
+// programmed blanking edge by half a lores pixel, which on hardware reads as a
+// blurred picture and a doubled OSD -- measured 2026-09-01, PAL, and the reason
+// this comment is longer than the code.
+reg [ 8:0] hbstrt_reg;
 reg [ 8:0] hbstop_reg;
 reg [10:0] vtotal_reg;
 reg [10:0] vsstrt_reg;
@@ -254,7 +339,7 @@ always @ (posedge clk) begin
 				HSSTRT [8:1] : hsstrt_reg  <= {data_in[ 7:0], 1'b0};
 				HSSTOP [8:1] : hsstop_reg  <= {data_in[ 7:0], 1'b0};
 				HCENTER[8:1] : hcenter_reg <= {data_in[ 7:0], 1'b0};
-				HBSTRT [8:1] : hbstrt_reg  <= {data_in[ 7:0], 1'b0}; // TODO fix this
+				HBSTRT [8:1] : hbstrt_reg  <= {data_in[ 7:0], 1'b0};
 				HBSTOP [8:1] : hbstop_reg  <= {data_in[ 7:0], 1'b0};
 				VTOTAL [8:1] : vtotal_reg  <= {data_in[10:0]};
 				VSSTRT [8:1] : vsstrt_reg  <= {data_in[10:0]};
@@ -266,8 +351,36 @@ always @ (posedge clk) begin
 	end
 end
 
+// NTSC lines are 227.5 colour clocks, which the chipset produces by alternating
+// 227 and 228. long_line is that alternation, declared here because the line
+// length below depends on it.
+//
+// WinUAE custom.cpp:
+//
+//     if (!(new_beamcon0 & BEAMCON0_PAL) && !(new_beamcon0 & BEAMCON0_LOLDIS)) {
+//         lol = lol ? false : true;
+//         linetoggle = true;
+//     } else {
+//         lol = false;
+//         linetoggle = false;
+//     }
+//     ...
+//     maxhpos = maxhpos_short + lol;
+//
+// The toggle was already here and already correct -- what was missing is the
+// second half, the line actually being a colour clock longer. That is
+// htotal_cck below, and it is what end_of_line, htotal_out and the VHPOSR wrap
+// value all use, so nothing has to know about long_line separately.
+reg long_line;
+
 // programmable display mode values
-wire [ 8:0] htotal  =             varbeamen ? htotal_reg  : HTOTAL_VAL << 1; // line length of 227 CCKs in PAL mode (NTSC line length of 227.5 CCKs is not supported)
+wire [ 8:0] htotal  =             varbeamen ? htotal_reg  : HTOTAL_VAL << 1; // line length of 227 CCKs; NTSC alternates 227/228 via long_line
+
+// The last colour clock of THIS line. htotal is the short-line length, as
+// WinUAE's maxhpos_short is, and a long line runs one colour clock past it.
+// With LONG_LINES off this is htotal[8:1] exactly, so end_of_line, htotal_out
+// and the VHPOSR wrap value are all bit-identical to the pre-accuracy core.
+wire [ 7:0] htotal_cck = htotal[8:1] + {7'd0, long_line & LONG_LINES};
 wire [ 8:0] hsstrt  = varhsyen && varbeamen ? hsstrt_reg  : HSSTRT_VAL[8:0];
 wire [ 8:0] hsstop  = varhsyen && varbeamen ? hsstop_reg  : HSSTOP_VAL[8:0];
 wire [ 8:0] hcenter = varhsyen && varbeamen ? hcenter_reg : HCENTER_VAL[8:0];
@@ -279,7 +392,10 @@ wire [10:0] vsstop  = varvsyen && varbeamen ? vsstop_reg  : VSSTOP_VAL[10:0];
 //wire [10:0] vbstrt  = varvben  && varbeamen ? vbstrt_reg  : VBSTRT_VAL[10:0];
 wire [10:0] vbstop  = varvben  && varbeamen ? vbstop_reg  : pal ? VBSTOP_PAL_VAL : VBSTOP_NTSC_VAL;
 
-assign htotal_out    = htotal;
+// The effective length, not the short-line one. agnus.v:483 wraps its DMA slot
+// lookahead at htotal[8:1], so exporting the short length would make the slot
+// grid wrap one colour clock early on every long line.
+assign htotal_out    = {htotal_cck, htotal[0]};
 assign harddis_out   = harddis || varbeamen || varvben;
 assign varbeamen_out = varbeamen;
 
@@ -294,7 +410,7 @@ assign varbeamen_out = varbeamen;
 reg end_of_line;
 always @(posedge clk) begin
 	if (clk7_en) begin
-		if (hpos[8:0]=={htotal[8:1],1'b0})
+		if (hpos[8:0]=={htotal_cck,1'b0})
 			end_of_line <= 1'b1;
 		else
 			end_of_line <= 1'b0;
@@ -315,11 +431,37 @@ end
 
 always @(cck) hpos[0] = cck;
 
-//long line signal (not used, only for better NTSC compatibility)
-reg long_line;	 // long line signal for NTSC compatibility (actually long lines are not supported yet)
+// The long-line alternation itself. Declared above, next to the line length it
+// feeds.
+//
+// VPOSW RESETS it. It does not write it from a data bit, which is what this
+// first shipped as and what put a wrong line length on a PAL screen. WinUAE's
+// actual handler, custom.cpp VPOSW():
+//
+//     // LOL is always reset when VPOSW is written to.
+//     // Implemented in all NTSC Agnus versions and ECS/AGA Agnus in NTSC mode.
+//     if (lol) {
+//         lol = false;
+//         setmaxhpos();
+//     }
+//
+// The earlier version came from custom.cpp:7712, "lol = (i & 0x0080) != 0",
+// which is NOT the register handler -- it is inside restore_custom(), reading a
+// savestate blob word by word, where the comments merely label the sequence.
+// Reading a savestate reader as if it were hardware semantics is how this got
+// written, and the same mistake in the same session also produced the HBSTRT
+// bit 10 change. If a line looks like it defines a register's behaviour, check
+// which function it is in.
+//
+// Why it mattered so much: this branch takes priority over the end-of-line
+// clear below, so on a PAL machine -- where long_line must always be 0 -- a
+// VPOSW write carrying bit 7 left it SET until the next end of line, making
+// that line 228 colour clocks instead of 227.
 always @(posedge clk) begin
 	if (clk7_en) begin
-		if (end_of_line)
+		if (reg_address_in[8:1]==VPOSW[8:1])
+			long_line <= 1'b0;
+		else if (end_of_line)
 			if (pal || (loldis && varbeamen))
 				long_line <= 1'b0;
 			else if (!(loldis && varbeamen))

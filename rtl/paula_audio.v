@@ -115,6 +115,7 @@ module paula_audio
   input  wire           strhor,         // horizontal strobe
   input  wire [  9-1:1] reg_address_in, // register address input
   input  wire [ 16-1:0] data_in,        // bus data in
+  input  wire [  8-1:0] adkcon,         // ADKCON attach bits 7:0 (period 7:4, volume 3:0)
   input  wire [  4-1:0] dmaena,         // audio dma register input
   output wire [  4-1:0] audint,         // audio interrupt request
   input  wire [  4-1:0] audpen,         // audio interrupt pending
@@ -154,6 +155,15 @@ wire  [  7-1:0] vol3;     //channel 3 volume
 wire  [ 16-1:0] ldatasum;
 wire  [ 16-1:0] rdatasum;
 
+// ADKCON attach chain. Bit n attaches channel n's volume to channel n+1, bit
+// 4+n its period; channel 3 has nothing to attach to, so its outputs go
+// nowhere. The data word travels with the strobes.
+wire  [  4-1:0] att_vol = adkcon[3:0];
+wire  [  4-1:0] att_per = adkcon[7:4];
+wire  [  4-1:0] mod_vol_stb;
+wire  [  4-1:0] mod_per_stb;
+wire  [ 16-1:0] mod_dout0, mod_dout1, mod_dout2, mod_dout3;
+
 
 //address decoder
 assign aen[0] = (reg_address_in[8:4]==AUD0BASE[8:4]) ? 1'b1 : 1'b0;
@@ -190,6 +200,14 @@ paula_audio_channel ach0
   .dmaena(dmaena[0]),
   .reg_address_in(reg_address_in[3:1]),
   .data(data_in),
+  .att_vol(att_vol[0]),
+  .att_per(att_per[0]),
+  .mod_vol_we(1'b0),
+  .mod_per_we(1'b0),
+  .mod_data(16'h0000),
+  .mod_vol_stb(mod_vol_stb[0]),
+  .mod_per_stb(mod_per_stb[0]),
+  .mod_dout(mod_dout0),
   .volume(vol0),
   .sample(sample0),
   .sample_okk(sample0_okk),
@@ -211,6 +229,14 @@ paula_audio_channel ach1
   .dmaena(dmaena[1]),
   .reg_address_in(reg_address_in[3:1]),
   .data(data_in),
+  .att_vol(att_vol[1]),
+  .att_per(att_per[1]),
+  .mod_vol_we(mod_vol_stb[0]),
+  .mod_per_we(mod_per_stb[0]),
+  .mod_data(mod_dout0),
+  .mod_vol_stb(mod_vol_stb[1]),
+  .mod_per_stb(mod_per_stb[1]),
+  .mod_dout(mod_dout1),
   .volume(vol1),
   .sample(sample1),
   .sample_okk(sample1_okk),
@@ -232,6 +258,14 @@ paula_audio_channel ach2
   .dmaena(dmaena[2]),
   .reg_address_in(reg_address_in[3:1]),
   .data(data_in),
+  .att_vol(att_vol[2]),
+  .att_per(att_per[2]),
+  .mod_vol_we(mod_vol_stb[1]),
+  .mod_per_we(mod_per_stb[1]),
+  .mod_data(mod_dout1),
+  .mod_vol_stb(mod_vol_stb[2]),
+  .mod_per_stb(mod_per_stb[2]),
+  .mod_dout(mod_dout2),
   .volume(vol2),
   .sample(sample2),
   .sample_okk(sample2_okk),
@@ -253,6 +287,14 @@ paula_audio_channel ach3
   .dmaena(dmaena[3]),
   .reg_address_in(reg_address_in[3:1]),
   .data(data_in),
+  .att_vol(att_vol[3]),
+  .att_per(att_per[3]),
+  .mod_vol_we(mod_vol_stb[2]),
+  .mod_per_we(mod_per_stb[2]),
+  .mod_data(mod_dout2),
+  .mod_vol_stb(mod_vol_stb[3]),
+  .mod_per_stb(mod_per_stb[3]),
+  .mod_dout(mod_dout3),
   .volume(vol3),
   .sample(sample3),
   .sample_okk(sample3_okk),

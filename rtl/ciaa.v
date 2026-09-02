@@ -167,6 +167,8 @@ wire       tb;              // Timer B interrupt
 wire       tmra_ovf;        // Timer A underflow signal
 
 wire       spmode;          // Serial port mode (0=input, 1=output)
+wire       ta_pb_on, ta_pb_val;   // timer A driving PB6
+wire       tb_pb_on, tb_pb_val;   // timer B driving PB7
 wire       ser_tx_irq;      // Serial transmit complete interrupt
 reg  [3:0] ser_tx_cnt;      // Serial transmit bit counter
 reg        ser_tx_run;      // Serial transmission in progress
@@ -337,9 +339,26 @@ end
 assign porta_out[3:0] = {(~ddrporta[7:6] | regporta[3:2]), (~ddrporta[1:0] | regporta[1:0])};
 
 //----------------------------------------------------------------------------------
-// Port B - Parallel port (simplified, mostly unused in Amiga)
+// Port B - Parallel port
 //----------------------------------------------------------------------------------
+// This used to have no output register at all: a write to PRB was dropped and a
+// read returned the pins whatever DDRB said, so a program could not read back
+// what it had just written. The pins go nowhere on this hardware, but the
+// register is still program-visible state and every parallel-port driver writes
+// it and reads it back.
+//
+// regportb is deliberately NOT in ss_state -- see the note in rtl/ss_state.vh.
+reg [7:0] regportb;         // Port B output register
 reg [7:0] ddrportb;         // Port B direction register
+
+// Port B output register
+always @(posedge clk)
+  if (clk7_en) begin
+    if (reset)
+      regportb[7:0] <= 8'd0;
+    else if (wr && prb)
+      regportb[7:0] <= data_in[7:0];
+  end
 
 // Port B direction register
 always @(posedge clk)
@@ -352,11 +371,21 @@ always @(posedge clk)
       ddrportb[7:0] <= (data_in[7:0]);
   end
 
+// The pin state: driven bits show the output register, undriven bits show the
+// pins, and PB6/PB7 show the timers when PBON is set. A timer overrides the
+// port register but not the direction -- PBON on an input bit still reads the
+// pin, which is what the 8520 does.
+wire [7:0] portb_pins = (portb_in & ~ddrportb) | (regportb & ddrportb);
+
+assign portb_out[7:0] = {tb_pb_on ? tb_pb_val : portb_pins[7],
+                         ta_pb_on ? ta_pb_val : portb_pins[6],
+                         portb_pins[5:0]};
+
 // Port B read multiplexer
 always @(*)
 begin
   if (!wr && prb)
-    pb_out[7:0] = portb_in[7:0];    // Read port pins
+    pb_out[7:0] = portb_out[7:0];   // Read the pin state
   else if (!wr && ddrb)
     pb_out[7:0] = (ddrportb[7:0]);  // Read direction register
   else
@@ -410,6 +439,8 @@ cia_timera tmra
   .spmode(spmode),
   .tmra_ovf(tmra_ovf),
   .irq(ta),
+  .pb_on(ta_pb_on),
+  .pb_val(ta_pb_val),
   .ss_state(ss_tmra),
   .ss_ld(ss_ld),
   .ss_ld_data(ss_ld_data[76:38])
@@ -430,6 +461,8 @@ cia_timerb tmrb
   .eclk(eclk),
   .tmra_ovf(tmra_ovf),
   .irq(tb),
+  .pb_on(tb_pb_on),
+  .pb_val(tb_pb_val),
   .ss_state(ss_tmrb),
   .ss_ld(ss_ld),
   .ss_ld_data(ss_ld_data[115:77])

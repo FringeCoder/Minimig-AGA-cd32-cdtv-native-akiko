@@ -219,12 +219,26 @@ assign t_sel_slow[2] = (cpu_address_in[23:19]==5'b1101_0) && &memory_config[3:2]
 
 assign sel_ide   = hdc_ena && cpu_address_in[23:16]==8'b1101_1010;        //IDE registers at $DA0000 - $DAFFFF	
 assign sel_gayle = hdc_ena && cpu_address_in[23:12]==12'b1101_1110_0001;  //GAYLE registers at $DE1000 - $DE1FFF
+// The clock really does claim the whole 64K: WinUAE memory.cpp maps clock_bank
+// at 0xDC for one bank with startmask 0xdc0000, so the sixteen nibble registers
+// mirror across $DC0000-$DCFFFF. That is not an over-broad decode, it is the
+// device.
+//
+// It does mean the CDTV battery RAM below sits inside it, and both selects
+// assert together for $DC8000-$DCFFFF. Resolved downstream rather than here:
+// cpu_wrapper's cpu_din mux takes cdtv_selack ahead of the chip bus, and
+// sel_cdtv_nvram is one of the terms in cdtv_selack, so an NVRAM read wins and
+// the clock's contribution to the wired-OR at minimig.v:1364 is discarded.
+//
+// Worth knowing before putting anything else in $DC1000-$DCFFFF: a device
+// without that selack short-circuit would have its data OR'd with a clock
+// nibble, and the symptom would appear in the new device rather than here.
 assign sel_rtc   = cpu_address_in[23:16]==8'b1101_1100;                   //RTC registers at $DC0000 - $DCFFFF
 assign sel_reg   = cpu_address_in[23:16]==8'b1101_1111;                   //chip registers at $DF0000 - $DFFFFF
 assign sel_cia   = cpu_address_in[23:16]==8'hBF; // $BFxxxx
 assign sel_cia_a = sel_cia & ~cpu_address_in[12];
 assign sel_cia_b = sel_cia & ~cpu_address_in[13];
-assign sel_rtg   = cpu_address_in[23:16]==8'hB8; // $B8xxxxx
+assign sel_rtg   = cpu_address_in[23:16]==8'hB8; // $B8xxxx
 assign sel_bank_1 = cpu_address_in[23:21]==3'b001;
 
 assign sel_toccata = toccata_ena && cpu_address_in[23:16]==toccata_base; // Nominally $e9xxxx

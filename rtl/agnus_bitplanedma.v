@@ -220,7 +220,33 @@ assign bplptr_sel = dma ? plane[2:0] : reg_address_in[4:2];
 // high word pointer register bank (implemented using distributed ram)
 assign bplpth_in = dma ? newpt[20:16] : data_in[4:0];
 
-// TODO high bitplane pointer probably needs a delay (writing to pointer doesn't seem to take effect next cycle ...)
+// The pointer write delay. NOT a missing delay on this register -- the scope was
+// established 2026-08-31 and it is much larger than this comment implies.
+//
+// The behaviour, from the inherited TODO file, which has it from Toni Wilen:
+//
+//     Writing to BPLxPT when exactly next cycle has DMA to matching BPLxDAT:
+//     write goes nowhere. (Same happens with sprites and blitter registers too,
+//     I assume all DMA channels have similar internal 2 cycle pipeline)
+//
+// WinUAE models it as a four-slot RGA pipeline, not as a delay on any one
+// register: custom.cpp's rga_pipe[(slot + rga_slot_first_offset) & 3], with
+// write_rga_update() capturing the pointer INTO the pipeline ahead of the access
+// and even modelling what happens when a write collides with a capture ("DMA
+// address pointer conflict causes both old and new address to become old OR
+// new"). A write that lands after the capture is simply not seen by that access,
+// which is the "goes nowhere" the TODO describes.
+//
+// Reproducing that here means giving every DMA channel -- bitplane, sprite,
+// blitter, audio, disk -- a pipelined address capture, because the TODO says the
+// same is true of all of them. That is a chipset-wide rearchitecture in the hot
+// path, on a design with 0.117 ns of setup margin, and the software that shows
+// it is the TLC PowerTrax demo, which cannot be checked here. Do not start it as
+// a one-line delay on this register: it would not reproduce the behaviour and
+// would perturb the fetch for nothing.
+//
+// (was: TODO high bitplane pointer probably needs a delay (writing to pointer
+// doesn't seem to take effect next cycle ...))
 always @ (posedge clk) begin
   if (clk7_en) begin
     if (dma || ((reg_address_in[8:5]==BPLPTBASE_REG[8:5]) && !reg_address_in[1])) // if bitplane dma cycle or bus write

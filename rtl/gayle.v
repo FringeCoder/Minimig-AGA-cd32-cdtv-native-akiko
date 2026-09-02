@@ -29,7 +29,7 @@ module gayle
 	input         rd,
 	input         wr,
 	input         sel_ide,			// $DAxxxx
-	input         sel_gayle,		// $DExxxx
+	input         sel_gayle,		// $DE1xxx -- gary.v decodes twelve bits, not eight
 	output        irq,
 	output        nrdy,				// fifo is not ready for reading 
 	input         longword,

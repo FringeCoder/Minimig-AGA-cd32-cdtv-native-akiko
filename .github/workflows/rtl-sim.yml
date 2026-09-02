@@ -5,9 +5,14 @@
 # entire session of changes to sdram_ctrl.v. Icarus runs both of these fine, so
 # there is no reason for them to be manual.
 #
-# Only the two benches that cover the memory path are here. The akiko/cdtv/
-# chipset benches in rtl/sim/ have not been tried under Icarus yet; add them as
-# they are confirmed to run rather than committing a red pipeline.
+# Nine of the ten bench directories in rtl/sim/ run here. rtl/sim/chipset is the
+# holdout -- it is ModelSim-only and has not been ported to Icarus. Add benches
+# as they are confirmed to run rather than committing a red pipeline.
+#
+# The first two steps are gates rather than benches: a standalone parse of every
+# synthesisable source, and an assertion that the CIA CNT revert is still in
+# place. Both exist because the pipeline should refuse things that people would
+# otherwise have to remember.
 name: rtl-sim
 
 on:
@@ -23,6 +28,47 @@ jobs:
 
       - name: Install Icarus Verilog and GHDL
         run: sudo apt-get update && sudo apt-get install -y iverilog ghdl
+
+      # Parse every synthesisable source standalone. Nothing else in this
+      # workflow ever parses Minimig.sv, and most of rtl/ is never parsed at
+      # all, so a plain syntax error otherwise passes CI in full and surfaces
+      # only 18 seconds into a 35-minute Quartus fit. Seconds of runtime, and it
+      # fails the cheap way. See syntax_check.sh for what it does and does not
+      # treat as an error.
+      - name: Verilog syntax gate
+        run: |
+          set -euo pipefail
+          bash syntax_check.sh
+
+      # The CIA CNT revert is permanent and will be re-applied on every future
+      # Minimig-AGA sync, so it needs a control rather than a memory.
+      #
+      # Upstream b013ce3 added the Timer A/B INMODE count-source selects but not
+      # the wiring: minimig.v drives both CIAs with .cnt_in(1'b1), so cnt_rise
+      # never pulses and selecting a CNT source stops the timer dead. It broke
+      # Flink. Reverted 2026-08-27, and again 2026-08-31 when a merge brought it
+      # back -- forgotten once already, between two syncs five days apart.
+      #
+      # The failure is near-silent: a title starts and then hangs with every
+      # data path healthy, which is the hardest possible thing to attribute.
+      #
+      # If this step fails, do NOT delete it as stale. It means a merge has
+      # re-applied b013ce3. Re-revert rtl/cia_timera.v and rtl/cia_timerb.v to
+      # the eclk forms below, or wire CNT properly first.
+      - name: CIA count source is eclk (guards the b013ce3 revert)
+        run: |
+          set -euo pipefail
+          fail=0
+          grep -qF "assign count = eclk;" rtl/cia_timera.v || {
+            echo "rtl/cia_timera.v: timer A count source is not the eclk form"; fail=1; }
+          grep -qF "assign count = tmcr[6] ? tmra_ovf : eclk;" rtl/cia_timerb.v || {
+            echo "rtl/cia_timerb.v: timer B count source is not the eclk form"; fail=1; }
+          if [ "$fail" -ne 0 ]; then
+            echo
+            echo "The CIA CNT revert has been undone. See the comment above this"
+            echo "step in .github/workflows/rtl-sim.yml before changing anything."
+            exit 1
+          fi
 
       # sdram_ctrl's chip-read burst path, store-to-load forwarding and byte-enable
       # merging. Waits on dut.sdram_state == 0, so it also covers the registered
@@ -104,6 +150,88 @@ jobs:
           set -euo pipefail
           cd rtl/sim/lightpen
           iverilog -g2012 -o tb ../../agnus_beamcounter.v tb_lightpen_latch.sv
+          vvp tb | tee out.log
+          grep -q "RUN: PASS" out.log
+
+      # HBSTRT and HBSTOP carry half-a-colour-clock position in bit 10, which the
+      # core used to drop. Also asserts that bits 9:8 stay dropped -- they are 35 ns
+      # resolution and hpos cannot express them, so a future change that folds them
+      # into the compare would move the blanking edge by a whole colour clock.
+      - name: Programmable horizontal blanking edges
+        run: |
+          set -euo pipefail
+          cd rtl/sim/beamcounter
+          iverilog -g2012 -o tb ../../agnus_beamcounter.v tb_beamcounter_hblank.sv
+          vvp tb | tee out.log
+          grep -q "RUN: PASS" out.log
+
+      # HHPOSR ($1DA) was not decoded at all. It is the horizontal half of VHPOSR
+      # on its own, ECS only, and it honours the light pen freeze -- so this also
+      # guards the equality between the two readbacks, which is only true because
+      # BEAMCON0 DUAL mode is not implemented here.
+      - name: HHPOSR readback
+        run: |
+          set -euo pipefail
+          cd rtl/sim/beamcounter
+          iverilog -g2012 -o tb_hh ../../agnus_beamcounter.v tb_beamcounter_hhposr.sv
+          vvp tb_hh | tee out_hh.log
+          grep -q "RUN: PASS" out_hh.log
+
+      # NTSC lines are 227.5 colour clocks, produced by alternating 227 and 228.
+      # long_line toggled for years with nothing consuming it. Also guards the
+      # cases that must NOT alternate -- PAL, BEAMCON0 PAL and LOLDIS.
+      - name: NTSC long lines
+        run: |
+          set -euo pipefail
+          cd rtl/sim/beamcounter
+          iverilog -g2012 -o tb_ll ../../agnus_beamcounter.v tb_beamcounter_longline.sv
+          vvp tb_ll | tee out_ll.log
+          grep -q "RUN: PASS" out_ll.log
+
+      # ADKCON attach: one audio channel modulating the next. Covers both
+      # directions of the old failure -- the modulator being heard when it should
+      # be silent, and the modulation not happening -- plus channel 3, which is
+      # silenced by its attach bits even though it has nothing to modulate.
+      - name: Paula audio channel modulation
+        run: |
+          set -euo pipefail
+          cd rtl/sim/paula
+          iverilog -g2012 -o tb             ../../paula_audio.v ../../paula_audio_channel.v             ../../paula_audio_mixer.v ../../paula_audio_volume.v             tb_paula_audio_attach.sv
+          vvp tb | tee out.log
+          grep -q "RUN: PASS" out.log
+
+      # cpu_wrapper's save state park, stock-speed throttle and chip-slot guard.
+      # All three are things an upstream merge can remove without anyone
+      # noticing, and the park came within one conflict resolution of exactly
+      # that at 74d6ce0. The two CPU cores are stubbed -- see cpu_core_stubs.v.
+      - name: CPU wrapper park and throttle
+        run: |
+          set -euo pipefail
+          cd rtl/sim/cpuwrap
+          iverilog -g2012 -o tb             ../../cpu_wrapper.v ../../memory_router.v             cpu_core_stubs.v tb_cpu_wrapper_park.sv
+          vvp tb | tee out.log
+          grep -q "RUN: PASS" out.log
+
+      # Three of the four things ciaa.v's 2005 header lists as not implemented:
+      # CIA-A's port B, PB6/PB7 driven by the timers, and CIA-B's serial data
+      # register. The fourth is the CNT count-source selects, which stay
+      # unimplemented and are guarded by their own step above.
+      - name: CIA port B, PB6/PB7 and the CIA-B serial register
+        run: |
+          set -euo pipefail
+          cd rtl/sim/cia
+          iverilog -g2012 -o tb             ../../ciaa.v ../../ciab.v ../../cia_timera.v ../../cia_timerb.v             ../../cia_int.v ../../cia_timerd.v tb_cia_leftovers.sv
+          vvp tb | tee out.log
+          grep -q "RUN: PASS" out.log
+
+      # The drive _READY line. Covers the fix (a spinning empty drive must not
+      # report ready) and, just as importantly, the 2008 behaviour it must not
+      # break: _READY still answers _SEL with the motor stopped.
+      - name: Floppy drive ready
+        run: |
+          set -euo pipefail
+          cd rtl/sim/floppy
+          iverilog -g2012 -o tb -I ../..             ../../paula_floppy.v ../../MiSTerFloppy*.v ../../paula_floppy_fifo.v             tb_floppy_ready.sv
           vvp tb | tee out.log
           grep -q "RUN: PASS" out.log
 
