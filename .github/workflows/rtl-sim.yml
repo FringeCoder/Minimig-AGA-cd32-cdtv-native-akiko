@@ -188,6 +188,24 @@ jobs:
           vvp tb_ll | tee out_ll.log
           grep -q "RUN: PASS" out_ll.log
 
+      # Every line of a frame reads back its own line number, PAL and NTSC. The
+      # other beamcounter benches each pin one feature and none of them sweeps a
+      # frame, so a vertical readback that reports the same line forever, or that
+      # drops the top three bits above line 255, would pass all of them. Both
+      # failures are silent -- every value returned is a plausible line number.
+      #
+      # Added while running the vAmigaTS VPOS suite for T7, where probe1, probe2
+      # and ersy1 on hardware all reported line 49 for lines 224-254. This bench
+      # passes, which is what makes it worth keeping: agnus_beamcounter is not
+      # where that comes from, and this holds that answer still.
+      - name: VPOSR/VHPOSR report every line of a frame
+        run: |
+          set -euo pipefail
+          cd rtl/sim/beamcounter
+          iverilog -g2012 -o tb_vp ../../agnus_beamcounter.v tb_beamcounter_vposr_sweep.sv
+          vvp tb_vp | tee out_vp.log
+          grep -q "RUN: PASS" out_vp.log
+
       # ADKCON attach: one audio channel modulating the next. Covers both
       # directions of the old failure -- the modulator being heard when it should
       # be silent, and the modulation not happening -- plus channel 3, which is
