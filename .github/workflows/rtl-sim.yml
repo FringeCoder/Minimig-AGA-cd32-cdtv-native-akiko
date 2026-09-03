@@ -206,6 +206,23 @@ jobs:
           vvp tb_vp | tee out_vp.log
           grep -q "RUN: PASS" out_vp.log
 
+      # The copper had no bench at all, which left the one part of Agnus that
+      # every Amiga program steers the display with uncovered: a WAIT firing on
+      # the wrong line, or once and then never again, passed CI in full.
+      #
+      # Drives the real beamcounter into the real copper, wired as agnus.v wires
+      # them, and runs probe1's actual list from the vAmigaTS VPOS suite --
+      # sixteen WAITs, one every second line from $E0 to $FE. On hardware that
+      # list lost fifteen of its sixteen writes. Here all sixteen release on
+      # their own line, so the copper's WAIT is not where that comes from.
+      - name: Copper WAIT fires on the line it names
+        run: |
+          set -euo pipefail
+          cd rtl/sim/copper
+          iverilog -g2012 -o tb ../../agnus_beamcounter.v ../../agnus_copper.v tb_copper_wait.sv
+          vvp tb | tee out.log
+          grep -q "RUN: PASS" out.log
+
       # ADKCON attach: one audio channel modulating the next. Covers both
       # directions of the old failure -- the modulator being heard when it should
       # be silent, and the modulation not happening -- plus channel 3, which is
