@@ -215,11 +215,15 @@ jobs:
       # sixteen WAITs, one every second line from $E0 to $FE. On hardware that
       # list lost fifteen of its sixteen writes. Here all sixteen release on
       # their own line, so the copper's WAIT is not where that comes from.
+      #
+      # Runs that list twice: once with every slot granted, and once with the
+      # real agnus_bitplanedma competing, configured as probe.i configures it.
+      # Both pass, so slot contention from bitplanes is not it either.
       - name: Copper WAIT fires on the line it names
         run: |
           set -euo pipefail
           cd rtl/sim/copper
-          iverilog -g2012 -o tb ../../agnus_beamcounter.v ../../agnus_copper.v tb_copper_wait.sv
+          iverilog -g2012 -o tb             ../../agnus_beamcounter.v ../../agnus_copper.v ../../agnus_bitplanedma.v             tb_copper_wait.sv
           vvp tb | tee out.log
           grep -q "RUN: PASS" out.log
 

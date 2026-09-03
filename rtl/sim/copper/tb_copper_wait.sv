@@ -34,6 +34,11 @@ module tb_copper_wait;
 	localparam [8:1] A_COPJMP1 = 8'h44;   // 9'h088 >> 1
 	localparam [8:1] A_COPINS  = 8'h46;   // 9'h08c >> 1
 	localparam [8:1] A_COLOR00 = 8'h90;   // 9'h180 >> 1
+	localparam [8:1] A_DIWSTRT = 8'h47;   // 9'h08e >> 1
+	localparam [8:1] A_DIWSTOP = 8'h48;   // 9'h090 >> 1
+	localparam [8:1] A_DDFSTRT = 8'h49;   // 9'h092 >> 1
+	localparam [8:1] A_DDFSTOP = 8'h4A;   // 9'h094 >> 1
+	localparam [8:1] A_BPLCON0 = 8'h80;   // 9'h100 >> 1
 
 	reg         clk = 0;
 	reg         clk7_en = 0;
@@ -83,12 +88,34 @@ module tb_copper_wait;
 	wire [7:0] hpos_slot_hi = (hpos[8:1] == htotal[8:1]) ? 8'd0 : hpos[8:1] + 8'd1;
 	wire [8:0] hpos_slot    = {hpos_slot_hi, hpos[0]};
 
-	// Always grant the copper its slot: no bitplane, sprite or blitter DMA
-	// competes here. That is deliberately generous -- a WAIT that misses under
-	// no contention at all is a WAIT that is broken, not one that lost a slot.
+	// Bitplane DMA, the copper's competition. agnus.v gives it priority over the
+	// copper outright -- ena_cop = ~dma_bpl, and the arbiter's if-else chain
+	// reaches dma_cop only when dma_bpl has not claimed the cycle. Held off for
+	// the first two cases so a WAIT is tested without contention first, then
+	// enabled for the third.
+	reg  bpl_dmaena = 0;
+	wire dma_bpl;
+
+	agnus_bitplanedma bpd (
+		.clk(clk), .clk7_en(clk7_en), .reset(reset),
+		.harddis(1'b0), .aga(1'b1), .ecs(1'b1), .a1k(1'b0),
+		.sof(eof), .dmaena(bpl_dmaena),
+		.vpos(vpos), .hpos(hpos), .hpos_slot(hpos_slot),
+		.hde(), .dma(dma_bpl),
+		.reg_address_in(reg_address_in), .reg_address_out(),
+		.data_in(data_in), .address_out()
+	);
+
+	// Sprites, disk, audio and the blitter are not modelled: none of the
+	// vAmigaTS programs in scope here runs them. Refresh is the one remaining
+	// gap in this arbitration -- it takes the first slots of every line, ahead
+	// of everything, and is not modelled.
+	wire ena_cop = ~dma_bpl;
+	wire ack_cop = reqdma & ena_cop;
+
 	agnus_copper cp (
 		.clk(clk), .clk7_en(clk7_en), .reset(reset), .ecs(1'b1),
-		.reqdma(reqdma), .ackdma(reqdma), .enadma(1'b1),
+		.reqdma(reqdma), .ackdma(ack_cop), .enadma(ena_cop),
 		.sof(eof), .blit_busy(1'b0),
 		.vpos(vpos[7:0]), .hpos(hpos), .hpos_slot(hpos_slot),
 		.data_in(data_in), .reg_address_in(reg_address_in),
@@ -109,6 +136,26 @@ module tb_copper_wait;
 		bc.vbl_int     = 1'b0;
 		bc._hsync      = 1'b1;
 		bc._vsync      = 1'b1;
+
+		// agnus_bitplanedma has no reset on the state that feeds its `dma`
+		// output, so at time zero dma_bpl is X -- and X on ena_cop stops the
+		// copper dead whether or not bitplane DMA is meant to be running. That
+		// is a harness artefact, not the DUT: on real hardware these come up
+		// from power-on with defined levels. Poked to the same zeros the reset
+		// path would leave, exactly as the beamcounter block above does.
+		bpd.ddfrun         = 1'b0;
+		bpd.ddfseq         = 5'd0;
+		bpd.plane          = 5'd0;
+		bpd.ddfena         = 1'b0;
+		bpd.ddfena_0       = 1'b0;
+		bpd.hardena        = 1'b0;
+		bpd.softena        = 1'b0;
+		bpd.bplcon0        = 6'd0;
+		bpd.bplcon0_delayed = 6'd0;
+		bpd.dmaena_delayed = 2'b00;
+		bpd.ddfstrt        = 7'd0;
+		bpd.ddfstop        = 7'd0;
+		bpd.hde            = 1'b0;
 	end
 
 	// ---- the copper list ---------------------------------------------------
@@ -262,6 +309,43 @@ module tb_copper_wait;
 		end
 		if (move_count == 16 && errors == 0)
 			$display("ok:   probe1's sixteen WAITs released on lines 224..254");
+
+		// ---- 3. the same list, with bitplane DMA competing --------------------
+		// probe.i sets DDFSTRT $38, DDFSTOP $D0, DIWSTRT $2C81, DIWSTOP $F4C1,
+		// BPL1MOD 0, and enables bitplane DMA; probe1's copper then raises
+		// BPLCON0 to $2200, which is BPU=2. So every one of these WAITs releases
+		// into a line that is fetching two bitplanes, and the copper has to take
+		// its slot around them. Case 2 above grants the copper everything and is
+		// the control for this one.
+		//
+		// DIWSTOP $F4C1 puts the display window's last line at 244, so waits at
+		// 224..244 land inside the fetch and 246..254 land past it. If only the
+		// contended ones misbehave, that split will show in which indices fail.
+		host_wr(A_DDFSTRT, 16'h0038);
+		host_wr(A_DDFSTOP, 16'h00D0);
+		host_wr(A_DIWSTRT, 16'h2C81);
+		host_wr(A_DIWSTOP, 16'hF4C1);
+		host_wr(A_BPLCON0, 16'h2200);   // BPU = 2, as probe1's copper sets it
+		bpl_dmaena = 1'b1;
+
+		move_count = 0;
+		start_copper;
+		wait_lines(320);
+
+		if (move_count !== 16) begin
+			$display("FAIL: with bitplane DMA, probe1 list executed %0d of 16 MOVEs",
+			         move_count);
+			errors = errors + 1;
+		end
+		for (i = 0; i < move_count && i < 16; i = i + 1) begin
+			if (move_line[i] !== 224 + i*2) begin
+				$display("FAIL: with bitplane DMA, WAIT %0d released on line %0d, want %0d",
+				         i, move_line[i], 224 + i*2);
+				errors = errors + 1;
+			end
+		end
+		if (move_count == 16)
+			$display("ok:   under bitplane DMA the sixteen WAITs still release on 224..254");
 
 		if (errors == 0) $display("RUN: PASS");
 		else             $display("RUN: FAIL (%0d)", errors);
