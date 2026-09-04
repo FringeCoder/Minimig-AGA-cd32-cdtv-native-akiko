@@ -216,14 +216,28 @@ jobs:
       # list lost fifteen of its sixteen writes. Here all sixteen release on
       # their own line, so the copper's WAIT is not where that comes from.
       #
-      # Runs that list twice: once with every slot granted, and once with the
-      # real agnus_bitplanedma competing, configured as probe.i configures it.
-      # Both pass, so slot contention from bitplanes is not it either.
+      # Runs that list three ways: with every slot granted, with the real
+      # agnus_bitplanedma competing as probe.i configures it, and once more
+      # writing INTREQ through paula_intcontroller so each of the sixteen
+      # becomes a level 1 request. All pass, so neither slot contention nor the
+      # interrupt controller accounts for what the hardware did.
+      #
+      # The contention case asserts a bitplane DMA cycle count before it will
+      # pass. It has already been vacuous twice -- once from a bus race in the
+      # harness and once from the timescale trap below -- and a vacuous run
+      # reads exactly like a real one.
       - name: Copper WAIT fires on the line it names
         run: |
           set -euo pipefail
           cd rtl/sim/copper
-          iverilog -g2012 -o tb             ../../agnus_beamcounter.v ../../agnus_copper.v ../../agnus_bitplanedma.v             tb_copper_wait.sv
+          # The bench file MUST come first. agnus_bitplanedma.v has no
+          # `timescale of its own and writes every register with <= #1, so
+          # compiled after a file that sets one it inherits the default
+          # instead, its NBAs land outside the run, and every register write
+          # to it silently does nothing -- it sits with all registers at zero
+          # looking like configured hardware with nothing to do. Putting the
+          # bench first applies its 1ns/1ps to the RTL that follows.
+          iverilog -g2012 -o tb tb_copper_wait.sv             ../../agnus_beamcounter.v ../../agnus_copper.v             ../../agnus_bitplanedma.v ../../paula_intcontroller.v
           vvp tb | tee out.log
           grep -q "RUN: PASS" out.log
 

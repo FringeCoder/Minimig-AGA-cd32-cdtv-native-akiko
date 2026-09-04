@@ -39,6 +39,8 @@ module tb_copper_wait;
 	localparam [8:1] A_DDFSTRT = 8'h49;   // 9'h092 >> 1
 	localparam [8:1] A_DDFSTOP = 8'h4A;   // 9'h094 >> 1
 	localparam [8:1] A_BPLCON0 = 8'h80;   // 9'h100 >> 1
+	localparam [8:1] A_INTENA  = 8'h4D;   // 9'h09a >> 1
+	localparam [8:1] A_INTREQ  = 8'h4E;   // 9'h09c >> 1
 
 	reg         clk = 0;
 	reg         clk7_en = 0;
@@ -122,6 +124,55 @@ module tb_copper_wait;
 		.reg_address_out(reg_address_cop), .address_out(address_cop)
 	);
 
+	// ---- Paula's interrupt controller --------------------------------------
+	// The copper's MOVE to INTREQ has to become a level 1 request, and that is
+	// the last piece of RTL between the copper and the CPU. Everything else
+	// feeding it is tied off: this bench is about the copper's write.
+	//
+	// The emulated handler clears INTREQ through a mux on Paula's own address
+	// input rather than through the shared bus, so servicing an interrupt can
+	// never collide with a copper fetch in progress.
+	reg         int_clear = 0;
+	wire [8:1]  pic_addr = int_clear ? A_INTREQ : reg_address_in;
+	wire [15:0] pic_data = int_clear ? 16'h0004 : data_in;
+	wire [2:0]  ipl;
+
+	paula_intcontroller pic (
+		.clk(clk), .clk7_en(clk7_en), .reset(reset),
+		.reg_address_in(pic_addr), .data_in(pic_data), .data_out(),
+		.rxint(1'b0), .txint(1'b0), .vblint(1'b0),
+		.int2(1'b0), .int3(1'b0), .int6(1'b0),
+		.blckint(1'b0), .syncint(1'b0), .audint(4'b0000),
+		.audpen(), .rbfmirror(), ._ipl(ipl),
+		.ss_intreq(), .ss_intena()
+	);
+
+	// _ipl is active low: 6 is level 1, which is where SOFT (INTREQ bit 2)
+	// lands in the priority encoder. 7 is no request.
+	localparam [2:0] IPL_LEVEL1 = 3'd6;
+
+	integer int_raises = 0;
+	integer int_line [0:31];
+	reg     watch_int = 0;
+
+	// Count RISING edges of the request. _ipl is registered and the clear takes
+	// a further cycle to propagate, so a level-sensitive count sees every raise
+	// twice -- which is exactly what it did before this edge detect.
+	reg ipl_latched = 0;
+
+	always @(posedge clk) if (clk7_en) begin
+		if (int_clear)
+			int_clear <= 1'b0;
+		else if (watch_int && ipl == IPL_LEVEL1 && !ipl_latched && int_raises < 32) begin
+			int_line[int_raises] <= vpos;
+			int_raises           <= int_raises + 1;
+			int_clear            <= 1'b1;   // the handler services it
+			ipl_latched          <= 1'b1;
+		end
+		else if (ipl != IPL_LEVEL1)
+			ipl_latched <= 1'b0;
+	end
+
 	initial begin
 		bc.vpos        = 11'd0;
 		bc.hpos        = 9'd0;
@@ -169,29 +220,44 @@ module tb_copper_wait;
 	endtask
 
 	// ---- the fetch path ----------------------------------------------------
-	// In the real machine the copper drives address_out and COPINS on its
-	// granted slot, and the chip bus writes the fetched word back to COPINS.
-	// Reproduced here: on a granted cycle, latch the address, then present the
-	// word as a COPINS write on the following clk7_en.
+	// On a granted slot the copper drives address_out together with the
+	// register the fetched word belongs to, and the chip bus writes that word
+	// to that register. For an instruction fetch reg_address_out is COPINS; for
+	// the second word of a MOVE it is the destination register itself, which is
+	// how a MOVE reaches its target with no separate write cycle.
+	//
+	// The harness therefore latches reg_address_out alongside the address and
+	// replays both. Driving COPINS unconditionally, which is what this did at
+	// first, executes the list correctly but silently drops every MOVE on the
+	// floor -- the WAIT tests still pass and nothing downstream ever sees a
+	// write.
 	reg        fetch_pending = 0;
 	reg [20:1] fetch_addr = 0;
-	reg        feeding = 0;
+	reg [8:1]  fetch_dest = 0;
 
+	// ONE writer for reg_address_in/data_in. When the host task drove them
+	// directly, its blocking assignment raced this block's non-blocking idle
+	// assignment in the same timestep and lost -- the NBA landed afterwards and
+	// reset the address to $FF before any module sampled it, so every host
+	// register write was silently discarded. Everything the host configures now
+	// goes through here.
 	always @(posedge clk) if (clk7_en) begin
-		feeding <= 1'b0;
-		if (fetch_pending) begin
-			reg_address_in <= A_COPINS;
+		if (host_active) begin
+			reg_address_in <= host_addr;
+			data_in        <= host_data;
+		end
+		else if (fetch_pending) begin
+			reg_address_in <= fetch_dest;
 			data_in        <= cmem[fetch_addr[8:1]];
 			fetch_pending  <= 1'b0;
-			feeding        <= 1'b1;
 		end
-		else if (!driving_host) begin
-			// host writes hold the bus themselves; otherwise idle it
+		else begin
 			reg_address_in <= 8'hFF;
 		end
 
-		if (cp.dma_ack && cp.selins && !fetch_pending) begin
+		if (cp.dma_ack && (cp.selins || cp.selreg) && !fetch_pending) begin
 			fetch_addr    <= address_cop;
+			fetch_dest    <= reg_address_cop;
 			fetch_pending <= 1'b1;
 		end
 	end
@@ -199,6 +265,9 @@ module tb_copper_wait;
 	// ---- observing MOVEs ---------------------------------------------------
 	// selreg without selins is a MOVE putting a chip register address on the
 	// bus. Record the beam position of each one.
+	integer  bpl_cycles = 0;
+	always @(posedge clk) if (clk7_en) if (dma_bpl) bpl_cycles = bpl_cycles + 1;
+
 	integer  move_count = 0;
 	integer  move_line  [0:31];
 	integer  move_cck   [0:31];
@@ -212,18 +281,20 @@ module tb_copper_wait;
 	end
 
 	// ---- host register writes ----------------------------------------------
-	reg driving_host = 0;
+	reg        host_active = 0;
+	reg [8:1]  host_addr = 0;
+	reg [15:0] host_data = 0;
 
 	task host_wr(input [8:1] a, input [15:0] d);
 		begin
 			@(posedge clk); while (!clk7_en) @(posedge clk);
-			driving_host   = 1'b1;
-			reg_address_in = a;
-			data_in        = d;
+			host_addr   = a;
+			host_data   = d;
+			host_active = 1'b1;
 			@(posedge clk); while (!clk7_en) @(posedge clk);
 			@(posedge clk); while (!clk7_en) @(posedge clk);
-			driving_host   = 1'b0;
-			reg_address_in = 8'hFF;
+			@(posedge clk); while (!clk7_en) @(posedge clk);
+			host_active = 1'b0;
 			@(posedge clk);
 		end
 	endtask
@@ -329,8 +400,19 @@ module tb_copper_wait;
 		bpl_dmaena = 1'b1;
 
 		move_count = 0;
+		bpl_cycles = 0;
 		start_copper;
 		wait_lines(320);
+
+		// Without this the case is vacuous: if the display registers never
+		// landed, bitplane DMA never fetches and this is just case 2 again.
+		if (bpl_cycles < 1000) begin
+			$display("FAIL: bitplane DMA took only %0d cycles -- no real contention",
+			         bpl_cycles);
+			errors = errors + 1;
+		end
+		else
+			$display("ok:   bitplane DMA took %0d cycles over the frame", bpl_cycles);
 
 		if (move_count !== 16) begin
 			$display("FAIL: with bitplane DMA, probe1 list executed %0d of 16 MOVEs",
@@ -346,6 +428,51 @@ module tb_copper_wait;
 		end
 		if (move_count == 16)
 			$display("ok:   under bitplane DMA the sixteen WAITs still release on 224..254");
+
+		// ---- 4. probe1's list writing INTREQ, through Paula -------------------
+		// The list probe1 actually runs: sixteen WAITs, each followed by
+		// MOVE INTREQ,$8004 -- bit 15 set to raise, bit 2 SOFT, which the
+		// priority encoder maps to level 1. Every one has to become a request
+		// the CPU could take, and each is serviced before the next arrives.
+		//
+		// This is the last piece of RTL between the copper and the CPU. If it
+		// passes, everything on our side of probe1 is clean and what remains is
+		// the CPU core taking the interrupt -- fx68k on the A500 the suite was
+		// run on, which is third-party and not testable here.
+		bpl_dmaena = 1'b0;
+		host_wr(A_INTENA, 16'hC004);   // SET, master enable, SOFT
+
+		for (i = 0; i < 256; i = i + 1) cmem[i] = 16'hFFFE;
+		for (i = 0; i < 16; i = i + 1) begin
+			put(i*4 + 0, {8'hE0 + i[7:0]*8'd2, 8'h51 + i[7:0]*8'd2});
+			put(i*4 + 1, 16'hFFFE);
+			put(i*4 + 2, {8'h00, A_INTREQ} << 1);   // MOVE INTREQ
+			put(i*4 + 3, 16'h8004);                 // set SOFT
+		end
+		put(64, 16'hFFFF); put(65, 16'hFFFE);
+
+		move_count = 0;
+		int_raises = 0;
+		watch_int  = 1'b1;
+		start_copper;
+		wait_lines(320);
+		watch_int  = 1'b0;
+
+		if (int_raises !== 16) begin
+			$display("FAIL: copper raised level 1 %0d times, want 16", int_raises);
+			errors = errors + 1;
+		end
+		for (i = 0; i < int_raises && i < 16; i = i + 1) begin
+			// The request is sampled a cycle or two after the MOVE lands, so
+			// allow the line it is seen on to be the WAIT's line or the next.
+			if (int_line[i] < 224 + i*2 || int_line[i] > 225 + i*2) begin
+				$display("FAIL: level 1 raise %0d seen on line %0d, want %0d",
+				         i, int_line[i], 224 + i*2);
+				errors = errors + 1;
+			end
+		end
+		if (int_raises == 16)
+			$display("ok:   sixteen copper INTREQ writes each raised level 1");
 
 		if (errors == 0) $display("RUN: PASS");
 		else             $display("RUN: FAIL (%0d)", errors);
