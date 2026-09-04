@@ -241,6 +241,29 @@ jobs:
           vvp tb | tee out.log
           grep -q "RUN: PASS" out.log
 
+      # Whole-Agnus integration. The isolated benches above all pass, so this
+      # runs probe1's copper list against the real agnus.v, where refresh,
+      # disk, audio, sprite, bitplane, copper and blitter arbitrate through the
+      # actual priority chain and the CPU gets the bus only on cycles no channel
+      # claims. Refresh is the specific gap it closes -- it takes the first
+      # slots of every line ahead of everything and nothing else modelled it.
+      #
+      # Bus wiring is copied from the machine, not invented: gary.v:141 gives
+      # Agnus chip RAM on its own DMA slots and the CPU's data otherwise, and
+      # Paula sits on reg_address_out as minimig.v wires it.
+      #
+      # Asserts refresh and bitplane cycle counts before it will pass. A bench
+      # whose register writes silently went nowhere reads exactly like a
+      # working one -- that has happened twice here already.
+      - name: Agnus arbitration carries the copper's INTREQ writes
+        run: |
+          set -euo pipefail
+          cd rtl/sim/agnus
+          # Bench first: see the timescale note on the copper bench above.
+          iverilog -g2012 -o tb tb_agnus_copper_int.sv             ../../agnus*.v ../../paula_intcontroller.v
+          vvp tb | tee out.log
+          grep -q "RUN: PASS" out.log
+
       # ADKCON attach: one audio channel modulating the next. Covers both
       # directions of the old failure -- the modulator being heard when it should
       # be silent, and the modulation not happening -- plus channel 3, which is
