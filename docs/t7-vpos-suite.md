@@ -158,10 +158,53 @@ Two benches came out of it, both in CI, and **both pass**:
   `$E051`-`$FE6F`, releases all sixteen MOVEs on lines 224-254. The copper's
   WAIT is not the fault either.
 
-So the cause is still open, and it is not in either of the two places that were
-worth suspecting first. What is not yet covered: the interrupt path, and DMA
-contention beyond bitplanes -- refresh in particular, which takes the first
+## What was run on 2026-09-04
+
+**The A1200 differential, and why it is void.** A500 uses fx68k, A1200 and CD32
+use TG68K, so the same ADF on both was meant to separate a CPU-specific
+interrupt latency from everything else. It does not work: `probe1` on A1200
+renders its title correctly positioned -- better than A500, which duplicated it
+and rolled the frame -- but prints no value rows at all, and the background is a
+noise field rather than blue. `probe2` on A1200 renders text for roughly 100 ms,
+about five frames, and then the display dies. Both programs misbehave on AGA, in
+different ways, so nothing can be attributed to the CPU through them. These are
+OCS/ECS programs and vAmigaTS ships A500 references only; running them on AGA is
+legitimate as a differential but only while the program still functions there.
+
+**The copper bench grew two more cases, and both pass.**
+
+- probe1's list again with the real `agnus_bitplanedma` competing, configured
+  exactly as `probe.i` does. Bitplane contention is not the fault.
+- probe1's list writing `INTREQ $8004` through `paula_intcontroller`. All
+  sixteen become a level 1 request, each serviced before the next. The interrupt
+  controller is not the fault.
+
+## Where that leaves it
+
+Eliminated, each with a bench in CI: the VPOSR/VHPOSR readback, the copper's
+WAIT, bitplane DMA contention, and the copper-to-Paula interrupt path.
+
+**Do not assume the CPU next.** It was the obvious remaining suspect and the
+hardware argues against it: on A500 `probe2` delivered all sixteen, and its
+sixteen INTREQ writes are back-to-back, far tighter than probe1's two-lines
+apart. A core that services sixteen in rapid succession does not miss fifteen
+spread over thirty lines.
+
+What remains is integration -- full `agnus.v` arbitration with the CPU and
+refresh competing for slots, which no bench here models. Refresh takes the first
 slots of every line ahead of everything.
+
+**Three harness faults were fixed along the way, and every one of them produced
+output that read as a finding.** They are documented at the sites and in the
+commits, but the pattern is worth carrying: a MOVE routed to the wrong register
+still passed the WAIT assertions; two writers on one bus made every host
+register write vanish and reported "copper raised level 1 0 times"; and
+`agnus_bitplanedma.v` has no `timescale of its own while writing every register
+with `<= #1`, so compiled after a file that sets one it silently ignores every
+write. The last two each independently made the bitplane contention case
+vacuous, and a vacuous pass is indistinguishable from a real one. That case now
+counts bitplane DMA cycles and fails below 1000; the real figure is 8000 per
+frame against 0 when either fault is present.
 
 ## Scoring sheet
 
