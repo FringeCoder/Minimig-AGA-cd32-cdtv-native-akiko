@@ -190,9 +190,27 @@ sixteen INTREQ writes are back-to-back, far tighter than probe1's two-lines
 apart. A core that services sixteen in rapid succession does not miss fifteen
 spread over thirty lines.
 
-What remains is integration -- full `agnus.v` arbitration with the CPU and
-refresh competing for slots, which no bench here models. Refresh takes the first
-slots of every line ahead of everything.
+Integration was the next candidate and it has now been tested.
+`rtl/sim/agnus/tb_agnus_copper_int.sv` runs probe1's list against the real
+`agnus.v` -- refresh, disk, audio, sprite, bitplane, copper and blitter
+arbitrating through the actual priority chain, with `probe.i`'s display setup
+and DMACON sequence. All sixteen writes reach the bus on their own line and all
+sixteen raise level 1, against 1276 refresh cycles and 8000 bitplane cycles in
+the same frame. **Agnus is not the fault either.**
+
+So five benches now cover this and every one passes. What is left, and where the
+fault must therefore live:
+
+- **The CPU competing for chip RAM while the list runs.** Nothing executes code
+  in any of these benches; the CPU only writes setup registers. On hardware
+  probe1's own wait loop is running throughout.
+- **The CPU core taking the interrupt.** fx68k on A500. Argued against by
+  probe2 delivering sixteen back-to-back on the same machine, but not excluded.
+- **Denise**, and **real chip RAM latency** -- bench reads are combinational.
+
+A useful next step, if this is picked up again, is the one thing never tried:
+A/B an older `.rbf` to find out whether probe1 ever worked on this core. Every
+result here is from one netlist.
 
 **Three harness faults were fixed along the way, and every one of them produced
 output that read as a finding.** They are documented at the sites and in the
